@@ -35,9 +35,6 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
     uint8_t bits[148];
     uint32_t p51 = fn % 51;
     char type;
-    static int sch_only = -1;
-    if (sch_only < 0) { const char *e = getenv("CELLULE_SCH_ONLY"); sch_only = (e && *e=='1') ? 1 : 0; }
-    if (sch_only) p51 = 1;   /* diag : force la position SCH sur toutes les trames */
     if (p51 % 10 == 0 && p51 <= 40) {
         memset(bits, 0, sizeof(bits));
         type = 'F';

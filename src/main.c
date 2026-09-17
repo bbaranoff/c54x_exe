@@ -149,6 +149,12 @@ int main(int argc, char **argv)
         { const char *e = getenv("CALYPSO_C54X_IRQ_LEVEL");
           if (!e) setenv("CALYPSO_C54X_IRQ_LEVEL", "1", 1);
           else if (!*e) unsetenv("CALYPSO_C54X_IRQ_LEVEL"); }
+        /* [2026-09-17] chaine reelle (pas d'injection --iq) : livraison directe
+         * des bursts du pont/BTS (le match FN bufferise echoue car FN device !=
+         * FN virtuelle). Surchargeable par CALYPSO_BSP_DIRECT_FEED explicite. */
+        if ((!iq_mode || !*iq_mode || !strcmp(iq_mode, "none")) &&
+            !getenv("CALYPSO_BSP_DIRECT_FEED"))
+            setenv("CALYPSO_BSP_DIRECT_FEED", "1", 1);
         dsp = pont_allouer_dsp();
         if (!dsp) { return 1; }
         api_ram = &dsp->data[C54X_API_BASE];

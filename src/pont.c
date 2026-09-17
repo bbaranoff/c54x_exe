@@ -413,6 +413,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             break;
         case PONT_TICK: {
             g_c54x_exe_fn = m.a;
+            calypso_bsp_set_tpu_offset((int)m.c);   /* [2026-09-17] fenetre RX du firmware */
+            { static unsigned _to=0; if (getenv("PONT_TPU_DEBUG") && (_to<5 || _to%2000==0)) printf("  [tpu] fn=%u tpu_offset=%u\n", m.a, m.c); _to++; }
             trace_armer();
             if (g_trace_reste > 0 && g_trace_f && !g_trace_ouverte && !g_trace_pc_hi) {
                 /* attendre la premiere tache FB posee par l'ARM (page W0 ou W1) */
@@ -435,6 +437,10 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             static int rx_apres = -1;
             if (rx_apres < 0) { const char *e = getenv("PONT_RX_APRES"); rx_apres = (e && *e == '0') ? 0 : 1; }
             if (!rx_apres && injecter && init_done) injecter_burst(dsp, iq_mode, amp, m.a, &injectes);
+            /* [2026-09-17] Chaîne réelle : vider la socket UDP 6702 (bursts du
+             * pont/BTS) et les livrer au DSP. Sans injection synthétique c'est la
+             * seule source. Harmless si la socket est vide. */
+            if (init_done) calypso_bsp_service(m.a);
             uint32_t ninsn = 0;
             bool init_avant = init_done;
             uint32_t drapeaux = jouer_trame(dsp, insns, &init_done, &ninsn);
@@ -451,6 +457,26 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 ninsn += dsp->insn_count - avant;
                 drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             }
+            /* [2026-09-17] CANNING PREMIERE APPROCHE (pas la fin — echafaudage
+             * pour prouver le pipeline jusqu'au LU). PONT_CAN_TOA=23 : force le TOA
+             * rapporte (a_sync_demod[D_TOA]) a la valeur « on-time » attendue par le
+             * firmware (prim_fbsb.c: toa -= 23). A retirer quand le TOA natif du
+             * correlateur est bon. -1 (defaut) = pas de canning. */
+            {
+                static int can_toa = -2;
+                if (can_toa == -2) { const char *e = getenv("PONT_CAN_TOA"); can_toa = (e && *e) ? atoi(e) : -1; }
+                if (can_toa >= 0 && *d_fb_det)
+                    api_ram[(API_NDB + NDB_A_SYNC_DEMOD) / 2 + D_TOA] = (uint16_t)can_toa;
+                /* SB : le firmware lit a_serv_demod[D_TOA] (read page) et veut ~4.
+                 * PONT_CAN_SB_TOA=4 le cale sur les deux pages R (cadre le SCH). */
+                static int can_sb = -2;
+                if (can_sb == -2) { const char *e = getenv("PONT_CAN_SB_TOA"); can_sb = (e && *e) ? atoi(e) : -1; }
+                if (can_sb >= 0) {
+                    api_ram[(API_R_PAGE(0) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
+                    api_ram[(API_R_PAGE(1) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
+                }
+            }
+            if (*d_fb_det) calypso_bsp_toa_feedback((int)(int16_t)a_sync[0]);  /* verrou TOA natif */
             trames++;
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
