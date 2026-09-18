@@ -328,7 +328,18 @@ static void sbdet_resp(int attempt)
            : !t3_ok   ? "FAUX POSITIF (T3 > 50, impossible)"
            :            "FAUX POSITIF (FN ne colle pas)",
            cellule_sch_partout ? "  [FN non qualifiable sous SCH_PARTOUT]" : "");
-    if (drapeau_env("REJEU_ARRET_1ER") || (bsic_ok && t3_ok && fn_ok)) verdict = 1;
+    if (drapeau_env("REJEU_ARRET_1ER") || (bsic_ok && t3_ok && fn_ok)) { verdict = 1; return; }
+    /* [2026-09-18] SANS CECI LE BANC SE FIGE, ET LE FIGEAGE SE LIT COMME UN
+     * RESULTAT. Un CRC OK non qualifie (faux positif) ne replanifiait rien : la
+     * file d'items se vidait, plus aucune commande n'etait postee, et le rejeu
+     * traversait les milliers de trames restantes sans rien demander au DSP. Le
+     * bilan etait alors IDENTIQUE a 1200 et a 12000 trames -- non parce que le
+     * DSP stagnait, mais parce que l'ARM rejoue s'etait tu. Le branchement
+     * d'echec CRC, lui, relancait bien (plan_fb_set sur attempt 2) : seule la
+     * sortie « CRC OK mais faux positif » etait un cul-de-sac. Le vrai firmware
+     * relance une acquisition tant qu'il n'a pas de SB valide ; on fait pareil,
+     * ce qui rend enfin le nombre de trames significatif. */
+    sched_reset(); plan_fb_set(1, 0);
 }
 
 
