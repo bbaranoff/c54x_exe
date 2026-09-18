@@ -58,6 +58,15 @@
  * des echantillons pourtant parfaits, et le pic de correlation qui saute entre
  * rangs adjacents. Le pont, lui, etait juste depuis le debut. */
 #define DECALAGE_SYMB 0.5
+/* marge de tete reglable (REJEU_MARGE, defaut 21) ; la queue complete a 190 complexes */
+static int marge_tete(void)
+{
+    static int m = -1;
+    if (m < 0) { const char *e = getenv("REJEU_MARGE"); m = e ? atoi(e) : 21;
+                 if (m < 0 || m > 41) m = 21;
+                 cellule_marge_fin = 190 - 148 - m; }
+    return m;
+}
 
 #define R_SCH         15u           /* a_sch[5] */
 #define B_SCH_CRC     8
@@ -104,7 +113,14 @@ static int      n_fb_ok, n_sb_try, n_sb_crcfail, n_crc_ok, n_sb_vraies;
 static int      n_err_dsp, n_err8;
 static long     n_cmps_sb, n_cmps_hors, n_e0_sb, n_sttrn_sb;
 static long     n_e0x_sb[4];
-static int      n_firs_vus;   /* E0=FIRS E1=LMS E2=SQDST E3=ABDST */
+static int      n_firs_vus;
+static long     n_cmps_reg[64];
+static long     n_xc_reg[64];
+static int      n_xc_vus;
+static int      n_bal;
+static int      n_sat_vus;
+static int      n_ecr;
+static int      n_2a0;   /* E0=FIRS E1=LMS E2=SQDST E3=ABDST */
 static int      g_bsic_injecte;   /* BSIC reellement emis par la cellule */
 static int      trace;
 static unsigned long hit_7c31, hit_9841, hit_84a1, hit_770a, hit_b219, hit_7a16;
@@ -136,6 +152,8 @@ static int drapeau_env(const char *nom)
     if (!strcmp(e, "non") || !strcmp(e, "no") || !strcmp(e, "off")) return 0;
     return 1;
 }
+
+static void plan_sb_annule(void) { }
 
 static void sbdet_resp(int attempt);
 
@@ -216,6 +234,17 @@ static void fbdet_resp(int attempt)
             if (force < 0) force = drapeau_env("REJEU_SB_FORCE") ? 1 : 0;
             if (force) {
                 uint32_t f = fn_cur + 1;
+                /* [2026-09-18] REJEU_SB_FN=<n> vise une trame ABSOLUE, la meme dans
+                 * tous les runs. Sans cela la cible est « la prochaine trame SCH »,
+                 * qui depend de l'instant ou la FB converge : deux runs n'atterrissent
+                 * pas sur la meme trame, donc ne comparent pas le meme mot de code, et
+                 * toute mesure differentielle devient ininterpretable. */
+                /* Le forcage sur une trame ABSOLUE ne marche pas : le champ delay du
+                 * firmware est borne a 20 trames, donc viser une trame lointaine ne
+                 * planifie rien du tout. La confusion d'appariement est supprimee
+                 * autrement, a la source : on ne perturbe QUE la trame observee
+                 * (REJEU_PERTURBER_FN), si bien que tout l'ordonnancement en amont est
+                 * rigoureusement identique d'un run a l'autre. */
                 while (!((f % 51) % 10 == 1 && (f % 51) <= 41)) f++;
                 delay = (int)(f - fn_cur);
                 if (trace) printf("    [force] SB vise fn=%u (p51=%u), delay=%d\n", f, f % 51, delay);
@@ -471,7 +500,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
         n_iq = 2 * 148;
         int injecter = (!iq_mode || strcmp(iq_mode, "none") != 0);
         if (injecter && rx_avant) {
-            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, 21, iq, &n_iq);
+            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
             g_livre_fn = fn_cur; g_livre_n = n_iq;
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
         }
@@ -484,8 +513,20 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             while (arm < insns / 4 && dsp->running && !dsp->idle) {
                 int ex = c54x_run(dsp, 64); if (ex <= 0) break; arm += ex;
             }
-            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, 21, iq, &n_iq);
+            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
             g_livre_fn = fn_cur; g_livre_n = n_iq;
+            /* [2026-09-18] Perturber UN echantillon brut, sans passer par les bits :
+             * cela cartographie l'influence index par index, sans confusion due au
+             * packing du burst ni au changement d'ordonnancement qu'entraine une
+             * inversion de bit code. REJEU_PERTURBER_ECH=<n> ajoute un delta a
+             * l'echantillon complexe n du tampon livre. */
+            { static int pe = -2; static long pf = -2;
+              if (pe == -2) { const char *e = getenv("REJEU_PERTURBER_ECH"); pe = e ? atoi(e) : -1; }
+              if (pf == -2) { const char *e = getenv("REJEU_PERTURBER_FN");  pf = e ? atol(e) : -1; }
+              if (pe >= 0 && 2 * pe + 1 < n_iq && (pf < 0 || (long)fn_cur == pf)) {
+                  iq[2 * pe]     = (int16_t)(iq[2 * pe]     + 3000);
+                  iq[2 * pe + 1] = (int16_t)(iq[2 * pe + 1] - 3000);
+              } }
             memcpy(g_livre_iq, iq, (size_t)n_iq * sizeof(int16_t)); g_livre_niq = n_iq;
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
@@ -536,6 +577,21 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                               if (dsp->prog[(pmad + k) & 0xffff]) nzp++;
                               if (dsp->data[(pmad + k) & 0x3fff]) nzd++;
                           }
+                          /* [2026-09-18] Lire prog[] BRUT est trompeur : avec
+                           * PMST_OVLY arme et le plancher d'alias a 0x0060 (gate
+                           * CALYPSO_OVLY_SCRATCH, defaut 1), une lecture PROGRAMME
+                           * dans 0x0060-0x27FF est redirigee vers data[]. On reproduit
+                           * donc la traduction du coeur pour savoir ce que FIRS LIT
+                           * REELLEMENT, au lieu de ce que contient le tableau prog[]. */
+                          int ovly = (dsp->pmst & 0x0020) != 0;
+                          int alias = ovly && pmad >= 0x0060 && pmad < 0x2800;
+                          printf("    [firs] pc=%04x pmad=%04x PMST=%04x OVLY=%d alias=%s"
+                                 " -> FIRS lit", pc, pmad, dsp->pmst, ovly,
+                                 alias ? "data[] (scratch-pad visible)" : "prog[] (PAS d'alias)");
+                          for (int k = 0; k < 6; k++)
+                              printf(" %04x", alias ? dsp->data[(pmad + k) & 0x3fff]
+                                                    : dsp->prog[(pmad + k) & 0xffff]);
+                          printf("\n");
                           printf("    [firs] pc=%04x pmad=%04x | prog[pmad..+5]=", pc, pmad);
                           for (int k = 0; k < 6; k++) printf(" %04x", dsp->prog[(pmad + k) & 0xffff]);
                           printf(" (%d non nuls)\n                      | data[pmad..+5]=", nzp);
@@ -543,7 +599,211 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           printf(" (%d non nuls)\n", nzd);
                           n_firs_vus++;
                       }
-                  } else if (h == 0x8E || h == 0x8F) n_cmps_hors++; }
+                  } else if (h == 0x8E || h == 0x8F) n_cmps_hors++;
+                  /* [2026-09-18] Ma fenetre `dans_sb` se fermait a 0x9841, donc elle
+                   * EXCLUAIT le decodeur SCH et son Viterbi (0x9a78). Le « 0 CMPS dans
+                   * le demod SB » ne disait donc rien sur le Viterbi. On compte CMPS
+                   * par region de PC, sans fenetre, ce qui est sans ambiguite. */
+                  if (h == 0x8E || h == 0x8F) n_cmps_reg[pc >> 10]++;
+                  /* [2026-09-18] QUI ECRIT 0x2a00 ? Le decodeur lit 78 mots a 0x2a00 et les
+                 * trouve TOUS NULS a son entree. Soit l'etage d'egalisation n'y ecrit
+                 * jamais, soit quelque chose les efface avant. On surveille donc la zone
+                 * 0x2a00..0x2a8d pendant TOUT le job SB (pas seulement le demod), en notant
+                 * le PC de chaque modification et le sens (vers une valeur, ou vers zero). */
+                /* [2026-09-18] 0x8389 = 0x4594 = `ADD *AR4+,16,A,B` (0x4400/0xFC00, bit9=src,
+                 * bit8=dst). Le coeur n'a AUCUN gestionnaire pour 0x4400-0x47FF : le seul de
+                 * la zone est (op & 0xFC00) == 0x4000, qui ne couvre que SUB. On verifie donc
+                 * si B change bien a travers cette instruction. */
+                { static int nav; static int64_t bavant;
+                  if (pc == 0x8389) { bavant = dsp->b; nav = 1; }
+                  else if (nav == 1 && pc == 0x838a) {
+                      static int n=0;
+                      if (n < 4) {
+                          printf("    [add-4594] B avant=%010llx  B apres=%010llx  A=%010llx  %s\n",
+                                 (unsigned long long)(bavant & 0xffffffffffULL),
+                                 (unsigned long long)(dsp->b & 0xffffffffffULL),
+                                 (unsigned long long)(dsp->a & 0xffffffffffULL),
+                                 (dsp->b == bavant) ? "B INCHANGE => instruction NON EXECUTEE" : "B modifie");
+                          n++;
+                      }
+                      nav = 0;
+                  } }
+                { static int nb838d;
+                  if (pc == 0x838e && nb838d < 6) {
+                      printf("    [B@838d] B=%010llx  A=%010llx  AR6=%04x  BRC=%u  ST1=%04x\n",
+                             (unsigned long long)(dsp->b & 0xffffffffffULL),
+                             (unsigned long long)(dsp->a & 0xffffffffffULL),
+                             dsp->ar[6], dsp->brc, dsp->st1);
+                      nb838d++;
+                  } }
+                { static uint16_t omb2[142]; static int arme6; static long ecr[64], vers0[64];
+                  static uint16_t pmin[64], pmax[64];
+                  static struct { uint16_t pc; long v, z; } parpc2[12];
+                  if (pc == 0xb219) {
+                      for (int k = 0; k < 142; k++) omb2[k] = dsp->data[0x2a00 + k];
+                      arme6 = 1;
+                      for (int b = 0; b < 64; b++) { ecr[b] = 0; vers0[b] = 0; }
+                      for (int t = 0; t < 12; t++) { parpc2[t].pc = 0; parpc2[t].v = 0; parpc2[t].z = 0; }
+                  }
+                  if (arme6) {
+                      for (int k = 0; k < 142; k++) {
+                          if (dsp->data[0x2a00 + k] != omb2[k]) {
+                              /* [2026-09-18] Bucketiser par PC EXACT, et separer les
+                               * ecritures de valeur des mises a zero : 284 modifications
+                               * dont 142 vers zero veut dire que quelque chose ecrit les
+                               * 142 bits souples puis les EFFACE tous. Il faut nommer les
+                               * deux instructions. Rappel : le PC imprime est celui de
+                               * l'instruction SUIVANTE. */
+                              { int z = (dsp->data[0x2a00 + k] == 0);
+                                for (int t = 0; t < 12; t++) {
+                                    if (parpc2[t].pc == 0 || parpc2[t].pc == pc) {
+                                        parpc2[t].pc = pc;
+                                        if (z) parpc2[t].z++; else parpc2[t].v++;
+                                        break;
+                                    }
+                                } }
+                              int b = pc >> 10;
+                              if (!ecr[b]) { pmin[b] = pc; pmax[b] = pc; }
+                              if (pc < pmin[b]) pmin[b] = pc;
+                              if (pc > pmax[b]) pmax[b] = pc;
+                              ecr[b]++;
+                              if (dsp->data[0x2a00 + k] == 0) vers0[b]++;
+                              omb2[k] = dsp->data[0x2a00 + k];
+                          }
+                      }
+                  }
+                  if (pc == 0x9841 && arme6 && n_2a0 < 3) {
+                      printf("    [qui-2a00] modifications de 0x2a00..0x2a8d pendant le job SB :\n");
+                      long tot = 0;
+                      for (int b = 0; b < 64; b++)
+                          if (ecr[b]) {
+                              printf("        region 0x%04x : %ld modifs (dont %ld vers zero), PC 0x%04x a 0x%04x\n",
+                                     b << 10, ecr[b], vers0[b], pmin[b], pmax[b]);
+                              tot += ecr[b];
+                          }
+                      if (!tot) printf("        AUCUNE : rien n'ecrit jamais dans 0x2a00\n");
+                      printf("        par PC exact (PC imprime = instruction SUIVANTE) :\n");
+                      for (int t = 0; t < 12; t++)
+                          if (parpc2[t].pc)
+                              printf("            pc=%04x (donc ecrivain %04x) : %ld valeurs, %ld mises a ZERO\n",
+                                     parpc2[t].pc, parpc2[t].pc - 1, parpc2[t].v, parpc2[t].z);
+                      n_2a0++;
+                  } }
+                /* [2026-09-18] QUI ECRIT LES 78 BITS SOUPLES, ET A QUELLE ADRESSE ?
+                 * Le balayage des 78 bits code montre que la premiere moitie atterrit en
+                 * position b+3 et la seconde a DEUX positions distantes de 51 (b-38 et
+                 * b+13), donc que les deux blocs de donnees se RECOUVRENT au lieu de se
+                 * concatener. On cherche les sites d'ecriture : ombre de la zone, et on
+                 * note le PC des que le contenu change. */
+                { static uint16_t ombre[78]; static int arme5; static long parpc[64];
+                  static uint16_t pcmin[64], pcmax[64]; static long seq;
+                  if (dans_sb2) {
+                      if (!arme5) { for (int k = 0; k < 78; k++) ombre[k] = dsp->data[0x2c72 + k]; arme5 = 1; seq = 0; }
+                      for (int k = 0; k < 78; k++) {
+                          if (dsp->data[0x2c72 + k] != ombre[k]) {
+                              int b = pc >> 10;
+                              if (!parpc[b]) { pcmin[b] = pc; pcmax[b] = pc; }
+                              if (pc < pcmin[b]) pcmin[b] = pc;
+                              if (pc > pcmax[b]) pcmax[b] = pc;
+                              parpc[b]++;
+                              /* [2026-09-18] CHRONOLOGIE EXACTE : numero d'ordre, PC, indice
+                               * touche, ancienne et nouvelle valeur. Permet de savoir (a) dans
+                               * quel ORDRE les deux passes ecrivent, donc qui detruit qui, et
+                               * (b) si deux ecritures au meme indice portent la MEME valeur
+                               * (copie mal adressee) ou des valeurs DIFFERENTES (deux moities
+                               * d'une somme qui devaient atterrir ensemble). */
+                              if (n_ecr == 0 && seq < 100)
+                                  printf("    [w] %3ld pc=%04x k=%2d  %04x -> %04x  "
+                                         "AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x BRC=%u\n",
+                                         seq, pc, k, ombre[k], dsp->data[0x2c72 + k],
+                                         dsp->ar[0], dsp->ar[1], dsp->ar[2], dsp->ar[3],
+                                         dsp->ar[4], dsp->ar[5], dsp->ar[6], dsp->ar[7], dsp->brc);
+                              seq++;
+                              ombre[k] = dsp->data[0x2c72 + k];
+                          }
+                      }
+                  } else if (arme5 && n_ecr < 2) {
+                      printf("    [ecrit-2c72] sites qui modifient les 78 bits souples :\n");
+                      for (int b = 0; b < 64; b++)
+                          if (parpc[b])
+                              printf("        region 0x%04x : %ld ecritures, PC de 0x%04x a 0x%04x\n",
+                                     b << 10, parpc[b], pcmin[b], pcmax[b]);
+                      n_ecr++; arme5 = 0;
+                      for (int b = 0; b < 64; b++) parpc[b] = 0;
+                  } }
+                /* [2026-09-18] POURQUOI LES BORDS SONT PERDUS. Le profil en max|delta|
+                 * montre trois ordres de grandeur entre le milieu du burst (13452,
+                 * 19534, valeurs extremes REPETEES) et ses bords (2 a 30). Des valeurs
+                 * extremes identiques qui reviennent, c'est une SATURATION. Or dans un
+                 * MLSE en virgule fixe les metriques de chemin DOIVENT etre
+                 * renormalisees a chaque pas ; sans cela elles croissent, saturent, et
+                 * la contribution relative des symboles de bord s'effondre. On compte
+                 * donc les saturations d'accumulateur et l'etat des drapeaux pendant le
+                 * demod SB. */
+                { static long nsat, nova, novb; static int ovm_vu;
+                  if (dans_sb2) {
+                      int64_t a = dsp->a, b = dsp->b;
+                      if (a > 0x7FFFFFFFLL || a < -0x80000000LL) nsat++;
+                      if (b > 0x7FFFFFFFLL || b < -0x80000000LL) nsat++;
+                      if (dsp->st0 & 0x0400) nova++;      /* OVA */
+                      if (dsp->st0 & 0x0200) novb++;      /* OVB */
+                      if (dsp->st1 & 0x0200) ovm_vu = 1;  /* OVM : mode saturation */
+                  } else if ((nsat || nova || novb) && n_sat_vus < 3) {
+                      printf("    [saturation] demod SB : %ld depassements 32 bits,"
+                             " OVA pose %ld fois, OVB %ld fois, mode OVM %s\n",
+                             nsat, nova, novb, ovm_vu ? "ACTIF" : "inactif");
+                      n_sat_vus++; nsat = nova = novb = 0;
+                  } }
+                /* [2026-09-18] OU EST L'ADRESSE DE LA FENETRE FIXE ? On surveille les
+                 * registres d'adresse qui PARCOURENT le tampon d'entree 0x0cce pendant
+                 * le demod SB, et on imprime, par registre, la plage d'index
+                 * d'echantillon parcourue et le PC qui l'a posee. Si cette plage ne se
+                 * deplace PAS de 10 quand on passe de la marge 21 a 31, l'adresse est
+                 * calculee une fois et reutilisee telle quelle. On imprime aussi BK :
+                 * une taille de bloc circulaire mal emulee ferait boucler l'acces sur
+                 * une fenetre fixe de la bonne longueur avec une base correcte. */
+                { static uint16_t amin[8], amax[8], apc[8]; static long an[8];
+                  static int arme4;
+                  if (dans_sb2) {
+                      if (!arme4) { for (int k = 0; k < 8; k++) { amin[k] = 0xffff; amax[k] = 0; an[k] = 0; } arme4 = 1; }
+                      for (int k = 0; k < 8; k++) {
+                          uint16_t v = dsp->ar[k];
+                          if (v >= 0x0cce && v < 0x0cce + 380) {
+                              uint16_t idx = (uint16_t)((v - 0x0cce) / 2);
+                              if (idx < amin[k]) { amin[k] = idx; apc[k] = pc; }
+                              if (idx > amax[k]) amax[k] = idx;
+                              an[k]++;
+                          }
+                      }
+                  } else if (arme4 && n_bal < 3) {
+                      printf("    [tampon-AR] parcours de 0x0cce pendant le demod SB (BK=%u) :\n", dsp->bk);
+                      for (int k = 0; k < 8; k++)
+                          if (an[k])
+                              printf("        AR%d : echantillons %u..%u (%u larges), %ld acces, 1er a pc=%04x\n",
+                                     k, amin[k], amax[k], amax[k] - amin[k] + 1, an[k], apc[k]);
+                      n_bal++; arme4 = 0;
+                  } }
+                /* [2026-09-18] HASARD DE PIPELINE DU XC. Sur C54x la condition du
+                   * XC est echantillonnee deux cycles avant son execution : une
+                   * instruction qui pose le drapeau juste avant le XC n'est pas encore
+                   * visible. Le coeur, lui, evalue au moment de l'execution. Le hasard
+                   * ne mord donc QUE si la ROM place le poseur de drapeau a moins de
+                   * deux rangs du XC (du code ecrit pour du vrai silicium ne le fait
+                   * normalement pas). On mesure la DISTANCE reelle, au lieu de la
+                   * supposer : on garde les 4 derniers PC et le ST0 avant chacun. */
+                  { static uint16_t ring_pc[4], ring_op[4], ring_st0[4]; static int ri;
+                    if ((h == 0xFD || h == 0xFF) && pc >= 0x8400 && pc < 0x8800 && n_xc_vus < 10) {
+                        printf("    [xc] pc=%04x op=%04x cc=%02x | 3 precedentes :", pc, o, o & 0xff);
+                        for (int k = 3; k >= 1; k--) {
+                            int q = (ri - k) & 3;
+                            printf("  %04x:%04x(ST0=%04x)", ring_pc[q], ring_op[q], ring_st0[q]);
+                        }
+                        printf(" | ST0 au XC=%04x\n", dsp->st0);
+                        n_xc_vus++;
+                    }
+                    ring_pc[ri] = pc; ring_op[ri] = o; ring_st0[ri] = dsp->st0;
+                    ri = (ri + 1) & 3;
+                    if (h == 0xFD || h == 0xFF) n_xc_reg[pc >> 10]++; } }
                 int ex = c54x_run(dsp, 1);
                 if (ex <= 0) break;
                 done += ex;
@@ -589,6 +849,38 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       printf("    [tampon] identique aux echantillons livres : %d/%d mots"
                              " (1re difference au mot %d)\n", ident, n, prem_diff);
                       nx++;
+                  } }
+                /* [2026-09-18] BILAN-2A00 : a l entree du decodeur, mesurer ce qu il
+                 * LIT reellement, job par job. Les signes des 78 mots compactes en
+                 * 0x2a00 contre le mot de code attendu, meilleure trame cherchee comme
+                 * dans [ref] (sous REJEU_SCH_PARTOUT la FN livree n est pas fiable).
+                 * Les deux polarites sont imprimees : sur du GMSK differentiel la
+                 * convention de signe n est pas connue a priori. Sert a relier
+                 * « l etage qui reecrit 0x2a00 sort des valeurs » et « le decodeur a
+                 * de quoi travailler ». */
+                { static int nb2;
+                  if (pc == 0x9841 && nb2 < 20) {
+                      int16_t sb[78]; int nz = 0, mn = 32767, mx = -32768;
+                      for (int k = 0; k < 78; k++) {
+                          sb[k] = (int16_t)dsp->data[0x2a00 + k];
+                          if (!sb[k]) nz++;
+                          if (sb[k] < mn) mn = sb[k];
+                          if (sb[k] > mx) mx = sb[k];
+                      }
+                      int meil_f = -1, meil_s = -1, s0 = -1;
+                      for (int df = -12; df <= 3; df++) {
+                          long f = (long)g_livre_fn + df; if (f < 0) continue;
+                          unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)bsic, a2);
+                          int ok = 0;
+                          for (int k = 0; k < 78; k++) { int bit = sb[k] < 0 ? 1 : 0; if (bit == a2[k]) ok++; }
+                          int meilleur = ok > 78 - ok ? ok : 78 - ok;
+                          if (meilleur > meil_s) { meil_s = meilleur; meil_f = (int)f; }
+                          if (df == 0) s0 = ok;
+                      }
+                      printf("    [2a00-lu] job %d : zeros=%d/78 etendue=[%d..%d] |"
+                             " signes trame livree %d/78 | meilleure trame %d avec %d/78\n",
+                             nb2 + 1, nz, mn, mx, s0, meil_f, meil_s);
+                      nb2++;
                   } }
                 { static int nr;
                   if (pc == 0x9841 && nr < 4) {
@@ -703,13 +995,30 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                        * echangees (le DSP peut rendre 39+39 dans l'autre ordre), et
                        * un decalage. Si une combinaison monte nettement au-dessus du
                        * hasard, le demodulateur est sain et c'est une convention. */
-                      int best = -99, bestd = 0, bestv = 0;
-                      for (int v = 0; v < 4; v++) {
-                          int inv = v & 1, ech = (v >> 1) & 1;
-                          for (int d = -8; d <= 8; d++) {
-                              int ok = 0, tot = 0;
-                              for (int i = 0; i < 78; i++) {
-                                  int src = ech ? ((i + 39) % 78) : i;
+                          /* [2026-09-18] La famille testee ne contenait PAS le
+                           * desentrelacement pair/impair. Le code convolutif de la SCH sort
+                           * ses 78 bits dans l'ordre C(2k), C(2k+1) par pas de treillis, et
+                           * le burst les range en deux moities de 39. Si le DSP stocke ses
+                           * bits souples dans l'ordre INTERNE (tous les pairs puis tous les
+                           * impairs), aucun decalage cyclique, aucune polarite et aucun
+                           * echange de moities ne le rattrape : chaque combinaison testee
+                           * tombe exactement au hasard, et c'est precisement le plateau
+                           * observe. On ajoute la permutation et son inverse.
+                           *   0 identite   1 moities echangees
+                           *   2 pairs d'abord   3 impairs d'abord */
+                          int best = -99, bestd = 0, bestv = 0;
+                          for (int v = 0; v < 8; v++) {
+                              int inv = v & 1, perm = v >> 1;
+                              for (int d = -8; d <= 8; d++) {
+                                  int ok = 0, tot = 0;
+                                  for (int i = 0; i < 78; i++) {
+                                      int src;
+                                      switch (perm) {
+                                      case 1:  src = (i + 39) % 78; break;
+                                      case 2:  src = (i % 2 == 0) ? (i / 2) : (39 + (i - 1) / 2); break;
+                                      case 3:  src = (i % 2 == 1) ? ((i - 1) / 2) : (39 + i / 2); break;
+                                      default: src = i; break;
+                                      }
                                   int j = src + d; if (j < 0 || j >= 78) continue;
                                   int16_t sv = (int16_t)dsp->data[0x2c72 + j];
                                   if (!sv) continue;
@@ -755,18 +1064,240 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                        * dont l'ISI porte sur trois symboles. Si la concordance reste
                        * plate quel que soit le pic, le correlateur est hors de cause. */
                       /* empreinte des 78 bits souples, pour diff entre deux runs */
-                      { static int nemp;
-                        if (nemp < 3) {
-                            printf("    [empreinte] fn=%u pic=%u :", g_livre_fn, dsp->data[0x2f06]);
+                      { static int nemq; static long cible = -2;
+                        if (cible == -2) { const char *e = getenv("REJEU_EMPREINTE_FN");
+                                           cible = e ? atol(e) : -1; }
+                        /* [2026-09-18] LA TRAME DOIT ETRE VERROUILLEE. Prendre la
+                         * premiere occurrence venue ne compare pas la meme chose d'un
+                         * run a l'autre : la trame sur laquelle la tentative SB atterrit
+                         * depend de l'ordonnancement FB, et sous SCH_PARTOUT une trame
+                         * differente signifie un T1/T2/T3 different, donc un mot de code
+                         * entierement different — d'ou 190/380 echantillons differents et
+                         * 38 signes sur 78 qui basculent, c'est-a-dire le hasard.
+                         * REJEU_EMPREINTE_FN=<n> n'imprime que la trame n. */
+                        if (nemq < 1 && (cible < 0 || (long)g_livre_fn == cible)) {
+                            /* [2026-09-18] Verifier le MODULATEUR avant d'accuser le
+                             * demodulateur. Inverser le bit code 0 touche le bit 3 du
+                             * burst, donc alpha_3 et alpha_4 changent tous deux de signe
+                             * et leur SOMME est conservee : la phase se realigne au bout
+                             * de deux symboles, et seuls ~6 echantillons complexes autour
+                             * de l'indice 24 doivent differer sur 380. Si les 380
+                             * different, le fautif est le modulateur. */
+                            printf("    [empreinte-iq] fn=%u :", g_livre_fn);
+                            for (int k = 0; k < 380; k++) printf(" %04x", dsp->data[0x0cce + k]);
+                            printf("\n"); nemq++;
+                        } }
+                      { static int nemp; static long cible2 = -2;
+                        if (cible2 == -2) { const char *e = getenv("REJEU_EMPREINTE_FN");
+                                            cible2 = e ? atol(e) : -1; }
+                        if (nemp < 3 && (cible2 < 0 || (long)g_livre_fn == cible2)) {
+                            printf("    [empreinte] fn=%u (trame courante %u%s) pic=%u :", g_livre_fn, fn_cur,
+                                   g_livre_fn == fn_cur ? "" : " DESALIGNE", dsp->data[0x2f06]);
                             for (int k = 0; k < 78; k++) printf(" %04x", dsp->data[0x2c72 + k]);
                             printf("\n"); nemp++;
                         } }
+                      /* [2026-09-18] LE VRAI TAMPON. Le desassemblage du redacteur montre
+                       * deux pointeurs, AR1 des 0x2c56 et AR5 des 0x2c88, 50 iterations
+                       * chacun avec un pas de +1 : le tampon fait donc 100 mots a 0x2c56,
+                       * et la sonde lisait les 78 derniers a 0x2c72. On cherche, pour
+                       * CHAQUE MOITIE separement, l'emplacement et le sens qui concordent
+                       * avec le mot de code emis. Chaque moitie n'a qu'une centaine de
+                       * candidats, donc la recherche est concluante, contrairement a la
+                       * famille jointe de 136 combinaisons. */
+                      /* [2026-09-18] Quatre decodages independants du bloc 0x84a0-0x84d8
+                       * concluent que ce n'est PAS le redacteur des bits souples mais le
+                       * CORRELATEUR DE MIDAMBULE : 50 retards, 64 taps d'une reference fixe
+                       * en 0x2cea (64 = longueur du midambule), sorties Re en 0x2c56 et Im en
+                       * 0x2c88, puis |corr|^2 en 0x2be4 pour l'argmax. L'index y est le
+                       * RETARD, pas un rang de bit code : il n'y a donc rien a y chercher.
+                       * Ils designent 0x2a00 comme le vrai tampon (boucle 0x848d-0x849f,
+                       * BRC=141 donc 142 tours, `sth B,*AR6+` en 0x8497). 142 est proche des
+                       * 148 bits du burst : on teste donc l'hypothese « 0x2a00 indexe par
+                       * POSITION DANS LE BURST », ou le bit code b est en 3+b pour b<39 et en
+                       * 106+(b-39) au-dela. */
+                      /* [2026-09-18] ARRETER DE DEVINER : CHERCHER. A l'entree du decodeur,
+                       * on balaie TOUTE la memoire donnee a la recherche d'une zone dont les
+                       * SIGNES concordent avec le mot de code emis, sous deux dispositions :
+                       * 78 mots contigus indexes par rang de bit code, et indexation par
+                       * position dans le burst (3+b puis 106+b-39). On imprime les meilleures
+                       * bases. Si aucune ne depasse nettement le hasard, les bits souples ne
+                       * sont pas en memoire donnee sous une de ces deux formes. */
+                      /* [2026-09-18] DISCRIMINANT ENTREE / SORTIE pour le candidat 0x2ad5.
+                       * La concordance ne separe pas les deux : l'entree derotatee et la
+                       * sortie du demodulateur sont toutes deux indexees par position de
+                       * burst et repondraient pareil a une inversion de bit. Ce qui les
+                       * separe est la dependance au CANAL : une sortie de demodulateur
+                       * depend de l'estimation de canal, donc du pic ; une representation
+                       * de l'entree n'en depend pas. On perturbe donc le MIDAMBULE seul
+                       * (ce qui deplace le pic sans toucher aux donnees) et on regarde si
+                       * 0x2ad5 bouge AUX POSITIONS DE DONNEES. Invariant => entree.
+                       * Ca bouge => sortie, et le tampon est trouve. */
+                      /* [2026-09-18] LE VRAI TAMPON, trouve en ROM : 0x2a00.
+                       * Deux etages successifs, tous deux a 0x2a00 :
+                       *   - sortie de l'egaliseur, 142 mots, index = position de burst - 3
+                       *     (`sth B,*AR6+`, AR6 init 0x2a00, BRC=0x8d donc 142 tours) ;
+                       *   - codeword COMPACTE, 78 mots contigus, index = rang de bit code,
+                       *     produit par 0x7e65-0x7e7a : 39 copies, puis `mar *+AR2(0x0040)`
+                       *     en 0x7e76 qui SAUTE LES 64 BITS DE MIDAMBULE, puis 39 copies.
+                       *     Le `+64` existe donc bien, il est litteral en ROM.
+                       * Le decodeur le confirme : 0x984a `stm #0x2a00,AR1`, BRC=0x26, et le
+                       * corps de 0x9a78 avance AR1 de 2 par pas de treillis, 39 pas = 78 mots.
+                       *
+                       * ET SURTOUT : on ne jette PLUS les zeros. Mon balayage precedent
+                       * faisait `if (!v) continue;` puis exigeait n >= 60 ; or ces bits
+                       * souples valent 0x0000 et 0xffff, donc la moitie des echantillons
+                       * etait jetee, n tombait sous 60, et 0x2a00 etait ELIMINE avant
+                       * d'etre note. La recherche exhaustive etait aveugle au bon tampon. */
+                      { static int n2a0;
+                        if (n2a0 < 4) {
+                            int meil_c = -1, pol_c = 0, meil_b = -1, pol_b = 0;
+                            for (int pol = 0; pol < 2; pol++) {
+                                int ok = 0;
+                                for (int b = 0; b < 78; b++) {
+                                    int16_t v = (int16_t)dsp->data[0x2a00 + b];
+                                    int bit = att[b] != 0; if (pol) bit = !bit;
+                                    if ((v < 0) == bit) ok++;
+                                }
+                                if (ok * 100 / 78 > meil_c) { meil_c = ok * 100 / 78; pol_c = pol; }
+                                ok = 0;
+                                for (int b = 0; b < 78; b++) {
+                                    int j = (b < 39) ? b : (64 + b);
+                                    int16_t v = (int16_t)dsp->data[0x2a00 + j];
+                                    int bit = att[b] != 0; if (pol) bit = !bit;
+                                    if ((v < 0) == bit) ok++;
+                                }
+                                if (ok * 100 / 78 > meil_b) { meil_b = ok * 100 / 78; pol_b = pol; }
+                            }
+                            int nz = 0, nff = 0, naut = 0;
+                            for (int k = 0; k < 142; k++) {
+                                uint16_t v = dsp->data[0x2a00 + k];
+                                if (v == 0) nz++; else if (v == 0xffff) nff++; else naut++;
+                            }
+                            printf("    [2a00] COMPACTE (0x2a00+b) : %d%% (polarite %d) | "
+                                   "BRUT (saut de 64) : %d%% (polarite %d)\n",
+                                   meil_c, pol_c, meil_b, pol_b);
+                            printf("    [2a00] contenu sur 142 mots : %d nuls, %d a 0xffff, %d autres |",
+                                   nz, nff, naut);
+                            for (int k = 0; k < 10; k++) printf(" %04x", dsp->data[0x2a00 + k]);
+                            printf("\n");
+                            n2a0++;
+                        } }
+                      { static int n2d;
+                        if (n2d < 1) {
+                            printf("    [2ad5] pic=%u valeurs aux positions de burst 0..147 :\n      ",
+                                   dsp->data[0x2f06]);
+                            for (int k = 0; k < 148; k++) {
+                                printf(" %04x", dsp->data[0x2ad5 + k]);
+                                if (k % 12 == 11) printf("\n      ");
+                            }
+                            printf("\n");
+                            n2d++;
+                        } }
+                      { static int nch;
+                        if (nch < 1) {
+                            struct { int sc, base, disp, pol; } top[6];
+                            for (int t = 0; t < 6; t++) { top[t].sc = -1; top[t].base = 0; }
+                            for (int base = 0; base < 0x3f00; base++)
+                              for (int disp = 0; disp < 2; disp++)
+                                for (int pol = 0; pol < 2; pol++) {
+                                    int ok = 0, n = 0;
+                                    for (int b = 0; b < 78; b++) {
+                                        int j = disp ? ((b < 39) ? (3 + b) : (106 + b - 39)) : b;
+                                        int16_t v = (int16_t)dsp->data[(base + j) & 0x3fff];
+                                        if (!v) continue;
+                                        n++; int bit = att[b] != 0; if (pol) bit = !bit;
+                                        if ((v < 0) == bit) ok++;
+                                    }
+                                    if (n < 60) continue;
+                                    int sc = ok * 100 / n;
+                                    for (int t = 0; t < 6; t++)
+                                        if (sc > top[t].sc) {
+                                            for (int u = 5; u > t; u--) top[u] = top[u-1];
+                                            top[t].sc = sc; top[t].base = base; top[t].disp = disp; top[t].pol = pol;
+                                            break;
+                                        }
+                                }
+                            printf("    [chasse] meilleure zone : base 0x%04x %s pol %d -> %d%%"
+                                   "   (2e: 0x%04x %d%%, 3e: 0x%04x %d%%)\n",
+                                   top[0].base, top[0].disp ? "burst" : "contigu", top[0].pol, top[0].sc,
+                                   top[1].base, top[1].sc, top[2].base, top[2].sc);
+                            nch++;
+                        } }
+                      { static int n2a;
+                        if (n2a < 3) {
+                            int meil = -1, mo = 0, mp = 0;
+                            for (int o = -8; o <= 8; o++)
+                              for (int pol = 0; pol < 2; pol++) {
+                                  int ok = 0, n = 0;
+                                  for (int b = 0; b < 78; b++) {
+                                      int bp = (b < 39) ? (3 + b) : (106 + b - 39);
+                                      int j = bp + o; if (j < 0 || j >= 148) continue;
+                                      int16_t v = (int16_t)dsp->data[0x2a00 + j]; if (!v) continue;
+                                      n++; int bit = att[b] != 0; if (pol) bit = !bit;
+                                      if ((v < 0) == bit) ok++;
+                                  }
+                                  if (n >= 50) { int pc2 = ok * 100 / n;
+                                      if (pc2 > meil) { meil = pc2; mo = o; mp = pol; } }
+                              }
+                            int nz = 0; for (int k = 0; k < 148; k++) if (dsp->data[0x2a00 + k]) nz++;
+                            printf("    [2a00] indexe par position de burst : concordance max %d%%"
+                                   " (decalage %d, polarite %d) | %d/148 mots non nuls\n",
+                                   meil, mo, mp, nz);
+                            printf("    [2a00] valeurs :");
+                            for (int k = 0; k < 14; k++) printf(" %04x", dsp->data[0x2a00 + k]);
+                            printf("\n");
+                            n2a++;
+                        } }
+                      { static int nv;
+                        if (nv < 3) {
+                            int m1b = -1, m1o = 0, m1s = 0, m2b = -1, m2o = 0, m2s = 0;
+                            for (int o = 0; o < 100; o++)
+                              for (int sens = -1; sens <= 1; sens += 2)
+                                for (int pol = 0; pol < 2; pol++) {
+                                    int ok1 = 0, n1 = 0, ok2 = 0, n2 = 0;
+                                    for (int b = 0; b < 39; b++) {
+                                        int j = o + sens * b; if (j < 0 || j >= 100) continue;
+                                        int16_t v = (int16_t)dsp->data[0x2c56 + j]; if (!v) continue;
+                                        n1++; int bit = att[b] != 0; if (pol) bit = !bit;
+                                        if ((v < 0) == bit) ok1++;
+                                    }
+                                    for (int b = 39; b < 78; b++) {
+                                        int j = o + sens * (b - 39); if (j < 0 || j >= 100) continue;
+                                        int16_t v = (int16_t)dsp->data[0x2c56 + j]; if (!v) continue;
+                                        n2++; int bit = att[b] != 0; if (pol) bit = !bit;
+                                        if ((v < 0) == bit) ok2++;
+                                    }
+                                    if (n1 >= 30) { int pc1 = ok1 * 100 / n1;
+                                        if (pc1 > m1b) { m1b = pc1; m1o = o; m1s = sens * (pol ? -2 : 1); } }
+                                    if (n2 >= 30) { int pc2 = ok2 * 100 / n2;
+                                        if (pc2 > m2b) { m2b = pc2; m2o = o; m2s = sens * (pol ? -2 : 1); } }
+                                }
+                            printf("    [2c56] moitie 1 : meilleur %d%% a l'offset %d (code %d) | "
+                                   "moitie 2 : meilleur %d%% a l'offset %d (code %d)\n",
+                                   m1b, m1o, m1s, m2b, m2o, m2s);
+                            int nz = 0; for (int k = 0; k < 100; k++) if (dsp->data[0x2c56 + k]) nz++;
+                            printf("    [2c56] %d/100 mots non nuls, carte des nuls (. = nul, X = non nul) :\n      ", nz);
+                            for (int k = 0; k < 100; k++) {
+                                printf("%c", dsp->data[0x2c56 + k] ? 'X' : '.');
+                                if (k % 50 == 49) printf("\n      ");
+                            }
+                            printf("\n");
+                            for (int lig = 0; lig < 10; lig++) {
+                                printf("      +%2d :", lig * 10);
+                                for (int k = lig * 10; k < lig * 10 + 10; k++) printf(" %04x", dsp->data[0x2c56 + k]);
+                                printf("\n");
+                            }
+                            nv++;
+                        } }
                       printf("    [pic-conc] pic=%u concordance=%d%%\n", dsp->data[0x2f06], best);
                       printf("    [bits] fn=%u  0x2c72 non-nuls=%d/78 : %04x %04x %04x %04x %04x %04x\n"
-                             "           concordance max = %d%% (decalage %d, polarite %d, moities %s)\n",
+                             "           concordance max = %d%% (decalage %d, polarite %d, ordre %s)\n",
                              g_livre_fn, nznb, dsp->data[0x2c72], dsp->data[0x2c73], dsp->data[0x2c74],
                              dsp->data[0x2c75], dsp->data[0x2c76], dsp->data[0x2c77],
-                             best, bestd, bestv & 1, (bestv >> 1) ? "echangees" : "normales");
+                             best, bestd, bestv & 1,
+                             (bestv >> 1) == 1 ? "moities echangees"
+                             : (bestv >> 1) == 2 ? "pairs d'abord"
+                             : (bestv >> 1) == 3 ? "impairs d'abord" : "identite");
                       nb++;
                   } }
                 /* [2026-09-18] Piste : si les magnitudes au-dela d'un certain rang
@@ -946,6 +1477,24 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             }
         }
     }
+    {   /* [2026-09-18] Desassemblage brut de la zone du redacteur des bits souples.
+         * On imprime les mots programme tels que le DSP les lit (alias OVLY compris),
+         * pour pouvoir lire le CALCUL D'ADRESSE des deux passes. */
+        printf("  mots programme 0x8378-0x8396 (l'ecrivain 0x838d qui met 142 zeros) :\n");
+        for (uint16_t a = 0x8378; a <= 0x8396; a++)
+            printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x8378) % 8 == 7) ? "\n" : "");
+        printf("\n  mots programme 0x81c8-0x81e0 (les ecrivains des 142 valeurs) :\n");
+        for (uint16_t a = 0x81c8; a <= 0x81e0; a++)
+            printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x81c8) % 8 == 7) ? "\n" : "");
+        printf("\n");
+        printf("  mots programme 0x84a0-0x84d8 (correlateur de midambule) :\n");
+        for (uint16_t a = 0x84a0; a <= 0x84d8; a++)
+            printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x84a0) % 8 == 7) ? "\n" : "");
+        printf("\n  mots programme 0x7cb0-0x7cc0 (site qui remet a zero) :\n");
+        for (uint16_t a = 0x7cb0; a <= 0x7cc0; a++)
+            printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x7cb0) % 8 == 7) ? "\n" : "");
+        printf("\n");
+    }
     printf("\n─── bilan rejeu (deterministe) ───\n");
     {
         printf("  instructions DSP executees : %lu\n", insn_total);
@@ -978,6 +1527,15 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
     printf("  SB tentees / CRC KO: %d / %d\n", n_sb_try, n_sb_crcfail);
     printf("  CMPS (0x8E/0x8F) : %ld fois dans le demod SB, %ld hors | famille 0xE0-0xE3 en SB : %ld | ST TRN : %ld\n",
            n_cmps_sb, n_cmps_hors, n_e0_sb, n_sttrn_sb);
+    {
+        printf("  XC (0xFD/0xFF) par region de PC :");
+        for (int b = 0; b < 64; b++) if (n_xc_reg[b]) printf(" 0x%04x=%ld", b << 10, n_xc_reg[b]);
+        printf("\n");
+        printf("  CMPS (0x8E/0x8F) par region de PC :");
+        for (int b = 0; b < 64; b++)
+            if (n_cmps_reg[b]) printf(" 0x%04x=%ld", b << 10, n_cmps_reg[b]);
+        printf("\n");
+    }
     printf("      detail : FIRS(E0)=%ld  LMS(E1)=%ld  SQDST(E2)=%ld  ABDST(E3)=%ld"
            "   <- inertes si CALYPSO_ISA_E0_FAM=1\n",
            n_e0x_sb[0], n_e0x_sb[1], n_e0x_sb[2], n_e0x_sb[3]);

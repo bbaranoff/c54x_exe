@@ -7,7 +7,7 @@ L1DSP   := $(CAL)/l1-dsp
 HORS    := $(QOSMO)/contrib/hors-qemu
 
 CC      ?= gcc
-CFLAGS  ?= -O2 -g -Wall -Wno-unused-function -Wno-unused-variable \
+CFLAGS  ?= -O2 -g -Wall -Werror=format -Werror=format-extra-args -Wno-unused-function -Wno-unused-variable \
            -Wno-unused-but-set-variable -Wno-sign-compare
 CPPFLAGS := -D_GNU_SOURCE -I$(HORS)/doublures -I$(L1DSP) -I$(CAL) -I$(QOSMO)/include -I$(QOSMO)
 # calypso_bsp.c encode les bursts RACH/NB : gsm0503_rach_ext_encode

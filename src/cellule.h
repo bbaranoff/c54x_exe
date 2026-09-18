@@ -9,6 +9,7 @@
  * decodeur SB de la ROM lit une fenetre de 190 echantillons, 148 + 2 x 21 :
  * BSP_IQ_MAX_I16 « SB en demande 190 »). *n_iq recoit le nombre d'int16 ecrits. */
 extern int cellule_sch_partout;
+extern int cellule_marge_fin;
 int cellule_train_sb(int i);
 int cellule_demod_d(const int16_t *x, int n_ech, int b0, unsigned char *d148);
 int cellule_demod_reference(const int16_t *x, int n_ech, unsigned char *bits148, int *offset);

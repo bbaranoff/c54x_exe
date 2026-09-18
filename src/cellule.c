@@ -29,7 +29,13 @@ static const uint8_t factice[148] = {
     0,0,0,
 };
 
-int cellule_sch_partout;   /* diagnostic : SCH sur toutes les trames non-FCCH */
+int cellule_sch_partout;
+/* [2026-09-18] Marge de tete reglable, marge de queue ajustee pour garder 190
+ * complexes au total. Sert a la contre-epreuve : si la fenetre d'influence est un
+ * INDEX ABSOLU dans le tampon, decaler le burst fait perdre de l'influence aux bits
+ * tardifs et en fait gagner aux precoces ; si c'est une fenetre RELATIVE au debut du
+ * burst, le profil se deplace avec lui sans changer de forme. */
+int cellule_marge_fin = -1;   /* diagnostic : SCH sur toutes les trames non-FCCH */
 
 char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marge, int16_t *iq, int *n_iq)
 {
@@ -55,25 +61,43 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
          *   3 ou 4 autour d'une  -> ISI normale, la chaine est saine a cet endroit
          *   tout                 -> traceback globale et fausse (sur C54x : CMPS/TRN) */
         {
-            static int inv = -2;
+            /* [2026-09-18] L'inversion doit etre confinee a UNE trame, sinon elle
+             * modifie tout l'historique du run (ordonnancement, AFC) et la mesure
+             * differentielle compare deux histoires, pas deux bursts.
+             * REJEU_INVERSER_FN=<f> restreint l'inversion a la trame f. */
+            static int inv = -2; static long invfn = -2;
             if (inv == -2) { const char *e = getenv("REJEU_INVERSER_BIT"); inv = e ? atoi(e) : -1; }
-            if (inv >= 0 && inv < 78) code[inv] ^= 1;
+            if (invfn == -2) { const char *e = getenv("REJEU_INVERSER_FN"); invfn = e ? atol(e) : -1; }
+            if (inv >= 0 && inv < 78 && (invfn < 0 || (long)fn == invfn)) code[inv] ^= 1;
         }
         memset(bits, 0, 3);
         memcpy(bits + 3, code, 39);
         memcpy(bits + 42, train_sb, 64);
         memcpy(bits + 106, code + 39, 39);
         memset(bits + 145, 0, 3);
+        /* [2026-09-18] Perturber le MIDAMBULE. Les 78 bits codes ne permettent pas
+         * de sonder la sequence d'apprentissage, or c'est elle qui doit servir a
+         * l'estimation de canal. Si inverser un bit du midambule ne change RIEN aux
+         * bits souples, le demodulateur n'utilise pas la sequence connue, et son
+         * egaliseur travaille sur une estimation batie ailleurs : cela expliquerait
+         * une sortie non correlee a l'entree malgre des echantillons parfaits. */
+        {
+            static int im = -2;
+            if (im == -2) { const char *e = getenv("REJEU_INVERSER_MIDAMBULE");
+                            im = e ? atoi(e) : -1; }
+            if (im >= 0 && im < 64) bits[42 + im] ^= 1;
+        }
         type = 'S';
     } else {
         memcpy(bits, factice, 148);
         type = '.';
     }
     if (type == 'S' && marge > 0) {
+        int mf = (cellule_marge_fin >= 0) ? cellule_marge_fin : marge;
         memset(iq, 0, (size_t)marge * 2 * sizeof(int16_t));
         gmsk_moduler(bits, 148, amp, 0.0, decalage, iq + 2 * marge);
-        memset(iq + 2 * (marge + 148), 0, (size_t)marge * 2 * sizeof(int16_t));
-        *n_iq = 2 * (148 + 2 * marge);
+        memset(iq + 2 * (marge + 148), 0, (size_t)mf * 2 * sizeof(int16_t));
+        *n_iq = 2 * (148 + marge + mf);
     } else {
         gmsk_moduler(bits, 148, amp, 0.0, decalage, iq);
         *n_iq = 2 * 148;
