@@ -14,8 +14,13 @@ CPPFLAGS := -D_GNU_SOURCE -I$(HORS)/doublures -I$(L1DSP) -I$(CAL) -I$(QOSMO)/inc
 OSMO    := $(shell pkg-config --cflags --libs libosmocoding libosmocore 2>/dev/null)
 LDLIBS  := -lpthread -lm $(OSMO)
 
-SRC := src/main.c src/pcb-minimal.c src/verbosite.c src/pont.c src/gmsk.c src/cellule.c $(HORS)/cales-qemu.c \
+SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src/gmsk.c src/cellule.c $(HORS)/cales-qemu.c \
        $(L1DSP)/calypso_c54x.c \
+       $(L1DSP)/c54x_exec.c \
+       $(L1DSP)/c54x_decode.c \
+       $(L1DSP)/c54x_mem.c \
+       $(L1DSP)/c54x_irq.c \
+       $(L1DSP)/c54x_probes.c \
        $(L1DSP)/calypso_bsp.c \
        $(L1DSP)/calypso_arm2dsp.c \
        $(L1DSP)/calypso_mailbox.c \

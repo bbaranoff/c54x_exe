@@ -35,6 +35,7 @@
 #include "calypso_dma.h"
 #include "calypso_bsp.h"
 #include "verbosite.h"
+#include "rejouer.h"
 #include "pont.h"
 
 /* ── ce que la plateforme fournirait ───────────────────────────────────── */
@@ -86,6 +87,8 @@ static void usage(const char *prog)
         "                    fcch (rotation +pi/2/ech.), noise, tone:<dphi>, none,\n"
         "                    cell[:bsic[:decalage]] = FCCH+SCH+factice GMSK (multitrame 51)\n"
         "  --amp N           amplitude int16 des echantillons injectes (defaut 30000)\n"
+        "  --rejouer         rejeu DETERMINISTE de l'acquisition FB/SB (sans QEMU)\n"
+        "  --bsic N          BSIC de la cellule injectee en rejeu (defaut 7)\n"
         "  --arm [SOCKET]    servir l'ARM de QEMU (qosmo, CALYPSO_DSP_EXTERN=1) :\n"
         "                    API RAM partagee dans /dev/shm%s, trame verrouillee\n"
         "                    sur %s\n"
@@ -104,6 +107,7 @@ int main(int argc, char **argv)
 {
     const char *rom_dir = "/opt/GSM";
     const char *arm_sock = NULL;
+    int rejeu = 0, bsic_rej = 7;
     const char *iq_mode = "none";
     int amp = 30000;
     long trames = 100, insns = -1;
@@ -118,6 +122,8 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--verbeux"))                 verbeux = true;
         else if (!strcmp(a, "--iq") && i + 1 < argc)      iq_mode = argv[++i];
         else if (!strcmp(a, "--amp") && i + 1 < argc)     amp = atoi(argv[++i]);
+        else if (!strcmp(a, "--rejouer")) { rejeu = 1; }
+        else if (!strcmp(a, "--bsic") && i + 1 < argc) bsic_rej = atoi(argv[++i]);
         else if (!strcmp(a, "--arm")) {
             arm_sock = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : CALYPSO_PONT_SOCK;
         }
@@ -185,6 +191,17 @@ int main(int argc, char **argv)
     printf("%d sections chargees, reset...\n", charges);
     c54x_reset(dsp);
 
+    if (rejeu) {
+        calypso_dma_init();
+        calypso_bsp_init(dsp);
+        /* en rejeu : budget DSP complet et cellule injectee par defaut */
+        if (insns < 32000) insns = 32000;
+        if (!iq_mode || !*iq_mode || !strcmp(iq_mode, "none")) iq_mode = "cell";
+        int rc = rejouer(dsp, api_ram, trames > 100 ? trames : 4000, insns,
+                         iq_mode ? iq_mode : "cell", amp, bsic_rej, verbeux);
+        verbosite_retirer();
+        return rc;
+    }
     if (arm_sock) {
         /* Comme calypso_trx_init() de qosmo-dsp apres le reset. */
         calypso_dma_init();

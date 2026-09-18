@@ -27,6 +27,7 @@
 #include "calypso_c54x.h"
 #include "calypso_dma.h"
 #include "calypso_bsp.h"
+#include "calypso_twl3025.h"
 #include "calypso_rhea_dma.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
@@ -368,6 +369,64 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
         (*injectes)++;
 }
 
+
+/* [2026-09-17] REGISTRE DES HACKS ACTIFS. Regle : tout ecart au comportement natif
+ * (TOA cannee, rotation AFC forcee, livraison directe, verrou, etc.) est liste ici
+ * et la liste est imprimee sur CHAQUE ligne jalon. Un jalon atteint avec une liste
+ * non vide n'est pas un jalon natif. Le stimulus (cellule synthetique) est affiche
+ * a part : c'est l'entree du test, pas une bequille. */
+
+/* [2026-09-17] Encodeur SB, inverse EXACT de l1s_decode_sb (prim_fbsb.c) et
+ * identique a shunt_encode_sb de qemu-src : {bsic, T1, T2, T3} -> mot sb 25 bits.
+ * Le firmware lit sb = a_sch[3] | a_sch[4]<<16 puis bsic=(sb>>2)&0x3f, etc. */
+static uint32_t pont_encode_sb(uint8_t bsic, uint16_t t1, uint8_t t2, uint8_t t3)
+{
+    uint8_t t3p = (t3 == 0) ? 0 : (uint8_t)((t3 - 1) / 10);
+    uint32_t sb = 0;
+    sb |= ((uint32_t)(bsic & 0x3f)) << 2;
+    sb |= ((uint32_t)(t1 & 0x001)) << 23;
+    sb |= ((uint32_t)(t1 & 0x1fe)) << 7;
+    sb |= ((uint32_t)(t1 & 0x600)) >> 9;
+    sb |= ((uint32_t)(t2 & 0x1f))  << 18;
+    sb |= ((uint32_t)(t3p & 1))    << 24;
+    sb |= ((uint32_t)(t3p & 6))    << 15;
+    return sb;
+}
+
+static const char *hacks_actifs(void)
+{
+    static char buf[512]; buf[0] = 0;
+    struct { const char *env, *tag; int mode; } t[] = {   /* mode 0: set&non-vide ; 1: =='1' ; 2: =='0' ; 3: entier != 0 ; 4: entier >= 0 */
+        {"PONT_CAN_TOA","CAN_TOA",4}, {"PONT_CAN_SB_TOA","CAN_SB_TOA",4}, {"PONT_CAN_SB","CAN_SB_FULL",0},
+        {"CALYPSO_TWL3025_AFC_HZ","AFC_HZ",3}, {"CALYPSO_TWL3025_AFC","AFC_OFF",2},
+        {"CALYPSO_TWL3025_AFC_SIGN_OLD","AFC_SIGN_OLD",0},
+        {"CALYPSO_BSP_VEC30","VEC30",1}, {"CALYPSO_BSP_DIRECT_FEED","DIRECT_FEED",1},
+        {"CALYPSO_BSP_RX_LEAD","RX_LEAD",3}, {"CALYPSO_BSP_TPU_TRACK","TPU_TRACK",1},
+        {"CALYPSO_BSP_TOA_LOCK","TOA_LOCK",1}, {"CALYPSO_BSP_STREAM","STREAM",1},
+        {"CALYPSO_PONT_LOCKSTEP","LOCKSTEP",1}, {"CALYPSO_BSP_IQ_PASSTHROUGH","IQ_SYNTH",2},
+        {"CALYPSO_RHEA_DMA_XFER","RHEA_DMA",1}, {"CALYPSO_BSP_RX_VEC","RX_VEC",0},
+        {"CELLULE_SCH_ONLY","SCH_ONLY",1}, {"CELLULE_SCH_AMPDIV","SCH_AMPDIV",3},
+        {"CALYPSO_FIXES","FIXES",0},
+    };
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        const char *v = getenv(t[i].env); if (!v || !*v) continue;
+        int on = 0; long n = atol(v);
+        switch (t[i].mode) { case 0: on = 1; break; case 1: on = (*v=='1'); break; case 2: on = (*v=='0'); break;
+                             case 3: on = (n != 0); break; case 4: on = (n >= 0); break; }
+        if (!on) continue;
+        size_t l = strlen(buf);
+        if (t[i].mode == 3 || t[i].mode == 4) snprintf(buf + l, sizeof buf - l, "%s%s=%ld", l ? "," : "", t[i].tag, n);
+        else snprintf(buf + l, sizeof buf - l, "%s%s", l ? "," : "", t[i].tag);
+    }
+    /* fixes de decodeur desactives = ecart aussi */
+    static const char *fx[] = {"NORM_SD","F7_DELAYED","MPY_MAC_LK","MACP_MACD","PAR_ST_DSTBAR","STL_STH_SHFT","XCCD","ADDSUB_XSHFT","FIRS_RPT","RPT_COUNT"};
+    for (unsigned i = 0; i < sizeof fx / sizeof fx[0]; i++) {
+        char e[64]; snprintf(e, sizeof e, "CALYPSO_FIX_%s", fx[i]); const char *v = getenv(e);
+        if (v && *v == '0') { size_t l = strlen(buf); snprintf(buf + l, sizeof buf - l, "%sFIX_%s=0", l ? "," : "", fx[i]); }
+    }
+    return buf[0] ? buf : "aucun";
+}
+
 static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool verbeux,
                    const char *iq_mode, int amp)
 {
@@ -414,6 +473,15 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
         case PONT_TICK: {
             g_c54x_exe_fn = m.a;
             calypso_bsp_set_tpu_offset((int)m.c);   /* [2026-09-17] fenetre RX du firmware */
+            /* [2026-09-17] RELAIS AFC (boucle fermee). L'ARM ecrit d_afc (mot 15 de
+             * la page W) dans l'API RAM PARTAGEE ; sur silicium le DSP le serialise
+             * vers le TWL3025 par le TSP. Personne ne le faisait ici : la rotation
+             * des echantillons restait figee et l'erreur de frequence ne convergeait
+             * jamais sous le seuil SB. m.b porte d_dsp_page (bit0 = page W). */
+            { unsigned wp = m.b & 1u;
+              int16_t dac = (int16_t)api_ram[(wp ? 0x14u : 0x00u) + 15u];
+              static int16_t prev; static int first = 1;
+              if (first || dac != prev) { calypso_twl3025_set_afc_dac(dac); prev = dac; first = 0; } }
             { static unsigned _to=0; if (getenv("PONT_TPU_DEBUG") && (_to<5 || _to%2000==0)) printf("  [tpu] fn=%u tpu_offset=%u\n", m.a, m.c); _to++; }
             trace_armer();
             if (g_trace_reste > 0 && g_trace_f && !g_trace_ouverte && !g_trace_pc_hi) {
@@ -475,6 +543,32 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     api_ram[(API_R_PAGE(0) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
                     api_ram[(API_R_PAGE(1) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
                 }
+                /* CANNING SB COMPLET (PONT_CAN_SB=<bsic>) : ecrit le resultat SB (a_sch)
+                 * avec CRC OK + BSIC + le vrai numero de trame, comme shunt_encode_sb de
+                 * qemu-src. La trame vient du dernier burst livre (BTS reel via calypso_bsp
+                 * _get_last_fn) sinon de m.a. Ne s'applique que quand l'ARM demande la SB
+                 * (d_task_md=6 sur une page W) et sur une trame SCH (fn%51 dans {1,11,21,31,41}). */
+                static int can_sb_full = -2, can_sb_bsic = 7;
+                if (can_sb_full == -2) { const char *e = getenv("PONT_CAN_SB"); can_sb_full = (e && *e) ? 1 : 0; if (e && *e) can_sb_bsic = atoi(e) & 0x3f; }
+                if (can_sb_full) {
+                    int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;   /* d_task_md W0/W1 */
+                    if (md0 == 6 || md1 == 6) {
+                        uint32_t bfn = calypso_bsp_get_last_fn(); if (bfn == 0) bfn = m.a;
+                        uint32_t p51 = bfn % 51;
+                        if (!(p51 % 10 == 1 && p51 <= 41)) bfn += (51 + 1 - (int)p51) % 51;  /* caler sur une trame SCH */
+                        uint32_t sb = pont_encode_sb((uint8_t)can_sb_bsic, bfn / 1326, bfn % 26, bfn % 51);
+                        for (int pg = 0; pg < 2; pg++) {
+                            uint16_t *a = &api_ram[(API_R_PAGE(pg) + RP_A_SCH) / 2];
+                            a[0] = 0x8000;                 /* B_SCH_CRC clear = CRC OK */
+                            a[1] = 0x2034;                 /* echo (comme le DSP) */
+                            a[3] = (uint16_t)(sb & 0xffff);
+                            a[4] = (uint16_t)(sb >> 16);
+                        }
+                        static int nlog = 0;
+                        if (nlog < 8) { printf("  [can-sb] fn=%u -> sb=0x%08x BSIC=%d (T1=%u T2=%u T3=%u)  hacks=%s\n",
+                                                bfn, sb, can_sb_bsic, bfn/1326, bfn%26, bfn%51, hacks_actifs()); nlog++; }
+                    }
+                }
             }
             if (*d_fb_det) calypso_bsp_toa_feedback((int)(int16_t)a_sync[0]);  /* verrou TOA natif */
             trames++;
@@ -484,6 +578,17 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             if (!init_avant && init_done) {
                 printf("pont : DSP boote (premier IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
             }
+            /* (b) trame a laquelle l'ARM poste la tache FB/SB (W0 mot 4, W1 mot 0x18) */
+            { static int prev5 = -1, prev6 = -1, ncmd = 0;
+              int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;
+              int has5 = (md0 == 5 || md1 == 5), has6 = (md0 == 6 || md1 == 6);
+              if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache FB postee par l'ARM\n", m.a); ncmd++; }
+              if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
+              prev5 = has5; prev6 = has6; }
+            { static int fb_prev = 0; if (*d_fb_det && !fb_prev) printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs()); fb_prev = *d_fb_det != 0; }
+            { static int crc_prev = 1; int crc_ok = (a_sch0[0] & 0x8100) == 0x8000;
+              if (crc_ok && !crc_prev) printf("  [jalon] fn=%u SB CRC OK a_sch=%04x %04x %04x %04x  hacks=%s\n", m.a, a_sch0[0], a_sch0[1], a_sch0[3], a_sch0[4], hacks_actifs());
+              crc_prev = crc_ok; }
             if ((trames % 217) == 0) {
                 profil_publier();
                 pcc_publier();
@@ -498,6 +603,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                        (drapeaux & PONT_DONE_INIT) ? "" : "boot ",
                        *d_fb_det, a_sch0[0], a_sch0[1], a_sch0[2], a_sch0[3],
                        a_sync[0], a_sync[1], a_sync[2], trames, irqs, injectes);
+                if ((trames % (217*8)) == 0) printf("  hacks actifs : %s ; stimulus : %s\n", hacks_actifs(), iq_mode ? iq_mode : "none");
             }
             fflush(stdout);
             break;
