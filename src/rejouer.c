@@ -141,6 +141,8 @@ static unsigned long hit_7d1c, hit_7d1d, hit_7d1e, hit_81e4;
  * distinct opcodes executed inside the SB demod with their pass count and one
  * witness PC: that gives a finite list to audit against SPRU172C instead of an
  * intuition. REJEU_OPCODES=1. */
+static uint16_t g_ad_avant;
+static uint32_t g_vie_fn; static uint16_t g_vie_ad;
 static int g_dans_sb;            /* true between 0x7c31 (demod) and 0x9841 (decoder) */
 static unsigned long g_op_n[65536];
 static unsigned long g_op_dec[65536];   /* DECODER opcodes, region 0x9800-0x9bff */
@@ -708,6 +710,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
         if (injecter && rx_avant) {
             g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
             g_livre_fn = fn_cur; g_livre_n = n_iq;
+            g_ad_avant = calypso_bsp_get_daram_addr();
+            { static int da = -1; static unsigned nd;
+              if (da < 0) da = getenv("REJEU_ADR") ? 1 : 0;
+              if (da && nd < 14) { nd++;
+                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
+                         fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
+                         calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
         }
         /* frame interrupt: the DSP reads the task and arms its RX window */
@@ -780,7 +789,62 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   }
               } }
             memcpy(g_livre_iq, iq, (size_t)n_iq * sizeof(int16_t)); g_livre_niq = n_iq;
+            { static int da = -1; static unsigned nd;
+              if (da < 0) da = getenv("REJEU_ADR") ? 1 : 0;
+              if (da && nd < 14) { nd++;
+                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
+                         fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
+                         calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
+            if (getenv("CALYPSO_BSP_VERIF")) {
+                static int dit;
+                if (!dit) { dit = 1;
+                    printf("  [mem] api est-il un alias de data[0x0800] ? %s\n",
+                           (void *)api == (void *)&dsp->data[0x0800] ? "OUI" : "NON — deux memoires distinctes");
+                    printf("        api[0x0cce-0x0800]=%04x   data[0x0cce]=%04x\n",
+                           api[0x0cce - 0x0800], dsp->data[0x0cce]); }
+                static unsigned nvr;
+                uint32_t vfn; uint16_t vad; int vn;
+                int id = calypso_bsp_verif_compare(&vfn, &vad, &vn);
+                if (id >= 0 && nvr < 8) { nvr++;
+                    printf("  [ref] fn=%-4u type=%c : %d/%d identiques en 0x%04x%s\n",
+                           vfn, g_livre_type ? g_livre_type : '?', id, vn, vad,
+                           id == vn ? "   VALIDE" : "   <<< ECRITURE FAUSSE"); }
+            }
+            { static int vv = -1; static unsigned nv;
+              if (vv < 0) vv = getenv("REJEU_VIE") ? 1 : 0;
+              if (vv && g_livre_type == 'S' && nv < 6) { nv++;
+                  uint16_t ad = calypso_bsp_get_daram_addr();
+                  printf("  [vie] fn=%-4u adresse APRES l'appel : 0x%04x (avant : 0x%04x)\n",
+                         fn_cur, ad, g_ad_avant);
+                  int ex = 0, best = 0, bex = -1;
+                  for (int sh = -8; sh <= 44; sh++) {
+                      int e = 0;
+                      for (int k = 0; k < 280; k++) {
+                          int j = k + sh; if (j < 0 || j >= n_iq) continue;
+                          if ((int16_t)dsp->data[(ad + k) & 0x3fff] == iq[j]) e++;
+                      }
+                      if (e > bex) { bex = e; best = sh; }
+                      if (sh == 0) ex = e;
+                  }
+                  printf("  [vie] fn=%-4u APRES depot en 0x%04x : shift0=%d/280  meilleur shift=%+d avec %d/280\n",
+                         fn_cur, ad, ex, best, bex);
+                  if (bex < 200) {   /* pas trouve la : ou est le burst ? */
+                      int ba = -1, bn = 0;
+                      for (unsigned a = 0; a + 280 < 0x4000; a++) {
+                          int e = 0;
+                          for (int k = 0; k < 64; k++)
+                              if ((int16_t)dsp->data[a + k] == iq[k]) e++;
+                          if (e > bn) { bn = e; ba = (int)a; }
+                      }
+                      if (bn >= 60) {
+                          int tot = 0;
+                          for (int k = 0; k < 280; k++)
+                              if ((int16_t)dsp->data[(ba + k) & 0x3fff] == iq[k]) tot++;
+                          printf("        -> burst TROUVE en 0x%04x : %d/280 identiques\n", ba, tot);
+                      } else printf("        -> burst introuvable en DARAM (meilleur %d/64 en 0x%04x)\n", bn, ba);
+                  }
+                  g_vie_fn = fn_cur; g_vie_ad = ad; } }
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
         }
         long done = 0;
@@ -1164,6 +1228,107 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * the margin), FIRS carries nothing, and yet `sth *AR6+,B` at 0x8497 is
                  * what writes the soft bits. Trace A and B over the whole window
                  * 0x8470..0x84a0 to see where B takes its value. REJEU_TRACE_B=1. */
+                /* 0x847c / 0x8498 : op=0x4485 = LD Smem,16,A per tic54x-opc.c
+                 * (0x4400/0xFE00). No handler matches this mask in c54x_exec.c,
+                 * yet A changes across it. Dump A before/after and every AR with
+                 * the word it points at, to find where the value comes from. */
+                /* Dump the DSP work buffers at the correlator entry, together with
+                 * the real burst that was fed, so an external model can identify what
+                 * each buffer holds instead of guessing. REJEU_DUMP_BUF=<path>. */
+                /* Who writes the BSP deposit window 0x0cce, and when? At correlator
+                 * entry the window holds none of the injected bursts and its content
+                 * does not change between frames. Shadow the window, log each change
+                 * with the PC that made it. REJEU_QUI_CCE=1. */
+                /* Timeline of the deposit window on one SB frame: every change with
+                 * the PC and the instruction count, plus the correlator entry. Tells
+                 * whether the burst is destroyed before or after the SB reads it.
+                 * REJEU_CHRONO=<fn>. */
+                { static long cf = -2; static uint16_t sh2[380]; static int ini2; static unsigned nl;
+                  if (cf == -2) { const char *e = getenv("REJEU_CHRONO"); cf = e ? atol(e) : -1; }
+                  if (cf >= 0 && (long)fn_cur == cf) {
+                      if (!ini2) { for (int k=0;k<380;k++) sh2[k]=dsp->data[0x0cce + k]; ini2=1;
+                                   printf("  [chrono] trame %ld\n", cf); }
+                      unsigned chg=0;
+                      for (int k=0;k<380;k++) { uint16_t v=dsp->data[0x0cce + k];
+                          if (v!=sh2[k]) { chg++; sh2[k]=v; } }
+                      if (chg && nl < 24) { nl++;
+                          printf("      insn=%-8u pc=%04x  %4u mots changes\n",
+                                 dsp->insn_count, pc, chg); }
+                      if (pc == 0x84a0 && nl < 30) { nl++;
+                          printf("      insn=%-8u pc=84a0  <== ENTREE DU CORRELATEUR SB\n",
+                                 dsp->insn_count); }
+                      if (pc == 0x7c31 && nl < 30) { nl++;
+                          printf("      insn=%-8u pc=7c31  <== entree du demodulateur SB\n",
+                                 dsp->insn_count); }
+                  } }
+                { static int qc = -1; static uint16_t sh[380]; static int ini;
+                  static unsigned long par_pc[0x10000], tot; static unsigned long nfr[64];
+                  if (qc < 0) qc = getenv("REJEU_QUI_CCE") ? 1 : 0;
+                  if (qc) {
+                      if (!ini) { for (int k=0;k<380;k++) sh[k]=dsp->data[0x0cce + k]; ini=1; }
+                      unsigned chg = 0;
+                      for (int k=0;k<380;k++) {
+                          uint16_t v = dsp->data[0x0cce + k];
+                          if (v != sh[k]) { chg++; sh[k]=v; }
+                      }
+                      if (chg) { par_pc[pc] += chg; nfr[fn_cur & 63] += chg; }
+                      if (++tot % 500000 == 0) {
+                          printf("  [cce] ecrivains de 0x0cce (mots modifies) :\n");
+                          for (int r=0;r<6;r++) {
+                              unsigned best=0; unsigned long bv=0;
+                              for (unsigned i=0;i<0x10000;i++) if (par_pc[i]>bv){bv=par_pc[i];best=i;}
+                              if (!bv) break;
+                              printf("      pc=%04x op=%04x : %lu mots\n", best,
+                                     prog_ovly(dsp,(uint16_t)best), bv);
+                              par_pc[best]=0;
+                          }
+                          tot=1;
+                      }
+                  } }
+                { static int vv2 = -1; static unsigned nv2;
+                  if (vv2 < 0) vv2 = getenv("REJEU_VIE") ? 1 : 0;
+                  if (vv2 && pc == 0x84a0 && g_vie_ad && nv2 < 5) { nv2++;
+                      int ex = 0;
+                      for (int k = 0; k < 296; k++)
+                          if ((int16_t)dsp->data[(g_vie_ad + k) & 0x3fff] == g_livre_iq[2*marge_tete() + k]) ex++;
+                      printf("  [vie] fn=%-4u ENTREE CORRELATEUR (depot de fn=%u) : %d/296 identiques\n",
+                             fn_cur, g_vie_fn, ex); } }
+                { static int db = -1; static FILE *fb;
+                  if (db < 0) { const char *e = getenv("REJEU_DUMP_BUF");
+                                db = e ? 1 : 0; if (db) fb = fopen(e, "wb"); }
+                  if (db && fb && pc == 0x84a0 && g_n_reels) {
+                      int ri = g_reel_pour_fn[g_sb_cmd_fn & 63];
+                      if (ri >= 0) {
+                          static int nb;
+                          if (nb < 8) { nb++;
+                              uint32_t hdr[4] = { g_sb_cmd_fn, (uint32_t)ri,
+                                                  g_reels_fn[ri], g_reels_bsic[ri] };
+                              fwrite(hdr, 4, 4, fb);
+                              fwrite(g_reels[ri], 2, 296, fb);          /* le burst injecte */
+                              fwrite(&dsp->data[0x0cce], 2, 380, fb);   /* depot BSP */
+                              fwrite(&dsp->data[0x2a00], 2, 256, fb);   /* tampon 1 */
+                              fwrite(&dsp->data[0x2ac0], 2, 256, fb);   /* tampon 2 */
+                              fwrite(&dsp->data[0x2c72], 2, 78, fb);    /* bits souples */
+                              fwrite(g_reels_code[ri], 1, 78, fb);      /* bits emis */
+                              fflush(fb);
+                          }
+                      }
+                  } }
+                { static int q4 = -1; static unsigned n4; static int64_t avant; static int arme;
+                  if (q4 < 0) q4 = getenv("REJEU_Q4485") ? 1 : 0;
+                  if (q4) {
+                      if (arme) { arme = 0;
+                          printf("        -> A apres = %010llx\n",
+                                 (unsigned long long)(dsp->a & 0xffffffffffULL)); }
+                      if ((pc == 0x847c || pc == 0x8498) && n4 < 6) {
+                          n4++; avant = dsp->a; arme = 1;
+                          printf("    [4485] pc=%04x op=%04x  A avant = %010llx\n",
+                                 pc, prog_ovly(dsp, pc), (unsigned long long)(avant & 0xffffffffffULL));
+                          for (int k = 0; k < 8; k++)
+                              printf("        AR%d=%04x -> %04x\n", k, dsp->ar[k],
+                                     dsp->data[dsp->ar[k] & 0x3fff]);
+                      }
+                  } }
                 { static int tb = -1; static unsigned ntb;
                   if (tb < 0) tb = getenv("REJEU_TRACE_B") ? 1 : 0;
                   if (tb && ntb < 70 && pc >= 0x8470 && pc <= 0x84a0) {
