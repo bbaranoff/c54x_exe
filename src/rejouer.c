@@ -804,11 +804,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     printf("        api[0x0cce-0x0800]=%04x   data[0x0cce]=%04x\n",
                            api[0x0cce - 0x0800], dsp->data[0x0cce]); }
                 static unsigned nvr;
-                uint32_t vfn; uint16_t vad; int vn;
-                int id = calypso_bsp_verif_compare(&vfn, &vad, &vn);
+                uint32_t vfn; uint16_t vad; int vn, vage;
+                int id = calypso_bsp_verif_compare(&vfn, &vad, &vn, &vage);
                 if (id >= 0 && nvr < 8) { nvr++;
-                    printf("  [ref] fn=%-4u type=%c : %d/%d identiques en 0x%04x%s\n",
-                           vfn, g_livre_type ? g_livre_type : '?', id, vn, vad,
+                    printf("  [ref] fn=%-4u type=%c age=%d : %d/%d identiques en 0x%04x%s\n",
+                           vfn, g_livre_type ? g_livre_type : '?', vage, id, vn, vad,
                            id == vn ? "   VALIDE" : "   <<< ECRITURE FAUSSE"); }
             }
             { static int vv = -1; static unsigned nv;

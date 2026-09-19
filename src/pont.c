@@ -399,6 +399,8 @@ static void reelle_injecter(C54xState *dsp, unsigned long *injectes)
 }
 
 /* Inject one burst (synthetic cell or plain signal) into the RIF/BSP path. */
+static int g_verif_sonde = -1;
+
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn,
                            unsigned long *injectes)
 {
@@ -507,6 +509,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     unsigned long injectes = 0;
     const uint16_t *a_sync = &api_ram[(API_NDB + NDB_A_SYNC_DEMOD) / 2];
     bool init_done = false;
+    if (g_verif_sonde < 0) g_verif_sonde = getenv("CALYPSO_BSP_VERIF") ? 1 : 0;
     unsigned long trames = 0, irqs = 0, resets = 0;
     uint64_t insns_total = 0;
     const uint16_t *d_fb_det = &api_ram[(API_NDB + NDB_D_FB_DET) / 2];
@@ -586,6 +589,21 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             uint32_t ninsn = 0;
             bool init_avant = init_done;
             uint32_t drapeaux = jouer_trame(dsp, insns, &init_done, &ninsn);
+            /* Reference probe (CALYPSO_BSP_VERIF=1): compare DARAM against the
+             * burst the BSP was handed, AFTER the DSP has run — the samples
+             * only reach DARAM through the DSP's own DMA draining the RIF, so
+             * there is nothing to compare before jouer_trame. */
+            if (g_verif_sonde) {
+                uint32_t vfn = 0; uint16_t vad = 0; int vn = 0, vage = 0;
+                int ident = calypso_bsp_verif_compare(&vfn, &vad, &vn, &vage);
+                if (ident >= 0 && vn > 0) {
+                    static unsigned nv;
+                    if (nv++ < 4000)
+                        printf("  [verif] fn=%u p51=%u age=%d : %d/%d en 0x%04x %s\n",
+                               vfn, vfn % 51u, vage, ident, vn, vad,
+                               ident == vn ? "VALIDE" : "partiel");
+                }
+            }
             if (rx_apres && injecter && init_done && dsp->running) {
                 injecter_burst(dsp, iq_mode, amp, m.a, &injectes);
                 /* DMA completion inside the same frame: wake on the held INT10n
