@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 #include "calypso_c54x.h"
 #include "calypso_bsp.h"
 #include "hw/arm/calypso/calypso_api.h"
@@ -57,7 +58,18 @@
  * coup offset=22 pour marge=21, le midambule a 56/63, les donnees a 71-73/78 avec
  * des echantillons pourtant parfaits, et le pic de correlation qui saute entre
  * rangs adjacents. Le pont, lui, etait juste depuis le debut. */
-#define DECALAGE_SYMB 0.5
+/* [2026-09-18] Reglable pour le balayage : la valeur 0,5 (centre du symbole) est
+ * argumentee ci-dessus, mais c'est une hypothese et le banc doit pouvoir la tester.
+ * REJEU_DECALAGE_SYMB=<x>, defaut 0.5. */
+static double decalage_symb(void)
+{
+    static double d = -1.0;
+    if (d < 0) { const char *e = getenv("REJEU_DECALAGE_SYMB");
+                 d = (e && *e) ? atof(e) : 0.5;
+                 if (d < 0 || d >= 1.0) d = 0.5; }
+    return d;
+}
+#define DECALAGE_SYMB decalage_symb()
 /* marge de tete reglable (REJEU_MARGE, defaut 21) ; la queue complete a 190 complexes */
 static int marge_tete(void)
 {
@@ -124,6 +136,67 @@ static int      n_2a0;   /* E0=FIRS E1=LMS E2=SQDST E3=ABDST */
 static int      g_bsic_injecte;   /* BSIC reellement emis par la cellule */
 static int      trace;
 static unsigned long hit_7c31, hit_9841, hit_84a1, hit_770a, hit_b219, hit_7a16;
+static unsigned long hit_8478, hit_8492, hit_8493, hit_8497;
+/* [2026-09-19] INVENTAIRE DES OPCODES DU CHEMIN SB. Le defaut est circonscrit a
+ * la fenetre 0x84a1..0x8497 mais on ignore QUELLE instruction est mal emulee.
+ * On recense les opcodes distincts executes dans le demod SB, avec leur nombre
+ * de passages et un PC temoin : cela donne une liste finie a auditer contre
+ * SPRU172C, au lieu d'une intuition. REJEU_OPCODES=1. */
+static int g_dans_sb;            /* vrai entre 0x7c31 (demod) et 0x9841 (decodeur) */
+static unsigned long g_op_n[65536];
+static unsigned long g_op_dec[65536];
+static unsigned long g_op_eq[65536];    /* opcodes de l'EGALISEUR, region 0x8400-0x84ff */
+static unsigned long g_n_dec;           /* nombre de decodages (passages en 0x9841) */   /* opcodes du DECODEUR, region 0x9800-0x98ff */
+static uint16_t      g_op_pc[65536];
+
+/* [2026-09-18] BURSTS SCH REELS. Jusqu'ici le DSP n'a jamais vu autre chose que
+ * notre propre fixture : un SCH GMSK synthetique a 1 echantillon/symbole. Tous
+ * les defauts trouves etaient en amont de lui, donc la question « la ROM est-elle
+ * saine, ou la fixture est-elle trop pauvre pour un egaliseur coherent ? » reste
+ * ouverte. On injecte donc des bursts SCH EXTRAITS D'UNE VRAIE CAPTURE
+ * (ptrkrysik/test_data, ARFCN 725, USRP decimation 174 -> 574 712,6 Hz), dont on
+ * connait la reponse : BSIC=32, decodage Viterbi a 0 erreur, CRC conforme.
+ * REJEU_SCH_REEL=<fichier>. Le cadre ne change pas -- memes marges, meme
+ * cadencement -- SEUL le contenu du burst change. */
+static int16_t (*g_reels)[296];
+static uint8_t (*g_reels_code)[78];      /* les 78 bits REELLEMENT emis */
+static uint32_t *g_reels_fn; static uint16_t *g_reels_bsic;
+static unsigned g_n_reels, g_reel_i;
+static int g_reel_pour_fn[64];           /* quelle trame a recu quel burst */
+static int reels_charger(const char *chemin)
+{
+    FILE *f = fopen(chemin, "rb");
+    if (!f) { fprintf(stderr, "SCH reels : %s illisible\n", chemin); return -1; }
+    uint32_t n = 0, nsym = 0, ncode = 0;
+    if (fread(&n, 4, 1, f) != 1 || fread(&nsym, 4, 1, f) != 1 ||
+        fread(&ncode, 4, 1, f) != 1 || nsym != 148 || ncode != 78 || !n) {
+        fprintf(stderr, "SCH reels : entete invalide\n"); fclose(f); return -1; }
+    g_reels = calloc(n, sizeof *g_reels);
+    g_reels_code = calloc(n, sizeof *g_reels_code);
+    g_reels_fn = calloc(n, sizeof *g_reels_fn);
+    g_reels_bsic = calloc(n, sizeof *g_reels_bsic);
+    if (!g_reels || !g_reels_fn || !g_reels_bsic) { fclose(f); return -1; }
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t fn; uint16_t bsic; uint8_t pad[2];
+        if (fread(&fn,4,1,f)!=1 || fread(&bsic,2,1,f)!=1 || fread(pad,1,2,f)!=2 ||
+            fread(g_reels[i], sizeof(int16_t), 296, f) != 296 ||
+            fread(g_reels_code[i], 1, 78, f) != 78) { n = i; break; }
+        g_reels_fn[i] = fn; g_reels_bsic[i] = bsic;
+    }
+    fclose(f); g_n_reels = n;
+    for (int i = 0; i < 64; i++) g_reel_pour_fn[i] = -1;
+    printf("SCH reels : %u bursts charges depuis %s (BSIC attendu %u)\n",
+           n, chemin, n ? g_reels_bsic[0] : 0);
+    return n ? 0 : -1;
+}
+/* Lecture de l'espace PROGRAMME telle que le coeur la fait : avec OVLY, la DARAM
+ * 0x0060..0x27FF est aliasee en programme. Lire dsp->prog[] directement rate cet
+ * alias -- c'est exactement le piege que la sonde FIRS doit eviter. */
+static uint16_t prog_ovly(C54xState *d, uint16_t a)
+{
+    if ((d->pmst & (1u << 5)) && a >= 0x0060 && a < 0x2800) return d->data[a];
+    return d->prog[a];
+}
 
 static void plan(int delay, cb_t cb, int attempt)
 {
@@ -163,14 +236,32 @@ static void plan_fb_set(int delay, int mode)
     plan(delay + 0, fbdet_cmd, 0);
     for (int a = 1; a <= 12; a++) plan(delay + 1 + a, fbdet_resp, a);
 }
+static int sb_uniq(void)
+{
+    static int u = -1;
+    if (u < 0) u = drapeau_env("REJEU_SB_UNIQUE") ? 1 : 0;
+    return u;
+}
+/* Derniere tentative SB planifiee : c'est elle qui doit relancer une acquisition.
+ * La relance etait cablee en dur sur « attempt == 2 » ; avec une commande unique cette
+ * tentative n'existe plus et le banc se taisait apres un seul essai. */
+static int sb_dernier_essai(void) { return sb_uniq() ? 1 : 2; }
+
 static void plan_sb_set(int delay)
 {
+    /* [2026-09-18] Le DSP demodule le burst de la trame qui SUIT la commande (mesure
+     * par perturbation : commande a fn=11 -> seule une perturbation a fn=12 change les
+     * softs). Poster sur DEUX trames consecutives fait donc consommer f et f+1 ; or les
+     * trames SCH sont espacees de 10, donc la seconde tentative lit toujours un burst
+     * FACTICE, d'ou la moitie des mesures sur une entree constante. REJEU_SB_UNIQUE=1
+     * ne poste qu'une commande, pour que toute tentative porte sur un vrai SCH. */
     plan(delay + 0, sbdet_cmd, 1);
-    plan(delay + 1, sbdet_cmd, 2);
+    if (!sb_uniq()) plan(delay + 1, sbdet_cmd, 2);
     plan(delay + 3, sbdet_resp, 1);
-    plan(delay + 4, sbdet_resp, 2);
+    if (!sb_uniq()) plan(delay + 4, sbdet_resp, 2);
 }
 
+static uint32_t g_sb_cmd_fn;   /* trame de la DERNIERE commande SB = celle que le DSP demodule */
 static uint32_t fb_cmd_fn;      /* trame ou l'ARM a poste la tache FB */
 static void fbdet_cmd(int unused)
 {
@@ -247,6 +338,20 @@ static void fbdet_resp(int attempt)
                  * rigoureusement identique d'un run a l'autre. */
                 while (!((f % 51) % 10 == 1 && (f % 51) <= 41)) f++;
                 delay = (int)(f - fn_cur);
+                /* [2026-09-18] LA TRAME CONSOMMEE N'EST PAS LA PREMIERE COMMANDE.
+                 * plan_sb_set poste la tache sur DEUX trames (delay+0 et delay+1) et le
+                 * DSP demodule le burst de la SECONDE : mesure par perturbation d'un
+                 * echantillon brut, trame par trame, sur fn 9..15 -- seule fn=12 change
+                 * les bits souples lus a fn=14/15, alors que le [force] visait fn=11.
+                 * On calait donc le SCH sur la trame 11 et le DSP demodulait la 12, qui
+                 * porte un burst FACTICE (motif fixe de 45.002 §5.2.6). D'ou une entree
+                 * CONSTANTE : softs figes, etendue identique d'une trame a l'autre, et
+                 * des CRC OK qui redonnent tous le meme mot a des dizaines de trames
+                 * d'ecart. Reculer d'une trame aligne la trame CONSOMMEE sur le SCH.
+                 * REJEU_SB_DECALAGE=<n> pour explorer (defaut -1). */
+                { static int d = -2; if (d == -2) { const char *e = getenv("REJEU_SB_DECALAGE");
+                                                    d = e ? atoi(e) : -1; }
+                  delay += d; if (delay < 0) delay = 0; }
                 if (trace) printf("    [force] SB vise fn=%u (p51=%u), delay=%d\n", f, f % 51, delay);
             }
             plan_sb_set(delay);
@@ -256,6 +361,7 @@ static void fbdet_resp(int attempt)
 
 static void sbdet_cmd(int attempt)
 {
+    g_sb_cmd_fn = fn_cur;
     if (trace) { unsigned p = fn_cur % 51;
         printf("  SBcmd att=%d fn=%u p51=%u %s\n", attempt, fn_cur, p,
                (p % 10 == 1 && p <= 41) ? "<- trame SCH (bon)" : "<- PAS une trame SCH"); }
@@ -284,6 +390,117 @@ static void sbdet_resp(int attempt)
                 if (v < mn) mn = v;
                 if (v > mx) mx = v;
             }
+            /* [2026-09-18] LE FEED. Le tampon que le DSP demodule contient-il vraiment
+             * les echantillons livres, et a quel decalage ? On compare mot a mot le
+             * depot BSP avec le dernier burst livre, et on cherche le meilleur
+             * alignement : si le maximum n'est pas a 0, le burst est decale ; s'il est
+             * bas partout, ce n'est pas notre burst du tout. */
+            if (getenv("REJEU_FEED")) {
+                uint16_t ad = calypso_bsp_get_daram_addr();
+                int nl = g_livre_niq;
+                int best = 0, bestn = -1, n0 = 0;
+                for (int sh = -80; sh <= 80; sh++) {
+                    int m = 0;
+                    for (int k = 0; k < nl; k++) {
+                        int j = k + sh; if (j < 0 || j >= 2048) continue;
+                        if ((int16_t)dsp->data[(ad + j) & 0x3fff] == g_livre_iq[k]) m++;
+                    }
+                    if (sh == 0) n0 = m;
+                    if (m > bestn) { bestn = m; best = sh; }
+                }
+                printf("    [feed] fn=%u (livre fn=%u type=%c) addr=0x%04x len=%u nl=%d"
+                       "  identiques a shift0=%d/%d  meilleur shift=%d avec %d/%d\n",
+                       fn_cur, g_livre_fn, g_livre_type ? g_livre_type : '?', ad,
+                       calypso_bsp_get_daram_len(), nl, n0, nl, best, bestn, nl);
+            }
+            /* [2026-09-18] PROFIL D'ERREUR PAR POSITION. Agreger la concordance en un
+             * pourcentage cache l'information : ce qui discrimine, c'est OU les erreurs
+             * tombent. Les 78 bits codes occupent les symboles [3..41] (premiers 39) et
+             * [106..144] (derniers 39), le midambule est au centre [42..105]. Erreurs
+             * concentrees aux BORDS = estimation de canal juste au midambule et qui
+             * derive en s'en eloignant (rampe de phase / estime trop court). Erreurs
+             * uniformes = egaliseur faux. ~0 erreur sous une polarite = softs bons et
+             * bug en aval. On compare a la trame REELLEMENT demodulee (derniere
+             * commande SB), pas a la trame courante. */
+            /* [2026-09-19] FIRS lit son entree en 0x2a8e..0x2a9a (zone 0x2a00), alors
+             * que le BSP depose le burst en 0x0cce. Cette zone intermediaire est-elle
+             * remplie, et porte-t-elle bien notre burst ? */
+            if (getenv("REJEU_ZONE2A")) {
+                uint16_t ad = calypso_bsp_get_daram_addr();
+                int nz0 = 0, nz2 = 0;
+                for (int k = 0; k < 296; k++) {
+                    if (dsp->data[(ad + k) & 0x3fff]) nz0++;
+                    if (dsp->data[(0x2a00 + k) & 0x3fff]) nz2++;
+                }
+                printf("    [zone] depot 0x%04x : %d/296 non nuls | zone 0x2a00 : %d/296 non nuls\n",
+                       ad, nz0, nz2);
+                printf("      0x%04x : %04x %04x %04x %04x %04x %04x\n", ad,
+                       dsp->data[ad&0x3fff], dsp->data[(ad+1)&0x3fff], dsp->data[(ad+2)&0x3fff],
+                       dsp->data[(ad+3)&0x3fff], dsp->data[(ad+4)&0x3fff], dsp->data[(ad+5)&0x3fff]);
+                printf("      0x2a8e : %04x %04x %04x %04x %04x %04x   (entree lue par FIRS)\n",
+                       dsp->data[0x2a8e], dsp->data[0x2a8f], dsp->data[0x2a90],
+                       dsp->data[0x2a91], dsp->data[0x2a92], dsp->data[0x2a93]);
+            }
+            if (getenv("REJEU_PROFIL")) {
+                unsigned char att78[78];
+                int ri = g_n_reels ? g_reel_pour_fn[g_sb_cmd_fn & 63] : -1;
+                if (ri >= 0) memcpy(att78, g_reels_code[ri], 78);   /* verite REELLE */
+                else cellule_code_attendu(g_sb_cmd_fn, (uint8_t)g_bsic_injecte, att78);
+                int acc[2] = {0, 0};
+                char map[2][79];
+                for (int pol = 0; pol < 2; pol++) {
+                    for (int k = 0; k < 78; k++) {
+                        int16_t v = (int16_t)dsp->data[0x2c72 + k];
+                        int bit = pol ? (v > 0) : (v < 0);   /* deux conventions de signe */
+                        int ok = (bit == (att78[k] & 1));
+                        map[pol][k] = ok ? '.' : 'X';
+                        acc[pol] += ok;
+                    }
+                    map[pol][78] = 0;
+                }
+                /* [2026-09-18] BALAYAGE D'ALIGNEMENT. Le pic varie d'une trame a l'autre
+                 * (23, 20, 19...) : s'il place la fenetre de lecture, comparer a
+                 * l'alignement canonique compare des softs justes a un cadre faux, et
+                 * « decorrele » serait une conclusion fausse. On reconstruit le burst
+                 * attendu complet (3 tail + 39 + 64 TSC + 39 + 3 tail) et on cherche le
+                 * decalage s qui maximise la concordance. Si un s donne ~78/78, les
+                 * softs sont BONS et seul le cadrage est faux. */
+                {
+                    unsigned char burst[148];
+                    memset(burst, 0, 3);
+                    for (int k = 0; k < 39; k++) burst[3 + k] = att78[k];
+                    for (int k = 0; k < 64; k++) burst[42 + k] = (unsigned char)cellule_train_sb(k);
+                    for (int k = 0; k < 39; k++) burst[106 + k] = att78[39 + k];
+                    memset(burst + 145, 0, 3);
+                    int bs = 0, bp = 0, bv = -1;
+                    for (int sh = -40; sh <= 40; sh++) {
+                        for (int pol = 0; pol < 2; pol++) {
+                            int m = 0, n = 0;
+                            for (int k = 0; k < 78; k++) {
+                                int pos = (k < 39 ? 3 + k : 106 + (k - 39)) + sh;
+                                if (pos < 0 || pos >= 148) continue;
+                                int16_t v = (int16_t)dsp->data[0x2c72 + k];
+                                int bit = pol ? (v > 0) : (v < 0);
+                                if (bit == (burst[pos] & 1)) m++;
+                                n++;
+                            }
+                            if (n >= 60 && m > bv) { bv = m; bs = sh; bp = pol; }
+                        }
+                    }
+                    printf("    [align] meilleur decalage=%+d polarite=%d -> %d/78\n", bs, bp, bv);
+                }
+                int best = acc[1] > acc[0] ? 1 : 0;
+                printf("    [profil] fn_demod=%u (p51=%u) pic=%u : concordance pol0=%d/78 pol1=%d/78\n"
+                       "      premiers39 |%.39s|\n"
+                       "      derniers39 |%s|\n",
+                       g_sb_cmd_fn, g_sb_cmd_fn % 51, dsp->data[0x2f06],
+                       acc[0], acc[1], map[best], map[best] + 39);
+            }
+            if (getenv("REJEU_DUMP_SOUPLES")) {
+                printf("    [souples] fn=%u pic=%u :", fn_cur, dsp->data[0x2f06]);
+                for (int k = 0; k < 78; k++) printf(" %04x", dsp->data[0x2c72 + k]);
+                printf("\n");
+            }
             printf("    [sb-int] pic(2f06)=%u  crc(2bf8)=%u  souples(2c72)[0..5]=%04x %04x %04x %04x %04x %04x"
                    "  non nuls=%d/78  etendue=[%d..%d]\n",
                    dsp->data[0x2f06], dsp->data[0x2bf8],
@@ -296,7 +513,7 @@ static void sbdet_resp(int attempt)
                (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "FAUX" : "OK"); }
     if (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) {
         n_sb_crcfail++;
-        if (attempt == 2) { sched_reset(); plan_fb_set(1, 0); }
+        if (attempt == sb_dernier_essai()) { sched_reset(); plan_fb_set(1, 0); }
         return;
     }
     sb_word = dbr()[R_SCH + 3] | ((uint32_t)dbr()[R_SCH + 4] << 16);
@@ -468,6 +685,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
     n_fb_ok = n_sb_try = n_sb_crcfail = n_crc_ok = n_sb_vraies = 0;
     n_err_dsp = n_err8 = 0;
     g_bsic_injecte = bsic;
+    { const char *r = getenv("REJEU_SCH_REEL");
+      if (r && *r && reels_charger(r) == 0) g_bsic_injecte = g_reels_bsic[0]; }
     memset(&fb, 0, sizeof fb);
 
     if (drapeau_env("REJEU_SCH_PARTOUT")) { cellule_sch_partout = 1; printf("  [stimulus] SCH sur toutes les trames non-FCCH (masque le cadencage)\n"
@@ -526,6 +745,20 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             }
             g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
             g_livre_fn = fn_cur; g_livre_n = n_iq;
+            /* Remplacer le CONTENU du SCH par un burst reel, sans toucher au cadre. */
+            if (g_n_reels && g_livre_type == 'S') {
+                int m = marge_tete();
+                unsigned r = g_reel_i % g_n_reels;
+                memcpy(iq + 2 * m, g_reels[r], 296 * sizeof(int16_t));
+                /* Controle : le burst REEL est-il bien celui qu'on depose ? */
+                static unsigned nv;
+                if (nv < 4) { nv++;
+                    printf("  [reel] trame %u <- burst #%u (fn reelle %u, BSIC %u) I/Q %d %d %d %d\n",
+                           fn_cur, r, g_reels_fn[r], g_reels_bsic[r],
+                           iq[2*m], iq[2*m+1], iq[2*m+2], iq[2*m+3]); }
+                g_reel_pour_fn[fn_cur & 63] = (int)r;
+                g_reel_i++;
+            }
             /* [2026-09-18] Perturber UN echantillon brut, sans passer par les bits :
              * cela cartographie l'influence index par index, sans confusion due au
              * packing du burst ni au changement d'ordonnancement qu'entraine une
@@ -537,6 +770,34 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
               if (pe >= 0 && 2 * pe + 1 < n_iq && (pf < 0 || (long)fn_cur == pf)) {
                   iq[2 * pe]     = (int16_t)(iq[2 * pe]     + 3000);
                   iq[2 * pe + 1] = (int16_t)(iq[2 * pe + 1] - 3000);
+              } }
+            /* [2026-09-18] CONVENTION DES ECHANTILLONS LIVRES. Le transport est exact
+             * (sonde [feed] : 380/380 identiques a shift 0), donc si le feed est en
+             * cause c'est la CONVENTION, pas l'acheminement. Quatre hypotheses jamais
+             * verifiees, chacune plausible et mutuellement exclusive :
+             *   derot-  : le DSP attend un signal DEROTE de -pi/2 par symbole
+             *   derot+  : ... de +pi/2
+             *   swap    : I et Q intervertis
+             *   conj    : Q de signe oppose (conjugue)
+             * REJEU_FEED_XFORM=derot-|derot+|swap|conj|none (defaut none). */
+            { static const char *xf = NULL; static int init = 0;
+              if (!init) { xf = getenv("REJEU_FEED_XFORM"); init = 1; }
+              if (xf && *xf && strcmp(xf, "none")) {
+                  int ns = n_iq / 2;
+                  if (!strcmp(xf, "swap")) {
+                      for (int k = 0; k < ns; k++) { int16_t t = iq[2*k]; iq[2*k] = iq[2*k+1]; iq[2*k+1] = t; }
+                  } else if (!strcmp(xf, "conj")) {
+                      for (int k = 0; k < ns; k++) iq[2*k+1] = (int16_t)(-iq[2*k+1]);
+                  } else if (!strcmp(xf, "derot-") || !strcmp(xf, "derot+")) {
+                      double sgn = (xf[5] == '-') ? -1.0 : 1.0;
+                      for (int k = 0; k < ns; k++) {
+                          double ph = sgn * (M_PI / 2.0) * k;
+                          double c = cos(ph), sn = sin(ph);
+                          double i0 = iq[2*k], q0 = iq[2*k+1];
+                          iq[2*k]   = (int16_t)lrint(i0 * c - q0 * sn);
+                          iq[2*k+1] = (int16_t)lrint(i0 * sn + q0 * c);
+                      }
+                  }
               } }
             memcpy(g_livre_iq, iq, (size_t)n_iq * sizeof(int16_t)); g_livre_niq = n_iq;
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
@@ -563,15 +824,292 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 case 0x770a: hit_770a++; break;
                 case 0xb219: hit_b219++; break;
                 case 0x7a16: hit_7a16++; break;
+                /* [2026-09-18] Les DEUX sites FIRS du SB. Celui de 0x8493 est suivi
+                 * de `sth *AR6+,B` en 0x8497 : c'est LUI qui ecrit les bits souples.
+                 * S'il ne tourne pas, les softs sortent d'un B perime. */
+                case 0x8478: hit_8478++; break;
+                case 0x8492: hit_8492++; break;
+                case 0x8493: hit_8493++; break;
+                case 0x8497: hit_8497++; break;
                 default: break; }
                 /* [2026-09-18] Ces compteurs vivaient dans le chemin de sondage
                  * seulement : meme defaut que les compteurs de la chaine SB. Ils
                  * sont desormais renseignes dans les DEUX chemins. */
-                { uint16_t o = dsp->prog[pc]; uint8_t h = o >> 8;
+                /* [2026-09-19] QUI ECRIT a_sch ? Le mot de statut a_sch[0] recoit
+                 * parfois du numerique (0x1111, 0x1388=5000, 0x142e) la ou seuls
+                 * B_BLUD (bit15) et B_SCH_CRC (bit8) ont un sens — et les 0x8000 lus
+                 * comme « CRC OK » sont plus probablement un accumulateur sature.
+                 * a_sch[0..4] = R_PAGE+15.. , soit data[0x0837..0x083b] (page 0) et
+                 * data[0x084b..0x084f] (page 1). On note le PC de chaque ecriture.
+                 * REJEU_QUI_ASCH=1. */
+                { static int qa = -1; static uint16_t sh[10]; static int ini; static unsigned nqa;
+                  if (qa < 0) qa = getenv("REJEU_QUI_ASCH") ? 1 : 0;
+                  if (qa) {
+                      static const uint16_t adr[10] = {0x0837,0x0838,0x0839,0x083a,0x083b,
+                                                       0x084b,0x084c,0x084d,0x084e,0x084f};
+                      if (!ini) { for (int k=0;k<10;k++) sh[k]=dsp->data[adr[k]]; ini=1; }
+                      for (int k=0;k<10;k++) {
+                          uint16_t v = dsp->data[adr[k]];
+                          if (v != sh[k]) {
+                              /* Sur un CRC OK, imprimer le mot COMPLET : huit
+                               * evenements portant le meme mot ne sont pas huit
+                               * tirages independants, c'est un attracteur atteint
+                               * huit fois -- et la statistique change du tout au tout. */
+                              if (k % 5 == 0 && v == 0x8000) {
+                                  const uint16_t *b = &dsp->data[adr[k]];
+                                  printf("    [crcok] fn=%u  a_sch = %04x %04x %04x %04x %04x"
+                                         "  -> mot 0x%04x%04x  crc_interne(2bf8)=%u\n",
+                                         fn_cur, b[0], b[1], b[2], b[3], b[4],
+                                         b[4], b[3], dsp->data[0x2bf8]);
+                              }
+                              if (nqa < 4000) { nqa++;
+                                  int j = k % 5;
+                                  printf("    [asch] a_sch[%d] (page %d, 0x%04x) : %04x -> %04x"
+                                         "   ecrit juste avant pc=%04x  fn=%u%s\n",
+                                         j, k/5, adr[k], sh[k], v, pc, fn_cur,
+                                         (j==0 && v && v!=0x0100 && v!=0x8000 && v!=0x8100)
+                                           ? "   <<< PAS UN DRAPEAU" : ""); }
+                              sh[k] = v;
+                          }
+                      }
+                  } }
+                /* [2026-09-19] LE TAMPON DE TRAVAIL CONTIENT-IL LE BURST ? On connait
+                 * les echantillons injectes (g_livre_iq). Apres la recopie, 0x2a00 et
+                 * 0x2ac0 devraient porter les voies I et Q. On compare, au lieu de
+                 * supposer. REJEU_CMP2A=1 : au premier passage en 0x84a0 (entree du
+                 * correlateur, donc recopie finie) sur une trame SCH. */
+                { static int cm = -1; static int fait2;
+                  if (cm < 0) cm = getenv("REJEU_CMP2A") ? 1 : 0;
+                  if (cm && !fait2 && pc == 0x84a0 && g_livre_type == 'S' && g_livre_niq >= 296) {
+                      fait2 = 1;
+                      int m = marge_tete();
+                      printf("  [cmp] burst SCH livre (a partir de la marge %d) vs tampons de travail\n", m);
+                      printf("    I injecte : "); for (int k=0;k<10;k++) printf(" %6d", g_livre_iq[2*(m+k)]);
+                      printf("\n    0x2a00    : "); for (int k=0;k<10;k++) printf(" %6d", (int16_t)dsp->data[0x2a00+k]);
+                      printf("\n    0x2ac0    : "); for (int k=0;k<10;k++) printf(" %6d", (int16_t)dsp->data[0x2ac0+k]);
+                      printf("\n    Q injecte : "); for (int k=0;k<10;k++) printf(" %6d", g_livre_iq[2*(m+k)+1]);
+                      printf("\n");
+                      /* correlation normalisee entre chaque tampon et chaque voie */
+                      for (int buf=0; buf<2; buf++) {
+                          uint16_t base = buf ? 0x2ac0 : 0x2a00;
+                          for (int voie=0; voie<2; voie++) {
+                              double sxy=0, sxx=0, syy=0;
+                              for (int k=0;k<128;k++) {
+                                  double x=(int16_t)dsp->data[base+k], y=g_livre_iq[2*(m+k)+voie];
+                                  sxy+=x*y; sxx+=x*x; syy+=y*y; }
+                              printf("    correlation 0x%04x vs %c : %+.3f\n", base, voie?'Q':'I',
+                                     (sxx>0&&syy>0)? sxy/sqrt(sxx*syy) : 0.0);
+                          }
+                      }
+                  } }
+                /* [2026-09-19] LA RECOPIE burst -> tampon de travail. C'est le dernier
+                 * maillon jamais examine : le burst arrive exact en 0x0cce, le tampon
+                 * 0x2a80 est rempli par 0x81d0..0x81da. Que LIT cette boucle ? */
+                { static int rc = -1; static unsigned n;
+                  if (rc < 0) rc = getenv("REJEU_RECOPIE") ? 1 : 0;
+                  if (rc && pc >= 0x81c8 && pc <= 0x81e0) {
+                      /* AR5 balaie-t-il une table, ou reste-t-il sur deux cellules ? */
+                      static unsigned lo = 0xffff, hi = 0, vus[64], nv;
+                      if (dsp->ar[5] < lo) lo = dsp->ar[5];
+                      if (dsp->ar[5] > hi) hi = dsp->ar[5];
+                      { int trouve = 0; for (unsigned q = 0; q < nv; q++) if (vus[q] == dsp->ar[5]) trouve = 1;
+                        if (!trouve && nv < 64) vus[nv++] = dsp->ar[5]; }
+                      /* Le multiplicande evolue-t-il ? Un phaseur entretenu en place
+                       * changerait de valeur a chaque pas ; une constante non. */
+                      { static unsigned long nval; static uint16_t vu_v[32]; static unsigned nvv;
+                        uint16_t v = dsp->data[dsp->ar[5] & 0x3fff];
+                        int t2 = 0; for (unsigned q = 0; q < nvv; q++) if (vu_v[q] == v) t2 = 1;
+                        if (!t2 && nvv < 32) vu_v[nvv++] = v;
+                        if (++nval % 4000 == 0) {
+                            printf("    [mul] %u valeurs distinctes lues via AR5 :", nvv);
+                            for (unsigned q = 0; q < nvv && q < 12; q++) printf(" %04x", vu_v[q]);
+                            printf("\n"); } }
+                      static unsigned long tot;
+                      if (++tot % 4000 == 0)
+                          printf("    [ar5] apres %lu pas : plage 0x%04x..0x%04x, %u cellules distinctes\n",
+                                 tot, lo, hi, nv);
+                  }
+                  if (rc && n < 16 && pc >= 0x81c8 && pc <= 0x81e0) {
+                      n++;
+                      printf("    [cp] pc=%04x op=%04x  A=%010llx B=%010llx"
+                             "  AR2=%04x->%04x AR3=%04x->%04x AR4=%04x->%04x AR5=%04x->%04x\n",
+                             pc, prog_ovly(dsp, pc),
+                             (unsigned long long)(dsp->a & 0xffffffffffULL),
+                             (unsigned long long)(dsp->b & 0xffffffffffULL),
+                             dsp->ar[2], dsp->data[dsp->ar[2] & 0x3fff],
+                             dsp->ar[3], dsp->data[dsp->ar[3] & 0x3fff],
+                             dsp->ar[4], dsp->data[dsp->ar[4] & 0x3fff],
+                             dsp->ar[5], dsp->data[dsp->ar[5] & 0x3fff]);
+                  } }
+                /* [2026-09-19] LE BLOC QUI ECRASE LA MOITIE BASSE DE LA FENETRE FIRS.
+                 * 0x832b..0x8330 y pose 0000 x4 puis 4000 x2. Conditions aux limites,
+                 * ou ecrasement ? On imprime les mots programme de la zone et les
+                 * registres a l'entree, une seule fois. REJEU_DUMP832=1. */
+                { static int d8 = -1; static int fait;
+                  if (d8 < 0) d8 = getenv("REJEU_DUMP832") ? 1 : 0;
+                  if (d8 && !fait && pc == 0x8320) {
+                      fait = 1;
+                      printf("  [832] programme 0x8318-0x8340 (alias OVLY compris) :\n");
+                      for (unsigned a = 0x8318; a <= 0x8340; a += 8) {
+                          printf("    %04x:", a);
+                          for (int k = 0; k < 8 && a + k <= 0x8340; k++)
+                              printf(" %04x", prog_ovly(dsp, (uint16_t)(a + k)));
+                          printf("\n");
+                      }
+                      printf("    registres : A=%010llx B=%010llx T=%04x\n",
+                             (unsigned long long)(dsp->a & 0xffffffffffULL),
+                             (unsigned long long)(dsp->b & 0xffffffffffULL), dsp->t);
+                      printf("    AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x\n",
+                             dsp->ar[0],dsp->ar[1],dsp->ar[2],dsp->ar[3],
+                             dsp->ar[4],dsp->ar[5],dsp->ar[6],dsp->ar[7]);
+                  } }
+                /* [2026-09-19] LE BLOC CORRELATEUR, PC PAR PC, SUR UN SEUL DECODAGE.
+                 * 3100 MAC par decodage se lit « 50 x 62 » ou « 31 x 100 » ; seule la
+                 * mesure par passage tranche. On compte chaque PC de 0x84a0..0x84d0
+                 * pendant le PREMIER decodage, puis on imprime. REJEU_BLOC=1. */
+                { static int bl = -1; static unsigned long cnt[0x40]; static int fini, vu_dec;
+                  if (bl < 0) bl = getenv("REJEU_BLOC") ? 1 : 0;
+                  if (bl && !fini) {
+                      if (pc >= 0x84a0 && pc <= 0x84df) cnt[pc - 0x84a0]++;
+                      if (pc == 0x9841) {
+                          if (!vu_dec) { vu_dec = 1; }
+                          else {
+                              fini = 1;
+                              printf("  [bloc] correlateur 0x84a0-0x84df sur UN decodage :\n");
+                              for (int k = 0; k < 0x40; k++)
+                                  if (cnt[k]) printf("    pc=%04x  op=%04x  %6lu fois\n",
+                                                     0x84a0 + k, prog_ovly(dsp, 0x84a0 + k), cnt[k]);
+                          }
+                      }
+                  } }
+                /* [2026-09-19] REPONSE IMPULSIONNELLE DE 0x2c72. On force UNE position
+                 * a une valeur extreme, maintenue pendant toute la fenetre, et on
+                 * compare la sortie entre +v et -v. Combien de bits decodes bougent :
+                 *   1 position        -> permutation, 0x2c72 est bien un soft par bit
+                 *   3 ou 4 voisines   -> ISI normale, la chaine est saine ici
+                 *   tous / aucun      -> ce ne sont pas des softs par bit
+                 * REJEU_IMPULSION=<k> REJEU_IMPULSION_VAL=<v>. */
+                { static int ik = -2, iv;
+                  if (ik == -2) { const char *e = getenv("REJEU_IMPULSION");
+                                  ik = e ? atoi(e) : -1;
+                                  const char *w = getenv("REJEU_IMPULSION_VAL");
+                                  iv = w ? atoi(w) : 20000; }
+                  if (ik >= 0 && ik < 78 && g_dans_sb)
+                      dsp->data[0x2c72 + ik] = (uint16_t)(int16_t)iv; }
+                /* [2026-09-19] LE PIC SERT-IL A QUELQUE CHOSE ? Les adresses lues par
+                 * FIRS ne bougent pas quand le burst se deplace, alors que le pic, lui,
+                 * suit. On force donc le pic a une valeur arbitraire pendant toute la
+                 * fenetre de demodulation : si rien ne change en aval, il n'est pas
+                 * consomme, et l'egaliseur n'est cale sur rien. REJEU_FORCER_PIC=<n>. */
+                { static int fp = -2;
+                  if (fp == -2) { const char *e = getenv("REJEU_FORCER_PIC"); fp = e ? atoi(e) : -1; }
+                  if (fp >= 0 && g_dans_sb) dsp->data[0x2f06] = (uint16_t)fp; }
+                /* [2026-09-19] SOFTS PARFAITS. Le defaut est quelque part entre le
+                 * correlateur (sain) et l'ecriture des softs. On coupe l'espace en deux :
+                 * juste avant que le decodeur (0x9841) ne lise 0x2c72, on y ECRIT
+                 * nous-memes les bits souples ideaux, derives des 78 bits REELLEMENT
+                 * emis par le burst injecte. Si le DSP rend alors BSIC=32, tout l'aval
+                 * (Viterbi, CRC, empaquetage a_sch) est prouve et le defaut est
+                 * strictement dans la PRODUCTION des softs. Sinon il est en aval.
+                 * REJEU_SOFTS_PARFAITS=<amplitude>, signe teste dans les deux sens via
+                 * REJEU_SOFTS_POLARITE=0|1. */
+                /* REJEU_SOFTS_CONTINU=1 : maintenir les souples ideaux a CHAQUE pas de
+                 * la fenetre de demodulation, pas seulement a l'entree du decodeur —
+                 * sinon une lecture anterieure a 0x9841 echappe a l'injection et
+                 * « sans effet » ne veut rien dire. */
+                if (pc == 0x9841 || (getenv("REJEU_SOFTS_CONTINU") && g_dans_sb)) {
+                    static int amp = -2, pol = -1;
+                    if (amp == -2) { const char *e = getenv("REJEU_SOFTS_PARFAITS");
+                                     amp = e ? atoi(e) : -1;
+                                     const char *q = getenv("REJEU_SOFTS_POLARITE");
+                                     pol = q ? atoi(q) : 0; }
+                    if (amp > 0) {
+                        int ri = g_n_reels ? g_reel_pour_fn[g_sb_cmd_fn & 63] : -1;
+                        unsigned char att[78];
+                        if (ri >= 0) memcpy(att, g_reels_code[ri], 78);
+                        else cellule_code_attendu(g_sb_cmd_fn, (uint8_t)g_bsic_injecte, att);
+                        /* REJEU_SOFTS_PERM : l'ordre des 78 valeurs est une hypothese.
+                         * none = tel quel ; swap = les deux moities de 39 echangees ;
+                         * rev = ordre inverse ; entrelace = pair/impair separes. */
+                        static const char *perm; static int perm_lu;
+                        if (!perm_lu) { perm = getenv("REJEU_SOFTS_PERM"); perm_lu = 1; }
+                        for (int k = 0; k < 78; k++) {
+                            int j = k;
+                            if (perm && !strcmp(perm, "swap"))       j = (k < 39) ? k + 39 : k - 39;
+                            else if (perm && !strcmp(perm, "rev"))   j = 77 - k;
+                            else if (perm && !strcmp(perm, "entrelace")) j = (k < 39) ? 2*k : 2*(k-39)+1;
+                            int bit = att[j] & 1;
+                            int v = (pol ? bit : !bit) ? amp : -amp;
+                            dsp->data[0x2c72 + k] = (uint16_t)(int16_t)v;
+                        }
+                        static unsigned ns; if (ns < 3) { ns++;
+                            printf("  [softs] fn_demod=%u : 78 souples IDEAUX ecrits en 0x2c72 "
+                                   "(amp=%d pol=%d, source=%s)\n", g_sb_cmd_fn, amp, pol,
+                                   ri >= 0 ? "burst reel" : "fixture"); }
+                    }
+                }
+                /* [2026-09-19] QUI ECRIT LA FENETRE D'ENTREE DE L'EGALISEUR ?
+                 * FIRS lit 0x2a8e..0x2a9a et la moitie basse y est a zero ou a 0x4000.
+                 * On surveille la zone mot a mot et on note le PC de chaque ecriture :
+                 * cela dit qui la remplit, dans quel ordre, et ou le remplissage
+                 * s'arrete. REJEU_QUI2A=1. */
+                { static int q2 = -1; static uint16_t shadow[0x30]; static int init2;
+                  static unsigned nq;
+                  if (q2 < 0) q2 = getenv("REJEU_QUI2A") ? 1 : 0;
+                  if (q2) {
+                      if (!init2) { for (int k = 0; k < 0x30; k++) shadow[k] = dsp->data[0x2a80 + k]; init2 = 1; }
+                      for (int k = 0; k < 0x30; k++) {
+                          uint16_t v = dsp->data[0x2a80 + k];
+                          if (v != shadow[k]) {
+                              if (nq < 4000) { nq++;
+                                  printf("    [qui] 0x%04x : %04x -> %04x   ecrit juste avant pc=%04x (fn=%u)\n",
+                                         0x2a80 + k, shadow[k], v, pc, fn_cur); }
+                              shadow[k] = v;
+                          }
+                      }
+                  } }
+                /* [2026-09-19] QUI REMPLIT B ? Le correlateur est sain (le pic suit la
+                 * marge), FIRS ne porte rien, et c'est pourtant `sth *AR6+,B` en 0x8497
+                 * qui ecrit les bits souples. On trace A et B sur toute la fenetre
+                 * 0x8470..0x84a0 pour voir ou B prend sa valeur. REJEU_TRACE_B=1. */
+                { static int tb = -1; static unsigned ntb;
+                  if (tb < 0) tb = getenv("REJEU_TRACE_B") ? 1 : 0;
+                  if (tb && ntb < 70 && pc >= 0x8470 && pc <= 0x84a0) {
+                      ntb++;
+                      printf("    [B] pc=%04x op=%04x A=%010llx B=%010llx AR2=%04x->%04x AR3=%04x->%04x\n",
+                             pc, prog_ovly(dsp, pc),
+                             (unsigned long long)(dsp->a & 0xffffffffffULL),
+                             (unsigned long long)(dsp->b & 0xffffffffffULL),
+                             dsp->ar[2], dsp->data[dsp->ar[2] & 0x3fff],
+                             dsp->ar[3], dsp->data[dsp->ar[3] & 0x3fff]);
+                  } }
+                { uint16_t o = prog_ovly(dsp, pc); uint8_t h = o >> 8;
                   static int dans_sb2;
                   if (pc == 0x7c31) dans_sb2 = 1;
                   if (pc == 0x9841) dans_sb2 = 0;
+                  g_dans_sb = dans_sb2;
+                  /* [2026-09-18] CE QUE FIRS MULTIPLIE. FIRS (0xE0, 2 mots) prend son
+                   * pmad dans le mot suivant et lit ses coefficients en espace
+                   * PROGRAMME. On imprime pmad, les coefficients vus par le coeur
+                   * (alias OVLY compris) et le contenu data[] a la meme adresse : si
+                   * les coefficients sont nuls ou constants, la sortie de l'egaliseur
+                   * ne PEUT pas dependre de l'entree, et c'est la racine. */
+                  if (getenv("REJEU_FIRS") && dans_sb2 && h == 0xE0) {
+                      static unsigned nf;
+                      if (nf < 10) {
+                          uint16_t pmad = prog_ovly(dsp, (uint16_t)(pc + 1));
+                          printf("    [firs] #%u pc=%04x pmad=%04x  coef(prog+ovly)=", ++nf, pc, pmad);
+                          for (int k = 0; k < 6; k++) printf(" %04x", prog_ovly(dsp, (uint16_t)(pmad + k)));
+                          printf("   data[pmad..]=");
+                          for (int k = 0; k < 6; k++) printf(" %04x", dsp->data[(pmad + k) & 0x3fff]);
+                          printf("\n");
+                      }
+                  }
+                  if (pc >= 0x9800 && pc <= 0x9bff) g_op_dec[o]++;
+                  if (pc >= 0x8400 && pc <= 0x84ff) g_op_eq[o]++;
+                  if (pc == 0x9841) g_n_dec++;
                   if (dans_sb2) {
+                      if (g_op_n[o]++ == 0) g_op_pc[o] = pc;
                       if (h == 0x8E || h == 0x8F) n_cmps_sb++;
                       if (h >= 0xE0 && h <= 0xE3) { n_e0_sb++; n_e0x_sb[h - 0xE0]++; }
                       /* [2026-09-18] FIRS lit ses coefficients en Pmem[pmad], avec
@@ -1531,7 +2069,69 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                f, fam[f], famt[f]);
         printf("    (%d opcodes distincts exclusifs au demodulateur SB)\n", n);
     }
-    printf("  trames jouees      : %u\n", fn_cur + 1);
+    /* [2026-09-19] D'OU SORT 0x01dbf46a ? Le meme mot est rendu par la fixture
+   * synthetique, par la capture reelle en rejeu et par le pont : trois entrees sans
+   * rien de commun. Un mot constant ressemble a une CONSTANTE, pas a un calcul. On
+   * balaie l'espace donnees ET l'espace programme a la recherche du motif. */
+  if (getenv("REJEU_CHERCHER_MOT")) {
+      unsigned long v = strtoul(getenv("REJEU_CHERCHER_MOT"), NULL, 0);
+      uint16_t lo = (uint16_t)(v & 0xffff), hi = (uint16_t)(v >> 16);
+      printf("  recherche de 0x%04x%04x (lo=%04x hi=%04x) :\n", hi, lo, lo, hi);
+      int n = 0;
+      for (unsigned a = 0; a + 1 < 0x4000; a++) {
+          if (dsp->data[a] == lo && dsp->data[a+1] == hi && n < 12) {
+              printf("    data[0x%04x] = %04x %04x   (lo puis hi)\n", a, lo, hi); n++; }
+          if (dsp->data[a] == hi && dsp->data[a+1] == lo && n < 12) {
+              printf("    data[0x%04x] = %04x %04x   (hi puis lo)\n", a, hi, lo); n++; }
+      }
+      for (unsigned a = 0; a + 1 < 0x10000; a++) {
+          if (dsp->prog[a] == lo && dsp->prog[a+1] == hi && n < 24) {
+              printf("    prog[0x%04x] = %04x %04x\n", a, lo, hi); n++; }
+      }
+      int nlo = 0, nhi = 0;
+      for (unsigned a = 0; a < 0x4000; a++) { if (dsp->data[a]==lo) nlo++; if (dsp->data[a]==hi) nhi++; }
+      printf("    occurrences isolees en data : lo(%04x) x%d, hi(%04x) x%d\n", lo, nlo, hi, nhi);
+      if (!n) printf("    motif absent de la memoire : le mot est CALCULE, pas stocke\n");
+  }
+  if (getenv("REJEU_OPCODES")) {
+      printf("  %lu decodages\n", g_n_dec);
+      printf("  opcodes de l'EGALISEUR (0x8400-0x84ff), par decodage :\n");
+      for (int rang = 0; rang < 16; rang++) {
+          unsigned best = 0; unsigned long bv = 0;
+          for (unsigned i = 0; i < 65536; i++) if (g_op_eq[i] > bv) { bv = g_op_eq[i]; best = i; }
+          if (!bv) break;
+          double q = g_n_dec ? (double)bv / g_n_dec : 0;
+          printf("    op=%04x  %8lu   /dec = %8.2f %s\n", best, bv, q,
+                 (g_n_dec && bv % g_n_dec == 0) ? "  (entier)" : "  <<< NON ENTIER");
+          g_op_eq[best] = 0;
+      }
+      printf("\n");
+      printf("  opcodes du DECODEUR (0x9800-0x9bff) :\n");
+      { unsigned long st_trn = 0, cmps = 0;
+        for (unsigned i = 0; i < 65536; i++) {
+            if ((i & 0xFF00) == 0x8D00) st_trn += g_op_dec[i];
+            if ((i >> 8) == 0x8E || (i >> 8) == 0x8F) cmps += g_op_dec[i];
+        }
+        printf("    CMPS (0x8E/0x8F) : %lu     ST TRN (0x8D00) : %lu\n", cmps, st_trn); }
+      for (int rang = 0; rang < 14; rang++) {
+          unsigned best = 0; unsigned long bv = 0;
+          for (unsigned i = 0; i < 65536; i++) if (g_op_dec[i] > bv) { bv = g_op_dec[i]; best = i; }
+          if (!bv) break;
+          printf("    op=%04x  %8lu fois\n", best, bv);
+          g_op_dec[best] = 0;
+      }
+      printf("  opcodes du demod SB, par nombre de passages :\n");
+      for (int rang = 0; rang < 26; rang++) {
+          unsigned best = 0; unsigned long bv = 0;
+          for (unsigned i = 0; i < 65536; i++) if (g_op_n[i] > bv) { bv = g_op_n[i]; best = i; }
+          if (!bv) break;
+          printf("    op=%04x  %8lu fois   vu en pc=%04x\n", best, bv, g_op_pc[best]);
+          g_op_n[best] = 0;
+      }
+  }
+  printf("  sites FIRS du SB : 0x8478=%lu  0x8492(rpt)=%lu  0x8493=%lu  0x8497(sth B->softs)=%lu\n",
+         hit_8478, hit_8492, hit_8493, hit_8497);
+  printf("  trames jouees      : %u\n", fn_cur + 1);
     printf("  chaine SB (pas-a-pas) : job b219=%lu  fcall 7a16=%lu  demod 7c31=%lu  corr 84a1=%lu  decodeur 9841=%lu  | corr FB 770a=%lu\n",
            hit_b219, hit_7a16, hit_7c31, hit_84a1, hit_9841, hit_770a);
     printf("  FB acceptes (ARM)  : %d\n", n_fb_ok);

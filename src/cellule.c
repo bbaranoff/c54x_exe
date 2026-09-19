@@ -82,10 +82,18 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
          * egaliseur travaille sur une estimation batie ailleurs : cela expliquerait
          * une sortie non correlee a l'entree malgre des echantillons parfaits. */
         {
-            static int im = -2;
+            /* [2026-09-18] MEME GARDE-FOU QUE L'INVERSION DE BIT CODE, qui manquait
+             * ici : sans restriction de trame l'inversion frappe TOUS les bursts SCH du
+             * run, donc l'ordonnancement, l'AFC et les pics changent avec elle, et la
+             * mesure differentielle compare deux histoires au lieu de deux bursts.
+             * REJEU_INVERSER_FN=<f> confine l'inversion a la trame f (meme variable que
+             * pour REJEU_INVERSER_BIT : on ne sonde qu'une chose a la fois). */
+            static int im = -2; static long imfn = -2;
             if (im == -2) { const char *e = getenv("REJEU_INVERSER_MIDAMBULE");
                             im = e ? atoi(e) : -1; }
-            if (im >= 0 && im < 64) bits[42 + im] ^= 1;
+            if (imfn == -2) { const char *e = getenv("REJEU_INVERSER_FN");
+                              imfn = e ? atol(e) : -1; }
+            if (im >= 0 && im < 64 && (imfn < 0 || (long)fn == imfn)) bits[42 + im] ^= 1;
         }
         type = 'S';
     } else {
