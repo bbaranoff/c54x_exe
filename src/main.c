@@ -1,27 +1,23 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * c54x_exe - le DSP TMS320C54x du Calypso, sans QEMU et sans ARM.
+ * c54x_exe - the Calypso TMS320C54x DSP, run without QEMU and without the ARM.
  *
- * [2026-09-16] Pourquoi ce binaire existe. Le README de qemu-calypso documente
- * un mur precis en mode natif : « a_sch[0] = 0x8100 (B_BLUD | B_SCH_CRC) »,
- * et surtout « a_sch[3] sort 0xf8d8, CONSTANT sur 21/21 ecritures, alors que
- * 10 contenus de burst distincts lui ont ete presentes. Un decodeur dont la
- * sortie ne depend pas de l'entree ne decode pas. »
+ * Bench for the symptom recorded in the qemu-calypso README [2026-09-16]:
+ * a_sch[0] = 0x8100 (B_BLUD | B_SCH_CRC), and a_sch[3] = 0xf8d8 CONSTANT over
+ * 21/21 writes while 10 distinct burst contents were presented. A decoder
+ * whose output does not depend on its input is not decoding.
  *
- * Pour observer ca, il fallait jusqu'ici booter QEMU, l'ARM, le firmware
- * osmocom-bb et toute la pile - des secondes par essai, et une trentaine de
- * variables entre la question et la reponse. Alors que la mesure d'accroche
- * dit que le DSP n'a presque pas besoin de tout ca : sur 26 631 lignes de L1
- * C54x, QUATORZE symboles viennent de QEMU, dont deux seulement dans le coeur
- * (des mutex), et calypso_{arm2dsp,dma,fbsb,mailbox}.c n'en demandent aucun.
+ * Reaching that point used to mean booting QEMU, the ARM and the osmocom-bb
+ * firmware: seconds per run. The DSP needs almost none of it - out of 26631
+ * lines of C54x L1, 14 symbols come from QEMU (two of them mutexes in the
+ * core), and calypso_{arm2dsp,dma,fbsb,mailbox}.c need none. Here the TI mask
+ * ROM runs alone in milliseconds and we watch what the DSP writes into API
+ * RAM, which makes the question "does the output depend on the input?"
+ * answerable in a loop, hence in CI.
  *
- * Ici : la mask-ROM TI tourne seule, en millisecondes, et on regarde ce que le
- * DSP ecrit dans l'API RAM. Ce qui rend la question « la sortie depend-elle de
- * l'entree ? » repondable en boucle, donc en CI.
- *
- * Les sources ne sont PAS recopiees : ce binaire compile celles de
- * /opt/GSM/qosmo. Recopier, c'etait refaire la divergence qu'on vient de
- * supprimer.
+ * The sources are NOT copied here: this binary compiles those of
+ * /opt/GSM/qosmo. Copying them would recreate the divergence this bench exists
+ * to remove.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,23 +34,22 @@
 #include "rejouer.h"
 #include "pont.h"
 
-/* ── ce que la plateforme fournirait ───────────────────────────────────── */
-uint32_t g_c54x_exe_fn;      /* non static : pont.c le met a jour a chaque TICK */
+/* ── what the platform would otherwise provide ─────────────────────────── */
+uint32_t g_c54x_exe_fn;      /* non-static: pont.c updates it on every TICK */
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 
-/* Sans controleur d'interruptions, l'acquittement emis par le DSP n'a nulle
- * part ou aller. Inerte, et c'est exact : le C54x acquitte dans le vide ici.
- * Si un jour le comportement du DSP depend de cet acquittement, ce binaire
- * divergera de QEMU a cet endroit precis - et c'est ici qu'il faudra regarder. */
+/* No interrupt controller here, so the ack the DSP raises has nowhere to go.
+ * If DSP behaviour ever turns out to depend on that ack, this binary diverges
+ * from QEMU at exactly this point. */
 void calypso_inth_arm_ack(void) { }
 
-/* Le verrou DARAM vit normalement dans calypso_full_pcb.c, exclu de ce binaire
- * parce qu'il inclut hw/core/cpu.h - tout QEMU derriere. Ce n'est pas un
- * leurre : c'est le meme pthread_mutex, le DSP se verrouille pour de vrai. */
+/* The DARAM lock normally lives in l1-dsp/calypso_full_pcb.c, excluded from
+ * this binary because it includes hw/core/cpu.h - all of QEMU behind it. Same
+ * pthread_mutex: the DSP really locks. */
 QemuMutex calypso_pcb_daram_lock;
 
-/* Memoire « invitee » : sans ARM, personne n'ecrit dedans, mais des sources
- * partagees la referencent. */
+/* Guest memory: with no ARM nobody writes into it, but shared sources
+ * reference it. */
 void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 {
     (void)addr;
@@ -63,16 +58,16 @@ void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
     }
 }
 
-/* ── les ROM, a leurs adresses silicium (cf. calypso_trx.c de qosmo-dsp) ── */
+/* ── ROMs at their silicon addresses (cf. calypso_trx.c of qosmo-dsp) ───── */
 static const struct { const char *suffixe; uint32_t adresse; bool programme; }
 ROMS[] = {
     { "PROM0",  0x07000, true  },
-    { "PROM1",  0x18000, true  },   /* page 1, atteignable via XPC=1 */
+    { "PROM1",  0x18000, true  },   /* page 1, reached with XPC=1 */
     { "PROM2",  0x28000, true  },
     { "PROM3",  0x38000, true  },
     { "DROM",   0x09000, false },
-    { "PDROM",  0x0E000, false },   /* visible cote DATA ... */
-    { "PDROM",  0x0E000, true  },   /* ... ET cote PROGRAMME (vecteurs IT) */
+    { "PDROM",  0x0E000, false },   /* mapped on the DATA side ... */
+    { "PDROM",  0x0E000, true  },   /* ... AND on the PROGRAM side (IT vectors) */
 };
 
 static void usage(const char *prog)
@@ -134,30 +129,31 @@ int main(int argc, char **argv)
         else { usage(argv[0]); return 2; }
     }
     if (insns < 0) {
-        insns = arm_sock ? 32000 : 2300;   /* 32000 = CALYPSO_DSP_BUDGET de bsp.env */
+        insns = arm_sock ? 32000 : 2300;   /* 32000 = CALYPSO_DSP_BUDGET from bsp.env */
     }
     verbosite_installer(niveau);
 
     qemu_mutex_init(&calypso_pcb_daram_lock);
 
-    /* L'API RAM : privee, ou partagee avec l'ARM de QEMU. Posee AVANT les ROM,
-     * le chargeur y recopie ce qui tombe dans la fenetre 0x0800. En mode --arm
-     * le segment partage EST data[0x0800..] et api_ram en est l'alias : toute
-     * ecriture du coeur, par l'un ou l'autre chemin, est vue de l'ARM. */
+    /* API RAM: private, or shared with the QEMU ARM. It must be installed
+     * BEFORE the ROMs, since the loader copies into it whatever falls inside
+     * the 0x0800 window. Under --arm the shared segment IS data[0x0800..] and
+     * api_ram aliases it, so every core write reaches the ARM by either
+     * path. */
     static uint16_t api_ram_privee[CALYPSO_API_WORDS];
     uint16_t *api_ram = api_ram_privee;
     C54xState *dsp;
     if (arm_sock) {
-        /* [2026-09-17] Une IT en attente (IFR&IMR) est prise des que INTM
-         * retombe : c'est le C54x (SPRU131 §6), pas une bequille. Le coeur le
-         * gate derriere CALYPSO_C54X_IRQ_LEVEL ; on l'allume ici sauf avis
-         * contraire explicite (CALYPSO_C54X_IRQ_LEVEL= vide pour l'eteindre). */
+        /* A pending interrupt (IFR&IMR) is taken as soon as INTM drops: real
+         * C54x behaviour (SPRU131 ch.6), not a workaround. The core gates it
+         * behind CALYPSO_C54X_IRQ_LEVEL; turn it on here unless explicitly
+         * overridden (empty CALYPSO_C54X_IRQ_LEVEL turns it off). */
         { const char *e = getenv("CALYPSO_C54X_IRQ_LEVEL");
           if (!e) setenv("CALYPSO_C54X_IRQ_LEVEL", "1", 1);
           else if (!*e) unsetenv("CALYPSO_C54X_IRQ_LEVEL"); }
-        /* [2026-09-17] chaine reelle (pas d'injection --iq) : livraison directe
-         * des bursts du pont/BTS (le match FN bufferise echoue car FN device !=
-         * FN virtuelle). Surchargeable par CALYPSO_BSP_DIRECT_FEED explicite. */
+        /* Real chain (no --iq injection): deliver bridge/BTS bursts directly,
+         * because the buffered FN match fails - device FN != virtual FN. An
+         * explicit CALYPSO_BSP_DIRECT_FEED overrides this. */
         if ((!iq_mode || !*iq_mode || !strcmp(iq_mode, "none")) &&
             !getenv("CALYPSO_BSP_DIRECT_FEED"))
             setenv("CALYPSO_BSP_DIRECT_FEED", "1", 1);
@@ -194,7 +190,6 @@ int main(int argc, char **argv)
     if (rejeu) {
         calypso_dma_init();
         calypso_bsp_init(dsp);
-        /* en rejeu : budget DSP complet et cellule injectee par defaut */
         if (insns < 32000) insns = 32000;
         if (!iq_mode || !*iq_mode || !strcmp(iq_mode, "none")) iq_mode = "cell";
         int rc = rejouer(dsp, api_ram, trames > 100 ? trames : 4000, insns,
@@ -203,7 +198,7 @@ int main(int argc, char **argv)
         return rc;
     }
     if (arm_sock) {
-        /* Comme calypso_trx_init() de qosmo-dsp apres le reset. */
+        /* Same sequence as calypso_trx_init() of qosmo-dsp after reset. */
         calypso_dma_init();
         calypso_bsp_init(dsp);
         int rc = pont_serveur(dsp, api_ram, arm_sock, insns, verbeux, iq_mode, amp);
@@ -212,7 +207,7 @@ int main(int argc, char **argv)
         return rc;
     }
 
-    /* Les observables du README, echantillonnes a chaque trame. */
+    /* The README observables, sampled once per frame. */
     uint16_t *d_fb_det = &api_ram[(API_NDB + NDB_D_FB_DET) / 2];
     uint16_t *a_sch0   = &api_ram[(API_R_PAGE(0) + RP_A_SCH) / 2];
 
@@ -227,9 +222,9 @@ int main(int argc, char **argv)
         g_c54x_exe_fn = (uint32_t)t;
         c54x_run(dsp, (int)insns);
 
-        /* [2026-09-16] On compte les TRANSITIONS, pas les trames ou la valeur
-         * est non nulle : un bit reste leve, et le compter a chaque trame
-         * donnait « 50 sur 50 » qui ne mesurait que la duree du test. */
+        /* Count TRANSITIONS, not frames where the value is non-zero: the bit
+         * stays raised, so counting per frame reported "50 out of 50", which
+         * only measured how long the run lasted. */
         if (*d_fb_det && !fb_precedent) fb_vus++;
         fb_precedent = *d_fb_det;
 

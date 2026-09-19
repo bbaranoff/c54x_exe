@@ -5,17 +5,18 @@
 #include <stdbool.h>
 #include "calypso_c54x.h"
 
-/* Alloue le C54xState avec data[] alignee sur une page, et pose le segment
- * partage PAR-DESSUS data[0x0800..0x27FF] (cf. calypso_dsp_pont.h). Remplace
- * c54x_init() en mode --arm. api_ram doit ensuite etre &dsp->data[C54X_API_BASE]. */
+/* Allocates the C54xState with data[] page-aligned, then maps the shared segment
+ * OVER data[0x0800..0x27FF] (protocol in calypso_dsp_pont.h). Replaces
+ * c54x_init() in --arm mode; api_ram must then be &dsp->data[C54X_API_BASE]. */
 C54xState *pont_allouer_dsp(void);
 
-/* Sert l'ARM de QEMU : accepte une connexion apres l'autre, joue une trame par
- * TICK, repond DONE. Ne revient que sur SIGINT/SIGTERM. */
-/* iq_mode : NULL/"none" = rien, "fcch" = burst FCCH synthetique (rotation
- * +pi/2 par echantillon, 1 ech/symbole), "noise" = bruit, "tone:<dphi>" = rotation
- * de dphi radians par echantillon. amp = amplitude int16 (les FCCH reels sont
- * ~32500 rms). Injecte a chaque trame via calypso_bsp_rx_burst(). */
+/* Serves QEMU's ARM: one connection after another, runs one frame per TICK,
+ * answers DONE. Returns only on SIGINT/SIGTERM.
+ * iq_mode: NULL/"none" = nothing, "fcch" = synthetic FCCH burst (+pi/2 rotation
+ * per sample, 1 sample/symbol), "noise" = noise, "tone:<dphi>" = dphi radians
+ * per sample, "cell[:bsic[:decalage[:marge]]]" = full 51-multiframe cell.
+ * amp = int16 amplitude (real FCCH bursts run at ~32500 rms). Injected on every
+ * frame through calypso_bsp_rx_burst(). */
 int pont_serveur(C54xState *dsp, uint16_t *api_ram, const char *socket_path,
                  long insns, bool verbeux, const char *iq_mode, int amp);
 

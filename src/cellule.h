@@ -2,12 +2,12 @@
 #ifndef CELLULE_H
 #define CELLULE_H
 #include <stdint.h>
-/* Le burst descendant du TN0 d'une cellule GSM pour la trame fn (multitrame 51 :
- * FCCH en 0/10/20/30/40, SCH en 1/11/21/31/41, burst factice ailleurs), module
- * en GMSK, 148 echantillons I/Q int16. Rend le type : 'F', 'S' ou '.'. */
-/* marge : echantillons de silence ajoutes AVANT et APRES le burst SCH (le
- * decodeur SB de la ROM lit une fenetre de 190 echantillons, 148 + 2 x 21 :
- * BSP_IQ_MAX_I16 « SB en demande 190 »). *n_iq recoit le nombre d'int16 ecrits. */
+/* Downlink TN0 burst of a GSM cell for frame fn (51-multiframe: FCCH on
+ * 0/10/20/30/40, SCH on 1/11/21/31/41, dummy burst elsewhere), GMSK modulated,
+ * 148 int16 I/Q samples. Returns the burst type: 'F', 'S' or '.'.
+ * marge = silence samples prepended and appended to an SCH burst: the ROM SB
+ * decoder reads a 190-sample window, 148 + 2 x 21 (BSP_IQ_MAX_I16 in
+ * calypso_bsp.c, "SB en demande 190"). *n_iq gets the number of int16 written. */
 extern int cellule_sch_partout;
 extern int cellule_marge_fin;
 int cellule_train_sb(int i);

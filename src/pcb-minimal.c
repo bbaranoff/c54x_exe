@@ -1,16 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Les quatre helpers DARAM de calypso_full_pcb.c, repris a l'identique.
+ * The four DARAM helpers of calypso_full_pcb.c, copied verbatim.
  *
- * [2026-09-16] calypso_full_pcb.c entier n'est pas compilable hors QEMU : il
- * inclut hw/core/cpu.h, et tout QEMU derriere. Mais les helpers dont le DSP a
- * besoin n'en dependent pas - ce sont un verrou et deux acces tableau. Copies
- * mot pour mot depuis qosmo-dsp/hw/arm/calypso/calypso_full_pcb.c:163-181.
+ * calypso_full_pcb.c as a whole does not build outside QEMU: it includes
+ * hw/core/cpu.h and all of QEMU behind it. The helpers the DSP needs do not
+ * depend on any of that - one mutex and two array accesses - so they are copied
+ * word for word from qosmo-dsp/hw/arm/calypso/calypso_full_pcb.c.
  *
- * C'est la SEULE copie de ce binaire, et elle est signalee comme telle : si
- * l'original change, cette copie ment. Elle disparaitra le jour ou
- * calypso_full_pcb.c sera decouple de C54xState - c'est le meme travail que
- * celui qui rendra les 9 devices de la carte E88 disponibles a la L1 gr-gsm.
+ * This is the only copy in this binary: if the original changes, this file lies.
+ * It goes away once calypso_full_pcb.c is decoupled from C54xState.
  */
 #include "qemu/osdep.h"
 #include "qemu/thread.h"

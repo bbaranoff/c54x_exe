@@ -3,16 +3,16 @@
 #define VERBOSITE_H
 #include <stdio.h>
 
-/* Niveaux : 0 = erreurs seulement (defaut)   -v = + avertissements
- *           -vv = + cycle de vie (boot, reset, banniere des gates)
- *           -vvv = + taches, API RAM, interruptions
- *           -vvvv = + sondes memoire (WATCH, DUMP, SCAN, MAP, SP-*)
- *           -vvvvv = + traces instruction par instruction (BRANCH, LOOP, TERM, CYCLE)
- *           -vvvvvv = tout, stderr brut, sans filtre */
+/* Levels: 0 = errors only (default)    -v = + warnings
+ *         -vv    = + lifecycle (boot, reset, gate banner)
+ *         -vvv   = + tasks, API RAM, interrupts
+ *         -vvvv  = + memory probes (WATCH, DUMP, SCAN, MAP, SP-*)
+ *         -vvvvv = + per-instruction traces (BRANCH, LOOP, TERM, CYCLE)
+ *         -vvvvvv = everything, raw stderr, unfiltered */
 #define VERBOSITE_MAX 6
 
-void verbosite_installer(int niveau);   /* a appeler avant tout appel au DSP */
-void verbosite_retirer(void);           /* vide le tube, rend stderr          */
-void verbosite_bilan(FILE *out);        /* combien de lignes masquees, par niveau */
+void verbosite_installer(int niveau);   /* call before any DSP call           */
+void verbosite_retirer(void);           /* drain the pipe, restore stderr     */
+void verbosite_bilan(FILE *out);        /* count of suppressed lines, per level */
 
 #endif

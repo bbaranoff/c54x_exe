@@ -1,20 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * verbosite.c - les niveaux -v de c54x_exe.
+ * verbosite.c - the -v levels of c54x_exe.
  *
- * [2026-09-16] Le coeur C54x (qosmo/hw/arm/calypso/l1-dsp/calypso_c54x.c)
- * porte une centaine de sondes « [c54x] NOM ... » sur stderr, dont certaines
- * inconditionnelles (BRANCH-TRACE : 700 lignes au boot). Elles servent QEMU
- * autant que ce binaire, et les garder une par une par variable
- * d'environnement demanderait de toucher les sources partagees pour chaque
- * nouvelle sonde.
+ * The C54x core (qosmo/hw/arm/calypso/l1-dsp/calypso_c54x.c) carries about a
+ * hundred "[c54x] NAME ..." probes on stderr, some of them unconditional
+ * (BRANCH-TRACE alone emits 700 lines at boot) [2026-09-16]. They serve QEMU
+ * as much as this binary, so gating them one by one through environment
+ * variables would mean touching the shared sources for every new probe.
  *
- * Ici on ne touche pas au coeur : stderr est detourne dans un tube, un fil
- * relit les lignes et ne laisse passer que celles dont le niveau est <= au
- * niveau demande. Le classement est par mots-clefs sur le NOM de la sonde,
- * pas par table exhaustive : une sonde nouvelle tombe dans un niveau
- * raisonnable sans qu'on ait a la declarer. Le bilan dit combien de lignes
- * ont ete masquees a chaque niveau, pour qu'on sache quoi demander.
+ * Instead the core is left alone: stderr is redirected into a pipe and a
+ * thread re-reads the lines, passing through only those whose level is <= the
+ * requested one. Classification is by keyword on the probe NAME rather than an
+ * exhaustive table, so a new probe lands at a sensible level without being
+ * declared. The summary reports how many lines each level hid, so the caller
+ * knows what to ask for.
  */
 #include <stdio.h>
 #include <stdbool.h>
@@ -25,7 +24,7 @@
 #include "verbosite.h"
 
 static int       g_niveau = 0;
-static int       g_stderr_reel = -1;   /* dup(2) d'origine */
+static int       g_stderr_reel = -1;   /* dup(2) of the original */
 static int       g_tube_lecture = -1;
 static pthread_t g_fil;
 static bool      g_actif = false;
@@ -34,28 +33,28 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static bool contient(const char *l, const char *mot) { return strstr(l, mot) != NULL; }
 
-/* Le niveau minimal auquel une ligne est montree. */
+/* Lowest -v level at which a line is shown. */
 static int niveau_ligne(const char *l)
 {
-    /* 0 : ce qui casse */
+    /* 0: what breaks */
     if (contient(l, "FATAL") || contient(l, "ERR") || contient(l, "abort") ||
         contient(l, "CORRUPT") || contient(l, "TRAP") || contient(l, "manquante") ||
         contient(l, "cannot") || contient(l, "impossible") || contient(l, "a echoue"))
         return 0;
-    /* 1 : ce qui inquiete */
+    /* 1: what is worrying */
     if (contient(l, "WARN") || contient(l, "echou") || contient(l, "failed") ||
         contient(l, "pas parque") || contient(l, "perdue"))
         return 1;
-    /* 5 : le pas a pas */
+    /* 5: single-stepping */
     if (contient(l, "TRACE") || contient(l, "LOOP") || contient(l, "CYCLE") ||
         contient(l, "HIST") || contient(l, "RING") || contient(l, "-STACK"))
         return 5;
-    /* 4 : les sondes memoire */
+    /* 4: memory probes */
     if (contient(l, "WATCH") || contient(l, "DUMP") || contient(l, "SCAN") ||
         contient(l, "PROBE") || contient(l, "MAP") || contient(l, "SP-") ||
         contient(l, "FLOW") || contient(l, "HOT-OPS") || contient(l, "FIRST"))
         return 4;
-    /* 3 : taches, API RAM, interruptions, chemins FB/SB */
+    /* 3: tasks, API RAM, interrupts, FB/SB paths */
     if (contient(l, "TASK") || contient(l, "DISPATCH") || contient(l, "FB") ||
         contient(l, "SYNC") || contient(l, "FEED") || contient(l, "VEC") ||
         contient(l, "INTM") || contient(l, "IFR") || contient(l, "IMR") ||
@@ -64,8 +63,8 @@ static int niveau_ligne(const char *l)
         contient(l, "DMA") || contient(l, "RIF") || contient(l, "bsp") ||
         contient(l, "BSP") || contient(l, "TPU") || contient(l, "API"))
         return 3;
-    /* 2 : le reste - banniere des gates (ACTIF/INACTIVE), CALYPSO_* lus,
-     *     boot, reset, [calypso-debug], et ce qui ne vient pas du coeur */
+    /* 2: the rest - gate banners (ACTIF/INACTIVE), CALYPSO_* reads, boot,
+     *    reset, [calypso-debug], and anything not coming from the core */
     return 2;
 }
 
@@ -99,7 +98,7 @@ void verbosite_installer(int niveau)
     if (niveau > VERBOSITE_MAX) niveau = VERBOSITE_MAX;
     g_niveau = niveau;
     if (niveau >= VERBOSITE_MAX) {
-        return;                         /* brut : rien a installer */
+        return;                         /* raw: nothing to install */
     }
     int tube[2];
     if (pipe(tube) < 0) {
@@ -123,7 +122,7 @@ void verbosite_retirer(void)
         return;
     }
     fflush(stderr);
-    /* rendre fd 2 : le bout d'ecriture du tube se ferme, le fil voit EOF */
+    /* restore fd 2: the pipe write end closes, the thread sees EOF */
     dup2(g_stderr_reel, STDERR_FILENO);
     pthread_join(g_fil, NULL);
     g_actif = false;
