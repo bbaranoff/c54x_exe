@@ -330,12 +330,87 @@ static void iq_synthese(const char *mode, int amp, uint32_t fn, int16_t *iq)
     (void)fn;
 }
 
+/* Recorded-cell replay, paced by the DSP frame clock.
+ *
+ * /opt/GSM/cellule_reelle.bin holds the TS0 of 311 CONSECUTIVE frames captured
+ * off the air at 4 samples/symbol, each tagged with its real frame number, so
+ * the 51-multiframe is intact: FCCH at fn%51 in {0,10,20,30,40}, SCH at
+ * {1,11,21,31,41}.
+ *
+ * Why it is fed from here and not over UDP: the source and the DSP have
+ * independent clocks. Measured on this bench, the DSP runs between 72 and 160
+ * frames/s depending on load while rejouer_cellule.py streams at a rate of its
+ * own, so the DSP swallowed about four cell frames per frame of its own. The
+ * FB task survives that — it only ever correlates ONE window — but the SB task
+ * needs the burst of the frame IMMEDIATELY AFTER the FCCH, and that frame was
+ * never the SCH. Pulled from here, one burst per frame, the multiframe reaches
+ * the DSP intact whatever the emulated clock does. */
+typedef struct { uint32_t fn; int16_t *iq; } ReelBurst;
+static ReelBurst *g_reel;
+static unsigned   g_reel_n, g_reel_i;
+static int        g_reel_nsym;
+
+static int reelle_charger(const char *chemin)
+{
+    FILE *f = fopen(chemin, "rb");
+    if (!f) { fprintf(stderr, "pont : cellule reelle introuvable : %s\n", chemin); return 0; }
+    uint32_t hdr[4];
+    if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return 0; }
+    unsigned n = hdr[0], nsym = hdr[1], bsic = hdr[2];
+    if (!n || !nsym || nsym > 4096) { fclose(f); return 0; }
+    g_reel = calloc(n, sizeof(*g_reel));
+    if (!g_reel) { fclose(f); return 0; }
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t e[2];
+        if (fread(e, sizeof(e), 1, f) != 1) { n = i; break; }
+        int16_t *iq = malloc((size_t)nsym * 2 * sizeof(int16_t));
+        if (!iq || fread(iq, sizeof(int16_t) * 2, nsym, f) != nsym) { free(iq); n = i; break; }
+        g_reel[i].fn = e[0];
+        g_reel[i].iq = iq;
+    }
+    fclose(f);
+    g_reel_n = n; g_reel_nsym = (int)nsym;
+    printf("pont : cellule REELLE %s — %u trames consecutives a %d ech/symbole, BSIC=%u, "
+           "fn %u..%u, une trame par trame DSP\n", chemin, n, nsym / 148, bsic,
+           n ? g_reel[0].fn : 0, n ? g_reel[n - 1].fn : 0);
+    return (int)n;
+}
+
+/* Deliver the next recorded burst, decimated to the 1 sample/symbol the DSP
+ * correlator works at (the same decimation the UDP path applies through
+ * CALYPSO_BSP_IQ_DECIM). The burst keeps its OWN frame number: the SCH content
+ * only makes sense against the frame it was transmitted in. */
+static void reelle_injecter(C54xState *dsp, unsigned long *injectes)
+{
+    if (!g_reel_n) return;
+    const ReelBurst *b = &g_reel[g_reel_i];
+    g_reel_i = (g_reel_i + 1) % g_reel_n;
+
+    int decim = g_reel_nsym / 148;
+    if (decim < 1) decim = 1;
+    int16_t iq[2 * 192];
+    int n_iq = 0;
+    for (int k = 0; k * decim < g_reel_nsym && n_iq <= (int)(sizeof(iq)/sizeof(iq[0])) - 2; k++) {
+        iq[n_iq++] = b->iq[2 * (k * decim)];
+        iq[n_iq++] = b->iq[2 * (k * decim) + 1];
+    }
+    calypso_bsp_rx_burst(0, b->fn, iq, n_iq);
+    (*injectes)++;
+}
+
 /* Inject one burst (synthetic cell or plain signal) into the RIF/BSP path. */
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn,
                            unsigned long *injectes)
 {
         int16_t iq[2 * 256];
         int n_iq = 2 * IQ_N;
+        if (!strncmp(iq_mode, "reelle", 6)) {
+            static int charge = 0;
+            if (!charge) { const char *p = strchr(iq_mode, ':');
+                charge = reelle_charger(p ? p + 1 : "/opt/GSM/cellule_reelle.bin"); if (!charge) charge = -1; }
+            if (charge > 0) reelle_injecter(dsp, injectes);
+            return;
+        }
         if (!strncmp(iq_mode, "cell", 4)) {
             /* cell[:bsic[:offset[:margin]]] : full cell, FCCH/SCH/dummy bursts */
             static int bsic = -1; static double dec = 0.5; static int marge = 21;
@@ -398,7 +473,7 @@ static const char *hacks_actifs(void)
         {"PONT_CAN_TOA","CAN_TOA",4}, {"PONT_CAN_SB_TOA","CAN_SB_TOA",4}, {"PONT_CAN_SB","CAN_SB_FULL",0},
         {"CALYPSO_TWL3025_AFC_HZ","AFC_HZ",3}, {"CALYPSO_TWL3025_AFC","AFC_OFF",2},
         {"CALYPSO_TWL3025_AFC_SIGN_OLD","AFC_SIGN_OLD",0},
-        {"CALYPSO_BSP_VEC30","VEC30",1}, {"CALYPSO_BSP_DIRECT_FEED","DIRECT_FEED",1},
+        {"CALYPSO_BSP_VEC30","VEC30",1},
         {"CALYPSO_BSP_RX_LEAD","RX_LEAD",3}, {"CALYPSO_BSP_TPU_TRACK","TPU_TRACK",1},
         {"CALYPSO_BSP_TOA_LOCK","TOA_LOCK",1}, {"CALYPSO_BSP_STREAM","STREAM",1},
         {"CALYPSO_PONT_LOCKSTEP","LOCKSTEP",1}, {"CALYPSO_BSP_IQ_PASSTHROUGH","IQ_SYNTH",2},
