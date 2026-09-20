@@ -33,7 +33,7 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
 #include "pont.h"
-#include "gmsk.h"
+#include "calypso_gmsk.h"
 #include "cellule.h"
 #include "hw/arm/calypso/calypso_debug.h"
 

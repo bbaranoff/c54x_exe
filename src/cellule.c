@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <osmocom/core/bits.h>
 #include <osmocom/coding/gsm0503_coding.h>
-#include "gmsk.h"
+#include "calypso_gmsk.h"
 #include "cellule.h"
 
 static const uint8_t train_sb[64] = {
