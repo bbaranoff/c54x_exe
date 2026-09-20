@@ -15,4 +15,5 @@ int cellule_demod_d(const int16_t *x, int n_ech, int b0, unsigned char *d148);
 int cellule_demod_reference(const int16_t *x, int n_ech, unsigned char *bits148, int *offset);
 void cellule_code_attendu(uint32_t fn, uint8_t bsic, unsigned char *code78);
 char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marge, int16_t *iq, int *n_iq);
+void cellule_factice(int amp, double decalage, int16_t *iq);   /* 148 GMSK samples of the dummy burst */
 #endif

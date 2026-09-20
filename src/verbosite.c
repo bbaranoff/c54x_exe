@@ -36,6 +36,9 @@ static bool contient(const char *l, const char *mot) { return strstr(l, mot) != 
 /* Lowest -v level at which a line is shown. */
 static int niveau_ligne(const char *l)
 {
+    /* memory probes whose NAME contains an error keyword: classify first */
+    if (contient(l, "ERRWATCH"))
+        return 4;
     /* 0: what breaks */
     if (contient(l, "FATAL") || contient(l, "ERR") || contient(l, "abort") ||
         contient(l, "CORRUPT") || contient(l, "TRAP") || contient(l, "manquante") ||
@@ -55,7 +58,10 @@ static int niveau_ligne(const char *l)
         contient(l, "FLOW") || contient(l, "HOT-OPS") || contient(l, "FIRST"))
         return 4;
     /* 3: tasks, API RAM, interrupts, FB/SB paths */
-    if (contient(l, "TASK") || contient(l, "DISPATCH") || contient(l, "FB") ||
+    if (contient(l, "TASK") || contient(l, "DISPATCH") || contient(l, "] FB") ||
+        contient(l, "-FB") || contient(l, "FBDET") || contient(l, "FBWATCH") ||
+        contient(l, "FBSB") || contient(l, "FBCALL") || contient(l, "FBROUTE") ||
+        contient(l, "FBENTRY") || contient(l, "FBGATE") || contient(l, "FBMODE") ||
         contient(l, "SYNC") || contient(l, "FEED") || contient(l, "VEC") ||
         contient(l, "INTM") || contient(l, "IFR") || contient(l, "IMR") ||
         contient(l, "PMST") || contient(l, "MMR") || contient(l, "AFC") ||

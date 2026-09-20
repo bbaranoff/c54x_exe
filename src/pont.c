@@ -29,12 +29,14 @@
 #include "calypso_bsp.h"
 #include "calypso_twl3025.h"
 #include "calypso_rhea_dma.h"
+#include "calypso_rif.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
 #include "pont.h"
 #include "gmsk.h"
 #include "cellule.h"
 
+extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c : provenance du TOA */
 extern uint32_t g_c54x_exe_fn;          /* main.c: value returned by calypso_trx_get_fn() */
 
 static volatile sig_atomic_t g_stop;
@@ -118,10 +120,57 @@ static void trace_armer(void)
 }
 /* DARAM cells watched during the trace: every change is logged with the PC of
  * the instruction that made it (before/after diff on each step). */
-static const uint16_t g_cellules[] = { 0x43d8, 0x43d5, 0x3f92, 0x098c, 0x098a, 0x435e, 0x435b, 0x4368,
-    0x0810, 0x08d4, 0x0804, 0x0818, 0x058a, 0x3fb0, 0x3fc1, 0x3fde, 0x3fdc, 0x3fd3, 0x0c3f, 0x08f8, 0x08fa, 0x0906,
-    0x0837, 0x0838, 0x083a, 0x083b, 0x084b, 0x084c, 0x084e, 0x084f,   /* a_sch[0,1,3,4] on R pages 0 and 1 */
-    0x0e4e, 0x0e4f, 0x0e60, 0x2a00, 0x2a01, 0x0000 };
+/* Cells watched during the trace. Rebuilt [2026-09-19]: the previous list had
+ * accreted 13 addresses (0x3fc1 0x3fde 0x3fd3 0x0c3f 0x0906 0x058a 0x0e60
+ * 0x435b 0x0e4f 0x2a01 ...) that appear NOWHERE else in the tree and whose
+ * introducing commit (812c343) says only "commit". An address whose meaning
+ * cannot be restated is not evidence: when it moves, nothing follows. Every
+ * entry below carries where its meaning comes from.
+ *
+ * API window cells are derived from calypso_api.h rather than written raw, so
+ * they cannot drift from the map: API base = C54X_API_BASE = 0x0800 words, and
+ * the API_* offsets are in BYTES (hence the /2). */
+#define CEL_W(p, off)   (uint16_t)(C54X_API_BASE + (API_W_PAGE(p) + (off)) / 2)
+#define CEL_R(p, off)   (uint16_t)(C54X_API_BASE + (API_R_PAGE(p) + (off)) / 2)
+#define CEL_NDB(off)    (uint16_t)(C54X_API_BASE + (API_NDB + (off)) / 2)
+
+static const uint16_t g_cellules[] = {
+    /* --- ARM -> DSP pages (calypso_api.h) ------------------------------- */
+    CEL_W(0, WP_D_TASK_MD), CEL_W(1, WP_D_TASK_MD),   /* 0x0804/0x0818 the posted task */
+    CEL_W(0, WP_D_TASK_D),  CEL_W(1, WP_D_TASK_D),    /* 0x0800/0x0814 */
+    CEL_W(0, WP_D_FN),      CEL_W(1, WP_D_FN),        /* 0x0808/0x081c */
+
+    /* --- NDB (calypso_api.h + calypso_fbsb.h) --------------------------- */
+    CEL_NDB(NDB_D_DSP_PAGE),                          /* 0x08d4 page toggle */
+    CEL_NDB(NDB_D_FB_DET),                            /* 0x08f8 FB found flag */
+    CEL_NDB(NDB_A_SYNC_DEMOD + 2 * D_TOA),            /* 0x08fa */
+    CEL_NDB(NDB_A_SYNC_DEMOD + 2 * D_PM),             /* 0x08fb */
+    CEL_NDB(NDB_A_SYNC_DEMOD + 2 * D_ANGLE),          /* 0x08fc  <- was MISSING */
+    CEL_NDB(NDB_A_SYNC_DEMOD + 2 * D_SNR),            /* 0x08fd  <- was MISSING */
+
+    /* --- DSP -> ARM pages: a_sch[0,1,3,4], BOTH pages -------------------- */
+    CEL_R(0, RP_A_SCH + 0), CEL_R(0, RP_A_SCH + 2),
+    CEL_R(0, RP_A_SCH + 6), CEL_R(0, RP_A_SCH + 8),   /* 0x0837 38 3a 3b */
+    CEL_R(1, RP_A_SCH + 0), CEL_R(1, RP_A_SCH + 2),
+    CEL_R(1, RP_A_SCH + 6), CEL_R(1, RP_A_SCH + 8),   /* 0x084b 4c 4e 4f */
+
+    /* --- FB correlator input, read out of the mask ROM [2026-09-19] ------ */
+    0x3fb5,   /* pointer to the input buffer; PROM0 0xb2c4 ST #0x0cce,*(0x3fb5)
+               *                              and 0xb2c9 ST #0x0d2e,*(0x3fb5) */
+    0x0cce,   /* buffer A, same two instructions; also the AAD the DMA uses */
+    0x0d2e,   /* buffer B, idem */
+    0x0e4e,   /* second DARAM target seen in the rhea-dma RX transfers */
+    0x2a00,   /* CALYPSO_BSP_DARAM_ADDR env default, before AAD_FOLLOW */
+
+    /* --- cells whose meaning is stated elsewhere in the tree ------------- */
+    0x3f92,   /* calypso_dma.h:9   source of d_error_status (0x08d5) */
+    0x43d8,   /* calypso_bsp.c:1567  poked per burst on the FB/SB mission */
+    0x43d5,   /* c54x_mem.c:2229   PROM 0xb4be stm #0x43d5 ; reada *AR1+ */
+    0x098c,   /* calypso_mailbox.c:46  mailbox poll (0xde86 ld *(0x098c)) */
+    0x435e,   /* calypso_c54x.c:4574  bit13 = DMA config lock */
+    0x4368,   /* c54x_mem.c:1835   DISPATCH-CELL-RESEED */
+    0x3fb0,   /* c54x_probes.c:505  BSP read window 0x3fb0..0x3fbf */
+    0x0000 };
 #define N_CELLULES (sizeof(g_cellules) / sizeof(g_cellules[0]))
 static uint16_t g_cell_prev[N_CELLULES];
 static uint16_t g_trace_pc_prev;
@@ -247,6 +296,17 @@ static void profil_publier(void)
  * (run to the first IDLE) while init is pending, then the TPU-frame interrupt
  * if IMR arms it followed by one run budget. Returns the PONT_DONE flags and
  * the executed instruction count in *insns. */
+/* [2026-09-20] MID-FRAME INJECTION (PONT_RX_MODE=milieu, the default). The ROM
+ * arms DMA2 in its frame ISR and the receiver only keeps samples while a
+ * window is open (calypso_rif: no window, no sample). Delivering the burst
+ * AFTER the frame's run (the old PONT_RX_APRES=1) found the channel closed on
+ * most frames: measured 13 transfers on one frame in six, the FB block counter
+ * starved, TOA = 1251 for an FCCH four frames away. The replay bench delivers
+ * after a short slice of the frame, once the ISR has armed; the bridge now does
+ * the same: budget/8, inject (synthetic cell and UDP bursts), then the rest. */
+static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned long *injectes; bool udp; } g_inj;
+static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn, unsigned long *injectes);
+
 static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32_t *insns)
 {
     uint32_t drapeaux = 0;
@@ -282,7 +342,16 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         if (getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
             printf("  [irq] fn=%u APRES vec28 : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x\n",
                    g_c54x_exe_fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr);
-        if (!dsp->idle) {
+        if (g_inj.actif) {
+            int fait = 0;
+            if (!dsp->idle) fait = c54x_run_profile(dsp, (int)budget / 8);   /* the ISR arms DMA2 */
+            if (g_inj.udp) calypso_bsp_service(g_inj.fn);
+            if (g_inj.iq_mode) injecter_burst(dsp, g_inj.iq_mode, g_inj.amp, g_inj.fn, g_inj.injectes);
+            if (dsp->idle && calypso_rhea_dma_irq_level() && (dsp->imr & (1u << 14)) && !(dsp->ifr & (1u << 14)))
+                c54x_interrupt_ex(dsp, 30, 14);
+            if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
+            if (!dsp->idle) c54x_run_profile(dsp, (int)budget - fait);
+        } else if (!dsp->idle) {
             c54x_run_profile(dsp, (int)budget);
         }
         if (!etait_idle && dsp->idle) {
@@ -345,10 +414,127 @@ static void iq_synthese(const char *mode, int amp, uint32_t fn, int16_t *iq)
  * needs the burst of the frame IMMEDIATELY AFTER the FCCH, and that frame was
  * never the SCH. Pulled from here, one burst per frame, the multiframe reaches
  * the DSP intact whatever the emulated clock does. */
-typedef struct { uint32_t fn; int16_t *iq; } ReelBurst;
+typedef struct { uint32_t fn; int16_t *iq; int fcch; } ReelBurst;
 static ReelBurst *g_reel;
-static unsigned   g_reel_n, g_reel_i;
+static unsigned   g_reel_n, g_reel_util;
 static int        g_reel_nsym;
+static unsigned   g_reel_base;
+
+/* Decimate a stored burst to the 1 sample/symbol the correlator works at. The
+ * same decimation the UDP path applies through CALYPSO_BSP_IQ_DECIM, and the
+ * same one reelle_injecter delivers: what is measured here is what the DSP
+ * gets. Returns the number of int16 written. */
+static int reelle_decimer(const ReelBurst *b, int16_t *iq, int max_i16)
+{
+    int decim = g_reel_nsym / 148;
+    if (decim < 1) decim = 1;
+    int n = 0;
+    for (int k = 0; k * decim < g_reel_nsym && n <= max_i16 - 2; k++) {
+        iq[n++] = b->iq[2 * (k * decim)];
+        iq[n++] = b->iq[2 * (k * decim) + 1];
+    }
+    return n;
+}
+
+/* Is this burst an FCCH? At 1 sample/symbol an all-zeros GMSK burst is a pure
+ * tone rotating by exactly +pi/2 per sample — the criterion calypso_bsp.c's
+ * FCCH-PROBE already uses (coh ~ 1, dphi ~ +1.571). Nothing else on TS0 comes
+ * close, so this labels the multiframe without decoding anything. */
+static int reelle_est_fcch(const ReelBurst *b)
+{
+    int16_t iq[2 * 256];
+    int n = reelle_decimer(b, iq, (int)(sizeof(iq) / sizeof(iq[0])));
+    int ns = n / 2;
+    if (ns < 32) return 0;
+    double accr = 0, acci = 0, den = 0;
+    for (int k = 1; k < ns; k++) {
+        double i0 = iq[2*(k-1)], q0 = iq[2*(k-1)+1];
+        double i1 = iq[2*k],     q1 = iq[2*k+1];
+        accr += i1*i0 + q1*q0;
+        acci += q1*i0 - i1*q0;
+        den  += sqrt((i0*i0 + q0*q0) * (i1*i1 + q1*q1));
+    }
+    if (den <= 0) return 0;
+    double coh  = sqrt(accr*accr + acci*acci) / den;
+    double dphi = atan2(acci, accr);
+    return coh > 0.90 && fabs(dphi - M_PI_2) < 0.30;
+}
+
+/* Where does the recording sit in the 51-multiframe?
+ *
+ * The frame numbers stored in the file cannot be trusted for this: measured on
+ * cellule_reelle.bin, the FCCH bursts carry tags whose residues are
+ * {0,10,20,31,41} where GSM 05.02 puts the FCCH at fn%51 in {0,10,20,30,40} —
+ * a constant offset of 31. So the phase is taken from the SIGNAL instead: the
+ * FCCH bursts are located by reelle_est_fcch(), and the one followed by a gap
+ * of 11 frames is the last of its multiframe, i.e. true phase 40 (the sequence
+ * of gaps is 10,10,10,10,11). g_reel_base then satisfies
+ *
+ *     entry_index  ==  (arm_fn - g_reel_base)  (mod 51)
+ *
+ * which is what reelle_injecter uses to pick a burst BY FRAME NUMBER. */
+static void reelle_caler(void)
+{
+    unsigned fcch[64], nf = 0;
+    for (unsigned i = 0; i < g_reel_n && nf < 64; i++)
+        if (g_reel[i].fcch) fcch[nf++] = i;
+
+    unsigned i40 = 0; int trouve = 0;
+    for (unsigned k = 0; k + 1 < nf; k++)
+        if (fcch[k + 1] - fcch[k] == 11) { i40 = fcch[k]; trouve = 1; break; }
+
+    if (!trouve) {
+        g_reel_base = 0;
+        printf("pont : ATTENTION — phase de multitrame indeterminee (%u FCCH reperees, "
+               "aucun ecart de 11) ; calage a 0, la lecture reste cadencee par fn\n", nf);
+        return;
+    }
+    g_reel_base = (40u + 51u - (i40 % 51u)) % 51u;   /* i40 == 40 - base  (mod 51) */
+    unsigned ecart_tag = (g_reel[0].fn + 51u - g_reel_base) % 51u;
+    printf("pont : %u FCCH reperees dans la capture (ecarts 10/11), phase calee sur le signal : "
+           "base=%u ; les tags fn du fichier sont decales de +%u mod 51\n",
+           nf, g_reel_base, ecart_tag);
+}
+
+/* Recorded-cell replay, addressed by the ARM frame number.
+ *
+ * /opt/GSM/cellule_reelle.bin holds the TS0 of 311 CONSECUTIVE frames captured
+ * off the air at 4 samples/symbol, each tagged with its real frame number.
+ *
+ * Why it is fed from here and not over UDP: the source and the DSP have
+ * independent clocks. Measured on this bench, the DSP runs between 72 and 160
+ * frames/s depending on load while rejouer_cellule.py streams at a rate of its
+ * own, so the DSP swallowed about four cell frames per frame of its own. The
+ * FB task survives that — it only ever correlates ONE window — but the SB task
+ * needs the burst of the frame IMMEDIATELY AFTER the FCCH, and that frame was
+ * never the SCH.
+ *
+ * [2026-09-19] Why it is addressed by fn and no longer by a running index:
+ * calypso_trx.c:pont_echange() SKIPS a tick whenever the DSP has not returned
+ * its DONE — about 3% of frames once the traces are off, 85% with -vvv on a
+ * terminal. A running index does not advance on a skipped tick while the ARM
+ * clock does, so every skip shifted the recording against the ARM by one frame,
+ * FOR GOOD: measured 4202 frames of accumulated drift over a 5-minute run, i.e.
+ * a multiframe phase wandering without bound. The ARM then armed its SB one
+ * frame after an FCCH and got a burst from somewhere else entirely (11 SB CRC
+ * OK in 68000 frames), and the deinterleaver assembled BCCH blocks out of
+ * unrelated bursts (205-221 bit errors per block, every block dropped).
+ * Indexing by fn makes a skipped tick skip a RECORDING burst too: the phase is
+ * held whatever the emulated clock does. */
+static void reelle_injecter(C54xState *dsp, uint32_t fn, unsigned long *injectes)
+{
+    if (!g_reel_util) return;
+    unsigned idx = (fn + g_reel_util - (g_reel_base % g_reel_util)) % g_reel_util;
+    const ReelBurst *b = &g_reel[idx];
+
+    int16_t iq[2 * 256];
+    int n_iq = reelle_decimer(b, iq, (int)(sizeof(iq) / sizeof(iq[0])));
+
+    /* The burst keeps its OWN frame number: it is the provenance of the samples,
+     * and calypso_bsp_rx_burst only ever logs it. */
+    calypso_bsp_rx_burst(0, b->fn, iq, n_iq);
+    (*injectes)++;
+}
 
 static int reelle_charger(const char *chemin)
 {
@@ -370,32 +556,20 @@ static int reelle_charger(const char *chemin)
     }
     fclose(f);
     g_reel_n = n; g_reel_nsym = (int)nsym;
+
+    /* Only a WHOLE number of 51-multiframes may be looped: 311 = 6*51 + 5, so
+     * wrapping on all 311 shifted the phase by 5 at every turn. */
+    g_reel_util = (n / 51u) * 51u;
+
+    for (unsigned i = 0; i < g_reel_n; i++)
+        g_reel[i].fcch = reelle_est_fcch(&g_reel[i]);
+
     printf("pont : cellule REELLE %s — %u trames consecutives a %d ech/symbole, BSIC=%u, "
-           "fn %u..%u, une trame par trame DSP\n", chemin, n, nsym / 148, bsic,
-           n ? g_reel[0].fn : 0, n ? g_reel[n - 1].fn : 0);
-    return (int)n;
-}
-
-/* Deliver the next recorded burst, decimated to the 1 sample/symbol the DSP
- * correlator works at (the same decimation the UDP path applies through
- * CALYPSO_BSP_IQ_DECIM). The burst keeps its OWN frame number: the SCH content
- * only makes sense against the frame it was transmitted in. */
-static void reelle_injecter(C54xState *dsp, unsigned long *injectes)
-{
-    if (!g_reel_n) return;
-    const ReelBurst *b = &g_reel[g_reel_i];
-    g_reel_i = (g_reel_i + 1) % g_reel_n;
-
-    int decim = g_reel_nsym / 148;
-    if (decim < 1) decim = 1;
-    int16_t iq[2 * 192];
-    int n_iq = 0;
-    for (int k = 0; k * decim < g_reel_nsym && n_iq <= (int)(sizeof(iq)/sizeof(iq[0])) - 2; k++) {
-        iq[n_iq++] = b->iq[2 * (k * decim)];
-        iq[n_iq++] = b->iq[2 * (k * decim) + 1];
-    }
-    calypso_bsp_rx_burst(0, b->fn, iq, n_iq);
-    (*injectes)++;
+           "fn %u..%u, %u trames jouees (%u multitrames de 51, %u ecartees), adressage par fn\n",
+           chemin, n, nsym / 148, bsic, n ? g_reel[0].fn : 0, n ? g_reel[n - 1].fn : 0,
+           g_reel_util, g_reel_util / 51u, n - g_reel_util);
+    reelle_caler();
+    return (int)g_reel_util;
 }
 
 /* Inject one burst (synthetic cell or plain signal) into the RIF/BSP path. */
@@ -406,11 +580,12 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
 {
         int16_t iq[2 * 256];
         int n_iq = 2 * IQ_N;
+        char t_dbg = '?';
         if (!strncmp(iq_mode, "reelle", 6)) {
             static int charge = 0;
             if (!charge) { const char *p = strchr(iq_mode, ':');
                 charge = reelle_charger(p ? p + 1 : "/opt/GSM/cellule_reelle.bin"); if (!charge) charge = -1; }
-            if (charge > 0) reelle_injecter(dsp, injectes);
+            if (charge > 0) reelle_injecter(dsp, fn, injectes);
             return;
         }
         if (!strncmp(iq_mode, "cell", 4)) {
@@ -425,7 +600,12 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
                        "SCH dans une fenetre de %d echantillons (DARAM len=%u mots)%s\n",
                        bsic, bsic >> 3, bsic & 7, dec, 148 + 2 * marge, calypso_bsp_get_daram_len(),
                        cellule_sch_partout ? ", SCH sur toutes les trames non-FCCH" : ""); }
-            char t = cellule_burst(fn, (uint8_t)bsic, amp, dec, marge, iq, &n_iq);
+            /* the SCH burst is delivered as the 190-sample window block only when
+             * the DSP has its one-shot SB window armed; otherwise it is a frame of
+             * the FB stream like any other (same rule as rejouer.c) */
+            int marge_eff = calypso_rhea_dma_one_shot() ? marge : 0;
+            char t = cellule_burst(fn, (uint8_t)bsic, amp, dec, marge_eff, iq, &n_iq);
+            t_dbg = t;
             static unsigned nS, nF;
             if (t == 'S') nS++; else if (t == 'F') nF++;
             if ((nS + nF) && (nS + nF) % 500 == 1) printf("pont : bursts injectes FCCH=%u SCH=%u (fn=%u)\n", nF, nS, fn);
@@ -437,7 +617,19 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
         bool dbg = irqdbg && fn > 5000 && irqdbg_n < 12;
         if (dbg) printf("  [irq] fn=%u AVANT rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x PMST=%04x SP=%04x\n",
                         fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr, dsp->pmst, dsp->sp);
+        { static int dj = -1; if (dj < 0) dj = getenv("PONT_DEBUG_INJ") ? 1 : 0;
+          int md0 = dsp->api_ram ? (dsp->api_ram[4] & 0xff) : 0, md1 = dsp->api_ram ? (dsp->api_ram[0x18] & 0xff) : 0;
+          if (dj && (calypso_rhea_dma_one_shot() || md0 == 6 || md1 == 6 || (fn >= 300 && fn <= 312)))
+              printf("  [inj] fn=%u p51=%u AVANT : type=%c n_iq=%d dma armee=%d one_shot=%d task_md=%d/%d rif=%d mots idle=%d pc=%04x"
+                     " | W0=%04x %04x %04x %04x %04x ..%04x %04x  W1=%04x %04x %04x %04x %04x ..%04x %04x  NDB page=%04x fb_mode=%04x fb_det=%04x\n",
+                     fn, fn % 51u, t_dbg, n_iq, calypso_rhea_dma_rx_armed(), calypso_rhea_dma_one_shot(), md0, md1, calypso_rif_level(), dsp->idle, dsp->pc & 0xffff,
+                     dsp->api_ram[0], dsp->api_ram[1], dsp->api_ram[2], dsp->api_ram[3], dsp->api_ram[4], dsp->api_ram[15], dsp->api_ram[16],
+                     dsp->api_ram[0x14], dsp->api_ram[0x15], dsp->api_ram[0x16], dsp->api_ram[0x17], dsp->api_ram[0x18], dsp->api_ram[0x14+15], dsp->api_ram[0x14+16],
+                     dsp->api_ram[0xd4], dsp->api_ram[0xd4+37], dsp->api_ram[0xd4+36]); }
         calypso_bsp_rx_burst(0, fn, iq, n_iq);
+        { static int dj2 = -1; if (dj2 < 0) dj2 = getenv("PONT_DEBUG_INJ") ? 1 : 0;
+          if (dj2 && fn >= 300 && fn <= 312)
+              printf("  [inj] fn=%u APRES : rif=%d mots idle=%d IFR=%04x\n", fn, calypso_rif_level(), dsp->idle, dsp->ifr); }
         if (dbg) { printf("  [irq] fn=%u APRES rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x SP=%04x\n",
                           fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr, dsp->sp); irqdbg_n++; }
         (*injectes)++;
@@ -513,7 +705,17 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     unsigned long trames = 0, irqs = 0, resets = 0;
     uint64_t insns_total = 0;
     const uint16_t *d_fb_det = &api_ram[(API_NDB + NDB_D_FB_DET) / 2];
-    const uint16_t *a_sch0   = &api_ram[(API_R_PAGE(0) + RP_A_SCH) / 2];
+    /* [2026-09-19] a_sch was read from R page 0 ONLY, hardcoded, while the DSP
+     * writes its result to the page d_dsp_page designates, alternating. Stale
+     * page-0 content read as a result is exactly what produces SB decodes that
+     * are wrong yet REPEATABLE (measured: BSIC 44 six times, 22 five times out
+     * of 17, never the 32 the capture carries). The PONT_CAN_SB hack in this
+     * same file already writes BOTH pages, so the page was known to matter.
+     * Both are kept here and the live one is picked per frame. */
+    const uint16_t *a_sch_pg[2] = {
+        &api_ram[(API_R_PAGE(0) + RP_A_SCH) / 2],
+        &api_ram[(API_R_PAGE(1) + RP_A_SCH) / 2] };
+    const uint16_t *a_sch0   = a_sch_pg[0];
 
     CalypsoPontMsg m;
     if (recv(fd, &m, sizeof(m), 0) != (ssize_t)sizeof(m) || m.type != PONT_HELLO ||
@@ -557,6 +759,20 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             { unsigned wp = m.b & 1u;
               int16_t dac = (int16_t)api_ram[(wp ? 0x14u : 0x00u) + 15u];
               static int16_t prev; static int first = 1;
+              /* [2026-09-19] Measurement before any fix: the AFC DAC never settles,
+               * every correction is followed by a write of exactly -700
+               * (afc_initial_dac_value). The suspicion is the dual-page write the
+               * set_afc_dac filter already documents — page A holding the inherited
+               * init while page B carries the correction — with the filter guarding
+               * only against 0, not against -700. Print BOTH pages so the claim can
+               * be checked instead of assumed. */
+              { static unsigned na;
+                int16_t d0 = (int16_t)api_ram[0x00u + 15u], d1 = (int16_t)api_ram[0x14u + 15u];
+                static int16_t p0 = 0x7fff, p1 = 0x7fff;
+                if ((d0 != p0 || d1 != p1) && na++ < 40)
+                    printf("  [afc] fn=%u w_page=%u relaye=%d | page0=%d page1=%d\n",
+                           m.a, wp, dac, d0, d1);
+                p0 = d0; p1 = d1; }
               if (first || dac != prev) { calypso_twl3025_set_afc_dac(dac); prev = dac; first = 0; } }
             { static unsigned _to=0; if (getenv("PONT_TPU_DEBUG") && (_to<5 || _to%2000==0)) printf("  [tpu] fn=%u tpu_offset=%u\n", m.a, m.c); _to++; }
             trace_armer();
@@ -579,16 +795,25 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * samples land afterwards. Injecting before the interrupt instead
              * leaves DMA2 with ENABLE=0 when the RIF issues its RX request, and
              * the SB job then decodes the previous tick's window. */
-            static int rx_apres = -1;
-            if (rx_apres < 0) { const char *e = getenv("PONT_RX_APRES"); rx_apres = (e && *e == '0') ? 0 : 1; }
-            if (!rx_apres && injecter && init_done) injecter_burst(dsp, iq_mode, amp, m.a, &injectes);
+            /* PONT_RX_MODE : milieu (default, see jouer_trame) | apres | avant.
+             * PONT_RX_APRES=0/1 is still honoured as avant/apres. */
+            static int rx_mode = -1;   /* 0 = milieu, 1 = apres, 2 = avant */
+            if (rx_mode < 0) { const char *e = getenv("PONT_RX_MODE"); const char *a = getenv("PONT_RX_APRES");
+                               rx_mode = (e && !strcmp(e, "apres")) ? 1 : (e && !strcmp(e, "avant")) ? 2
+                                       : (a && *a == '1') ? 1 : (a && *a == '0') ? 2 : 0; }
+            bool rx_apres = (rx_mode == 1);
+            if (rx_mode == 2 && injecter && init_done) injecter_burst(dsp, iq_mode, amp, m.a, &injectes);
             /* Real chain: drain UDP socket 6702 (bursts from the bridge/BTS) and
              * hand them to the DSP. This is the only source when synthetic
              * injection is off, and a no-op when the socket is empty. */
-            if (init_done) calypso_bsp_service(m.a);
+            if (init_done && rx_mode != 0) calypso_bsp_service(m.a);
+            g_inj.actif = (rx_mode == 0 && init_done);
+            g_inj.iq_mode = (rx_mode == 0 && injecter) ? iq_mode : NULL;
+            g_inj.amp = amp; g_inj.fn = m.a; g_inj.injectes = &injectes; g_inj.udp = (rx_mode == 0 && init_done);
             uint32_t ninsn = 0;
             bool init_avant = init_done;
             uint32_t drapeaux = jouer_trame(dsp, insns, &init_done, &ninsn);
+            g_inj.actif = false;
             /* Reference probe (CALYPSO_BSP_VERIF=1): compare DARAM against the
              * burst the BSP was handed, AFTER the DSP has run — the samples
              * only reach DARAM through the DSP's own DMA draining the RIF, so
@@ -598,10 +823,13 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 int ident = calypso_bsp_verif_compare(&vfn, &vad, &vn, &vage);
                 if (ident >= 0 && vn > 0) {
                     static unsigned nv;
-                    if (nv++ < 4000)
-                        printf("  [verif] fn=%u p51=%u age=%d : %d/%d en 0x%04x %s\n",
-                               vfn, vfn % 51u, vage, ident, vn, vad,
-                               ident == vn ? "VALIDE" : "partiel");
+                    if (nv++ < 4000) {
+                        uint16_t vpg = calypso_bsp_verif_last_page();
+                        printf("  [verif] fn=%u p51=%u age=%d page=0x%04x w_page=%d : "
+                               "%d/%d en 0x%04x %s\n",
+                               vfn, vfn % 51u, vage, vpg, (int)(vpg & 1u),
+                               ident, vn, vad, ident == vn ? "VALIDE" : "partiel");
+                    }
                 }
             }
             if (rx_apres && injecter && init_done && dsp->running) {
@@ -616,8 +844,21 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
                 if (!dsp->idle) c54x_run_profile(dsp, (int)insns);
                 ninsn += dsp->insn_count - avant;
+            }
+            /* [2026-09-20] STREAM PUMP (same as rejouer.c). DMA2 now fills its
+             * double buffer with full pages and interrupts once per pair; the
+             * ROM's ISR consumes both halves and the DSP idles. Then the next
+             * pair is handed over, until the receiver holds less than a pair. A
+             * 156.25-symbol frame is 3.25 pages, so this runs 1 or 2 times. */
+            for (int k = 0; k < 40 && dsp->running; k++) {   /* 13 page pairs per 1250-symbol frame */
+                if (!calypso_rhea_dma_pump(dsp)) break;
+                if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
+                uint32_t av2 = dsp->insn_count;
+                if (!dsp->idle) c54x_run_profile(dsp, (int)insns / 4);
+                ninsn += dsp->insn_count - av2;
                 drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             }
+            drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             /* Canned results: scaffolding to prove the pipeline through to the
              * LU, not an end state. PONT_CAN_TOA=23 forces the reported TOA
              * (a_sync_demod[D_TOA]) to the on-time value the firmware expects
@@ -649,7 +890,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 if (can_sb_full) {
                     int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;   /* d_task_md on W pages 0 and 1 */
                     if (md0 == 6 || md1 == 6) {
-                        uint32_t bfn = calypso_bsp_get_last_fn(); if (bfn == 0) bfn = m.a;
+                        /* [2026-09-19] The frame MUST be the tick's own (m.a), not
+                         * calypso_bsp_get_last_fn(): measured, the two diverged badly
+                         * (the canned SB announced fn=5662 while the firmware sat at
+                         * 11261), and Synchronize_TDMA then locked the ARM onto a frame
+                         * number unrelated to what the injector delivers — every burst
+                         * after the sync misaligned. A canned SB has to carry the clock
+                         * the cell is actually generated from, or it proves nothing. */
+                        uint32_t bfn = m.a;
                         uint32_t p51 = bfn % 51;
                         if (!(p51 % 10 == 1 && p51 <= 41)) bfn += (51 + 1 - (int)p51) % 51;  /* snap to an SCH frame */
                         uint32_t sb = pont_encode_sb((uint8_t)can_sb_bsic, bfn / 1326, bfn % 26, bfn % 51);
@@ -682,9 +930,107 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
               prev5 = has5; prev6 = has6; }
             { static int fb_prev = 0; if (*d_fb_det && !fb_prev) printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs()); fb_prev = *d_fb_det != 0; }
-            { static int crc_prev = 1; int crc_ok = (a_sch0[0] & 0x8100) == 0x8000;
-              if (crc_ok && !crc_prev) printf("  [jalon] fn=%u SB CRC OK a_sch=%04x %04x %04x %04x  hacks=%s\n", m.a, a_sch0[0], a_sch0[1], a_sch0[3], a_sch0[4], hacks_actifs());
-              crc_prev = crc_ok; }
+            /* [2026-09-19] ONE LINE PER SB ATTEMPT. Everything upstream of the SB
+             * task is now measured correct — right frame, right window, right
+             * sample offset — yet the CRC passes in 0.4% of attempts. A decode
+             * that were simply broken would give 0%, so something DISCRIMINATES
+             * the rare successes. This logs, for every frame the ARM has an SB
+             * task posted, the TOA the FB left behind (a_sync[0], the value the
+             * firmware positions the window from) next to the CRC outcome, so
+             * the two populations can be compared directly. */
+            /* The a_sync cells are already cleared by the time the SB task is
+             * posted (measured: toa=pm=ang=0 on every attempt), so the FB result
+             * has to be LATCHED when d_fb_det rises and carried to the attempt. */
+            static int lat_toa, lat_pm, lat_ang; static uint32_t lat_fn;
+            { static int fbl = 0;
+              if (*d_fb_det && !fbl) {
+                  lat_toa = (int)(int16_t)a_sync[0]; lat_pm = a_sync[1];
+                  lat_ang = (int)(int16_t)a_sync[2]; lat_fn = m.a;
+              }
+              fbl = *d_fb_det != 0; }
+            { static int sb_prev = 0;
+              int md_0 = api_ram[4] & 0xff, md_1 = api_ram[0x18] & 0xff;
+              int sb_now = (md_0 == 6 || md_1 == 6);
+              if (sb_now && !sb_prev) {
+                  static unsigned nsb;
+                  if (nsb++ < 4000)
+                      printf("  [sb] fn=%u p51=%u | FB a fn=%u toa=%d pm=%u ang=%d "
+                             "| TOA-ROM=%d src=%s "
+                             "| a_sch=%04x %s\n",
+                             m.a, m.a % 51u, lat_fn, lat_toa, lat_pm, lat_ang,
+                             g_toa_valeur,
+                             g_toa_grille < 0 ? "?" : (g_toa_grille ? "GRILLE(0x0cce)" : "fine"),
+                             a_sch0[0],
+                             ((a_sch0[0] & 0x8100) == 0x8000) ? "CRC_OK" : "crc_ko");
+              }
+              sb_prev = sb_now; }
+            /* CRC watched on BOTH R pages, and the page reported: reading page 0
+             * alone cannot tell a real decode from stale content. A genuine SCH
+             * gives the SAME BSIC every time (32 for cellule_reelle.bin); a
+             * value that changes at each hit is a 10-bit CRC passing by chance
+             * (1/1024) or a stale cell. */
+            /* [2026-09-19] Who writes a_sch at all? The DSP never does: the
+             * A_SCH-WR probe in c54x_mem.c (live, its ANGLE-WR neighbour fires)
+             * counted ZERO stores by the ROM to 0x0837..0x083b / 0x084b..0x084f.
+             * The only host writer is the PONT_CAN_SB block below, which is off.
+             * Yet the cells change. The remaining writer is the ARM, through the
+             * shared mapping, which no DSP-side probe can see -- so watch the
+             * VALUES from here and name the frame. */
+            /* [2026-09-19] Who maintains d_dsp_page? calypso_api.h: an armed page
+             * is B_GSM_TASK|page = 0x0002 or 0x0003; 0x0000 is the reset state
+             * l1s_reset_hw() writes (sync.c:165), and it also puts the firmware
+             * back on R page 0. Measured at 0x0000 on 39% of samples, because
+             * the FBSB loop restarts ~12000 times. On silicon the DSP re-arms
+             * the page itself; this names every transition and its writer. */
+            { static uint16_t dpp; static int dfirst = 1; static unsigned ndp;
+              uint16_t dp = api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2];
+              if (!dfirst && dp != dpp && ndp < 40) {
+                  printf("  [page] fn=%u d_dsp_page %04x -> %04x  (%s)\n", m.a, dpp, dp,
+                         (dp & 0x0002) ? ((dp & 1) ? "arme page 1" : "arme page 0")
+                                       : "NON ARME (etat de reset)");
+                  ndp++;
+              }
+              dpp = dp; dfirst = 0; }
+            { static uint16_t prev[2][5]; static int first = 1; static unsigned nch;
+              for (int pg = 0; pg < 2; pg++) {
+                  const uint16_t *a = a_sch_pg[pg];
+                  if (!first && nch < 60 &&
+                      (a[0] != prev[pg][0] || a[3] != prev[pg][3] || a[4] != prev[pg][4])) {
+                      printf("  [a_sch] fn=%u page=%d : %04x %04x %04x %04x -> "
+                             "%04x %04x %04x %04x  (d_dsp_page=%04x)\n",
+                             m.a, pg, prev[pg][0], prev[pg][1], prev[pg][3], prev[pg][4],
+                             a[0], a[1], a[3], a[4],
+                             api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2]);
+                      nch++;
+                  }
+                  prev[pg][0]=a[0]; prev[pg][1]=a[1]; prev[pg][3]=a[3]; prev[pg][4]=a[4];
+              }
+              first = 0; }
+            { static int crc_prev[2] = {1, 1};
+              for (int pg = 0; pg < 2; pg++) {
+                  const uint16_t *a = a_sch_pg[pg];
+                  /* [2026-09-19] The criterion (a[0] & 0x8100) == 0x8000 counts
+                   * SATURATED ACCUMULATORS as CRC OK: a_sch[0] has been seen
+                   * carrying plain numbers, and 0x8000 is exactly what a
+                   * saturated accumulator stores (rejouer.c:923). Every "SB CRC
+                   * OK" of this session rested on it, so it is replaced by a
+                   * test the arithmetic cannot pass by accident: GSM 04.08
+                   * bounds T2 <= 25 and T3' <= 4, so 6 of 32 T2 values and 3 of
+                   * 8 T3' values are IMPOSSIBLE in a real SCH. */
+                  uint32_t _sb = (uint32_t)a[3] | ((uint32_t)a[4] << 16);
+                  unsigned _t2  = (_sb >> 18) & 0x1f;
+                  unsigned _t3p = ((_sb >> 24) & 1) | ((_sb >> 15) & 6);
+                  int _plausible = (_t2 <= 25) && (_t3p <= 4);
+                  int crc_ok = ((a[0] & 0x8100) == 0x8000) && _plausible;
+                  if (crc_ok && !crc_prev[pg]) {
+                      uint32_t sb = (uint32_t)a[3] | ((uint32_t)a[4] << 16);
+                      printf("  [jalon] fn=%u SB PLAUSIBLE page=%d BSIC=%u "
+                             "a_sch=%04x %04x %04x %04x  hacks=%s\n",
+                             m.a, pg, (unsigned)((sb >> 2) & 0x3f),
+                             a[0], a[1], a[3], a[4], hacks_actifs());
+                  }
+                  crc_prev[pg] = crc_ok;
+              } }
             if ((trames % 217) == 0) {
                 profil_publier();
                 pcc_publier();
@@ -721,6 +1067,9 @@ int pont_serveur(C54xState *dsp, uint16_t *api_ram, const char *socket_path,
 {
     signal(SIGINT, sur_signal);
     signal(SIGTERM, sur_signal);
+    { static int16_t rempl[2 * 148];         /* TS1..TS7 of the C0 carrier: dummy bursts */
+      cellule_factice(amp, 0.5, rempl);
+      calypso_bsp_set_remplissage(rempl, 2 * 148); }
 
     int srv = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     if (srv < 0) {

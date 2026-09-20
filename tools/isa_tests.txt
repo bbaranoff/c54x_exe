@@ -1,0 +1,2180 @@
+T 1 ABDST Xmem, Ymem | ABDST *AR3+, *AR4+
+W e39a
+B A ffabcd0000
+B AR3 100
+B AR4 200
+B B 0
+B FRCT 0
+B M 0100 0055
+B M 0200 00aa
+A A ffffab0000
+A AR3 101
+A AR4 201
+A B 5433
+A FRCT 0
+A M 0100 0055
+A M 0200 00aa
+E
+T 2 ABS src [, dst ] | ABS A, B
+W f585
+B A ffffffffcb
+B B fffffffc18
+A A ffffffffcb
+A B 35
+E
+T 3 ABS src [, dst ] | ABS A
+W f485
+B A 312345678
+B OVM 1
+A A 7fffffff
+A OVM 1
+E
+T 4 ABS src [, dst ] | ABS A
+W f485
+B A 312345678
+B OVM 0
+A A 312345678
+A OVM 0
+E
+T 5 6: Class 7 (see page 3-12) | ADD *AR3+, 14, A
+W 909e
+B A 1200
+B AR3 100
+B C 1
+B SXM 1
+B M 0100 1500
+A A 5401200
+A AR3 101
+A C 0
+A SXM 1
+A M 0100 1500
+E
+T 6 6: Class 7 (see page 3-12) | ADD A, –8, B
+W f518
+B A 1200
+B B 1800
+B C 1
+A A 1200
+A B 1812
+A C 0
+E
+T 7 6: Class 7 (see page 3-12) | ADD #4568, 8, A, B
+W f108 11d8
+B A 1200
+B B 1800
+B C 1
+A A 1200
+A B 457a00
+A C 0
+E
+T 9 ADDC Smem, src | ADDC *+AR2(5), A
+W 06ea 0005
+B A 13
+B AR2 100
+B C 1
+B M 0105 0004
+A A 18
+A AR2 105
+A C 0
+A M 0105 0004
+E
+T 10 ADDM #lk, Smem | ADDM 0123Bh, *AR4+
+W 6b94 123b
+B AR4 100
+B M 0100 0004
+A AR4 101
+A M 0100 123f
+E
+T 11 ADDM #lk, Smem | ADDM 0FFF8h, *AR4+
+W 6b94 fff8
+B AR4 100
+B OVM 1
+B SXM 1
+B M 0100 8007
+A AR4 101
+A OVM 1
+A SXM 1
+A M 0100 8000
+E
+T 12 ADDS Smem, src | ADDS *AR2–, B
+W 038a
+B AR2 100
+B B 3
+B M 0104 f006
+A AR2 ff
+A B f009
+A C 0
+A M 0104 f006
+E
+T 13 4: Class 1 (see page 3-3) | AND *AR3+, A
+W 1893
+B A ff1200
+B AR3 100
+B M 0100 1500
+A A 1000
+A AR3 101
+A M 0100 1500
+E
+T 14 4: Class 1 (see page 3-3) | AND A, 3, B
+W f183
+B A 1200
+B B 1800
+A A 1200
+A B 1000
+E
+T 15 ANDM #lk, Smem | ANDM #00FFh, *AR4+
+W 6894 00ff
+B AR4 100
+B M 0100 0444
+A AR4 101
+A M 0100 0044
+E
+T 17 B[D] pmad | B 2000h
+W f073 2000
+B PC 1f45
+A PC 2000
+E
+T 18 B[D] pmad | BD 1000h
+W f273 1000
+B PC 1f45
+A PC 1000
+E
+T 19 BACC[D] src | BACC A
+W f4e2
+B A 3000
+B PC 1f45
+A A 3000
+A PC 3000
+E
+T 20 BACC[D] src | BACCD B
+W f7e2
+B B 2000
+B PC 1f45
+A B 2000
+A PC 2000
+E
+T 21 BANZ[D] pmad, Sind | BANZ 2000h, *AR3–
+W 6c8b 2000
+B AR3 5
+B PC 1000
+A AR3 4
+A PC 2000
+E
+T 22 BANZ[D] pmad, Sind | BANZ 2000h, *AR3–
+W 6c8b 2000
+B AR3 0
+B PC 1000
+A AR3 ffff
+A PC 1002
+E
+T 23 BANZ[D] pmad, Sind | BANZ 2000h, *AR3(–1)
+W 6ce3 2000 ffff
+B AR3 1
+B PC 1000
+A AR3 1
+A PC 1003
+E
+T 24 BANZ[D] pmad, Sind | BANZD 2000h, *AR3–
+W 6e8b 2000
+B AR3 4
+B PC 1000
+A AR3 3
+A PC 2000
+E
+T 25 BC[D] pmad, cond [, cond [, condĂ ]ā] | BC 2000h, AGT
+W f846 2000
+B A 53
+B PC 1000
+A A 53
+A PC 2000
+E
+T 26 BC[D] pmad, cond [, cond [, condĂ ]ā] | BC 2000h, AGT
+W f846 2000
+B A ffffffffff
+B PC 1000
+A A ffffffffff
+A PC 1002
+E
+T 27 BC[D] pmad, cond [, cond [, condĂ ]ā] | BCD 1000h, BOV
+W fa78 1000
+B OVB 1
+B PC 3000
+A OVB 1
+A PC 1000
+E
+T 28 BC[D] pmad, cond [, cond [, condĂ ]ā] | BC 1000h, TC, NC, BIO
+W f83b 1000
+B C 1
+B PC 3000
+A C 1
+A PC 3002
+E
+T 29 BIT Xmem, BITC | BIT *AR5+, 15-12; test bit 12
+W 96b3
+B AR5 100
+B TC 0
+B M 0100 7688
+A AR5 101
+A TC 1
+A M 0100 7688
+E
+T 30 BITF Smem, #lk | BITF 5, 00FFh
+W 6105 00ff
+B DP 4
+B M 0205 5400
+A DP 4
+A TC 0
+A M 0205 5400
+E
+T 31 BITF Smem, #lk | BITF 5, 0800h
+W 6105 0800
+B DP 4
+B M 0205 0f7f
+A DP 4
+A TC 1
+A M 0205 0f7f
+E
+T 32 BITT Smem | BITT *AR7+0
+W 34b7
+B AR0 8
+B AR7 100
+B T c
+B TC 0
+B M 0100 0008
+A AR0 8
+A AR7 108
+A T c
+A TC 1
+A M 0100 0008
+E
+T 33 CALA[D] src | CALA A
+W f4e3
+B A 3000
+B PC 25
+B SP 1111
+B M 1110 4567
+A A 3000
+A PC 3000
+A SP 1110
+A M 1110 0026
+E
+T 34 CALA[D] src | CALAD B
+W f7e3
+B B 2000
+B PC 25
+B SP 1111
+B M 1110 4567
+A B 2000
+A PC 2000
+A SP 1110
+A M 1110 0028
+E
+T 35 CALL[D] pmad | CALL 3333h
+W f074 3333
+B PC 25
+B SP 1111
+B M 1110 4567
+A PC 3333
+A SP 1110
+A M 1110 0027
+E
+T 36 CALL[D] pmad | CALLD 1000h
+W f274 1000
+B PC 25
+B SP 1111
+B M 1110 4567
+A PC 1000
+A SP 1110
+A M 1110 0029
+E
+T 37 CC[D] pmad, cond [, cond [, cond ] ] | CC 2222h, AGT
+W f946 2222
+B A 3000
+B PC 25
+B SP 1111
+B M 1110 4567
+A A 3000
+A PC 2222
+A SP 1110
+A M 1110 0027
+E
+T 38 CC[D] pmad, cond [, cond [, cond ] ] | CCD 1000h, BOV
+W fb78 1000
+B OVB 1
+B PC 25
+B SP 1111
+B M 1110 4567
+A OVB 0
+A PC 1000
+A SP 1110
+A M 1110 0029
+E
+T 39 CMPL src [, dst ] | CMPL A, B
+W f593
+B A fcdffaaeaa
+B B 7899
+A A fcdffaaeaa
+A B 320055155
+E
+T 40 CMPM Smem, #lk | CMPM *AR4+, 0404h
+W 6094 0404
+B AR4 100
+B TC 1
+B M 0100 4444
+A AR4 101
+A TC 0
+A M 0100 4444
+E
+S 41 CMPR CC, ARx | CMPR 2, AR4 | cmpr['OP_CC3', 'OP_ARX']: cond: '2'
+T 42 CMPS src, Smem | CMPS A, *AR4+
+W 8e94
+B A 23457899
+B AR4 100
+B TC 0
+B TRN 4444
+B M 0100 0000
+A A 23457899
+A AR4 101
+A TC 1
+A TRN 8889
+A M 0100 7899
+E
+T 43 DADD Lmem, src [, dst ] | DADD *AR3+, A, B
+W 5193
+B A 56788933
+B AR3 100
+B B 0
+B C16 0
+B M 0100 1534
+B M 0101 3456
+A A 56788933
+A AR3 102
+A B 6bacbd89
+A C16 0
+A M 0100 1534
+A M 0101 3456
+E
+T 44 DADD Lmem, src [, dst ] | DADD *AR3–, A, B
+W 518b
+B A 56783933
+B AR3 100
+B B 0
+B C16 1
+B M 0100 1534
+B M 0101 3456
+A A 56783933
+A AR3 fe
+A B 6bac6d89
+A C16 1
+A M 0100 1534
+A M 0101 3456
+E
+T 45 DADD Lmem, src [, dst ] | DADD *AR3–, A, B
+W 518b
+B A 56783933
+B AR3 101
+B B 0
+B C16 0
+B M 0100 1534
+B M 0101 3456
+A A 56783933
+A AR3 ff
+A B 8ace4e67
+A C16 0
+A M 0100 1534
+A M 0101 3456
+E
+T 46 DADST Lmem, dst | DADST *AR3–, A
+W 5a8b
+B A 0
+B AR3 100
+B C16 1
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A 38791111
+A AR3 fe
+A C16 1
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 47 DADST Lmem, dst | DADST *AR3+, A
+W 5a93
+B A 0
+B AR3 100
+B C16 0
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A 3879579b
+A AR3 102
+A C16 0
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 48 DELAY Smem | DELAY *AR3
+W 4d83
+B AR3 100
+B M 0100 6cac
+B M 0101 0000
+A AR3 100
+A M 0100 6cac
+A M 0101 6cac
+E
+T 49 DLD Lmem, dst | DLD *AR3+, B
+W 5793
+B AR3 100
+B B 0
+B M 0100 6cac
+B M 0101 bd90
+A AR3 102
+A B 6cacbd90
+A M 0100 6cac
+A M 0101 bd90
+E
+T 50 DRSUB Lmem, src | DRSUB *AR3+, A
+W 5893
+B A 56788933
+B AR3 100
+B C16 0
+B M 0100 1534
+B M 0101 3456
+A A ffbebbab23
+A AR3 102
+A C 0
+A C16 0
+A M 0100 1534
+A M 0101 3456
+E
+T 51 DRSUB Lmem, src | DRSUB *AR3–, A
+W 588b
+B A 56783933
+B AR3 100
+B C 1
+B C16 1
+B M 0100 1534
+B M 0101 3456
+A A ffbebcfb23
+A AR3 fe
+A C 0
+A C16 1
+A M 0100 1534
+A M 0101 3456
+E
+T 52 DSADT Lmem, dst | DSADT *AR3+, A
+W 5e93
+B A 0
+B AR3 100
+B C 0
+B C16 0
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A fff1ef1111
+A AR3 102
+A C 0
+A C16 0
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 53 DSADT Lmem, dst | DSADT *AR3–, A
+W 5e8b
+B A 0
+B AR3 100
+B C 0
+B C16 1
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A fff1ef579b
+A AR3 fe
+A C 1
+A C16 1
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 54 DST src, Lmem | DST B, *AR3+
+W 4f93
+B AR3 100
+B B 6cacbd90
+B M 0100 0000
+B M 0101 0000
+A AR3 102
+A B 6cacbd90
+A M 0100 6cac
+A M 0101 bd90
+E
+T 55 DST src, Lmem | DST B, *AR3–
+W 4f8b
+B AR3 101
+B B 6cacbd90
+B M 0100 0000
+B M 0101 0000
+A AR3 ff
+A B 6cacbd90
+A M 0100 bd90
+A M 0101 6cac
+E
+T 56 DSUB Lmem, src | DSUB *AR3+, A
+W 5493
+B A 56788933
+B AR3 100
+B C16 0
+B M 0100 1534
+B M 0101 3456
+A A 414454dd
+A AR3 102
+A C16 0
+A M 0100 1534
+A M 0101 3456
+E
+T 57 DSUB Lmem, src | DSUB *AR3–, A
+W 548b
+B A 56783933
+B AR3 100
+B C 1
+B C16 1
+B M 0100 1534
+B M 0101 3456
+A A 414404dd
+A AR3 fe
+A C 1
+A C16 1
+A M 0100 1534
+A M 0101 3456
+E
+T 58 DSUBT Lmem, dst | DSUBT *AR3+, A
+W 5c93
+B A 0
+B AR3 100
+B C16 0
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A fff1ef1111
+A AR3 102
+A C16 0
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 59 DSUBT Lmem, dst | DSUBT *AR3–, A
+W 5c8b
+B A 0
+B AR3 100
+B C16 1
+B T 2345
+B M 0100 1534
+B M 0101 3456
+A A fff1ef1111
+A AR3 fe
+A C16 1
+A T 2345
+A M 0100 1534
+A M 0101 3456
+E
+T 60 EXP src | EXP A
+W f48e
+B A ffffffffcb
+B T 0
+A A ffffffffcb
+A T 19
+E
+T 61 EXP src | EXP B
+W f58e
+B B 785432105
+B T fffc
+A B 785432105
+A T fffc
+E
+T 62 FB[D] extpmad | FB 012000h
+W f881 2000
+B PC 1000
+B XPC 0
+A PC 2000
+A XPC 1
+E
+T 63 FB[D] extpmad | FBD 7F1000h
+W faff 1000
+B PC 2000
+B XPC 0
+A PC 1000
+A XPC 7f
+E
+T 64 FBACC[D] src | FBACC A
+W f4e6
+B A 13000
+B PC 1000
+B XPC 0
+A A 13000
+A PC 3000
+A XPC 1
+E
+T 65 FBACC[D] src | FBACCD B
+W f7e6
+B B 7f2000
+B XPC 1
+A B 7f2000
+A XPC 7f
+E
+T 66 FCALA[D] src | FCALA A
+W f4e7
+B A 7f3000
+B PC 25
+B SP 1111
+B XPC 0
+B M 110f 4567
+B M 1110 4567
+A A 7f3000
+A PC 3000
+A SP 110f
+A XPC 7f
+A M 110f 0000
+A M 1110 0026
+E
+T 67 FCALA[D] src | FCALAD B
+W f7e7
+B B 202000
+B PC 25
+B SP 1111
+B XPC 7f
+B M 110f 4567
+B M 1110 4567
+A B 202000
+A PC 2000
+A SP 110f
+A XPC 20
+A M 110f 007f
+A M 1110 0028
+E
+T 68 FCALL[D] extpmad | FCALL 013333h
+W f981 3333
+B PC 25
+B SP 1111
+B XPC 0
+B M 110f 4567
+B M 1110 4567
+A PC 3333
+A SP 110f
+A XPC 1
+A M 110f 0000
+A M 1110 0027
+E
+T 69 FCALL[D] extpmad | FCALLD 301000h
+W fbb0 1000
+B PC 3001
+B SP 1111
+B XPC 7f
+B M 110f 4567
+B M 1110 4567
+A PC 1000
+A SP 110f
+A XPC 30
+A M 110f 007f
+A M 1110 3005
+E
+S 70 FIRS Xmem, Ymem, pmad | FIRS *AR3+, *AR4+, COEFFS | firs['OP_Xmem', 'OP_Ymem', 'OP_pmad']: nombre: 'COEFFS'
+T 71 FRAME K | FRAME 10h
+W ee10
+B SP 1000
+A SP 1010
+E
+T 72 FRET[D] | FRET
+W f4e4
+B PC 2112
+B SP 300
+B XPC 1
+B M 0300 0005
+B M 0301 1000
+A PC 1000
+A SP 302
+A XPC 5
+A M 0300 0005
+A M 0301 1000
+E
+T 73 FRETE[D] | FRETE
+W f4e5
+B PC 2112
+B SP 300
+B XPC 5
+B M 0300 006e
+B M 0301 0110
+A PC 110
+A SP 302
+A XPC 6e
+A M 0300 006e
+A M 0301 0110
+# valeur: ['xCxx']
+E
+T 77 INTR K | INTR 3
+W f7c3
+B INTM 0
+B PC 25
+B SP 1000
+B M 0fff 9653
+A INTM 1
+A PC ff8c
+A SP fff
+A M 0fff 0026
+E
+T 78 4: Class 4B (see page 3-8) | LD *AR1, A
+W 1081
+B A 0
+B AR1 200
+B SXM 0
+B M 0200 fedc
+A A fedc
+A AR1 200
+A SXM 0
+A M 0200 fedc
+E
+T 79 4: Class 4B (see page 3-8) | LD *AR1, A
+W 1081
+B A 0
+B AR1 200
+B SXM 1
+B M 0200 fedc
+A A fffffffedc
+A AR1 200
+A SXM 1
+A M 0200 fedc
+E
+T 80 4: Class 4B (see page 3-8) | LD *AR1, TS, B
+W 1581
+B AR1 200
+B B 0
+B SXM 1
+B T 8
+B M 0200 fedc
+A AR1 200
+A B fffffedc00
+A SXM 1
+A T 8
+A M 0200 fedc
+E
+T 81 4: Class 4B (see page 3-8) | LD *AR3+, 16, A
+W 4493
+B A 0
+B SXM 1
+B M 0300 fedc
+A A fffedc0000
+A SXM 1
+A M 0300 fedc
+# ligne registre incomplete: AR3                   0300                     AR1                   0301
+E
+T 82 4: Class 4B (see page 3-8) | LD #248, B
+W e9f8
+B B 0
+B SXM 1
+A B f8
+A SXM 1
+E
+T 83 4: Class 4B (see page 3-8) | LD A, 8, B
+W f548
+B A 7ffd0040
+B B ffff
+B OVB 0
+B SXM 1
+B M 0200 fedc
+A A 7ff00040
+A B 7ffd004000
+A OVB 1
+A SXM 1
+A M 0200 fedc
+E
+T 84 2: Class 5B (see page 3-9) | LD *AR3+, T
+W 3093
+B AR3 300
+B T 0
+B M 0300 fedc
+A AR3 301
+A T fedc
+A M 0300 fedc
+E
+T 85 2: Class 5B (see page 3-9) | LD *AR4, DP
+W 4684
+B AR4 200
+B DP 1ff
+B M 0200 fedc
+A AR4 200
+A DP dc
+A M 0200 fedc
+E
+T 86 2: Class 5B (see page 3-9) | LD #23, DP
+W ea17
+B DP 1ff
+A DP 17
+E
+T 87 2: Class 5B (see page 3-9) | LD 15, ASM
+W ed0f
+B ASM 0
+A ASM f
+E
+T 88 2: Class 5B (see page 3-9) | LD 3, ARP
+W f4a3
+B ARP 0
+A ARP 3
+E
+T 89 2: Class 5B (see page 3-9) | LD 0, ASM
+W ed00
+B ASM 0
+B DP 4
+B M 0200 fedc
+A ASM 1c
+A DP 4
+A M 0200 fedc
+E
+T 90 LDM MMR, dst | LDM AR4, A
+W 4814
+B A 1111
+B AR4 ffff
+A A ffff
+A AR4 ffff
+E
+T 91 LDM MMR, dst | LDM 060h, B
+W 4960
+B B 0
+B M 0060 1234
+A B 1234
+A M 0060 1234
+E
+T 92 LD Xmem, dst | LD *AR4+, A
+W 1094
+B A 1000
+B AR4 100
+B AR5 200
+B B 1111
+B FRCT 0
+B T 400
+B M 0100 1234
+B M 0200 4321
+A A 12340000
+A AR4 101
+A AR5 201
+A B 10c9511
+A FRCT 0
+A T 400
+A M 0100 1234
+A M 0200 4321
+E
+T 93 LD Xmem, dst | LD *AR4+, A
+W 1094
+B A 1000
+B AR4 100
+B AR5 200
+B B 1111
+B FRCT 0
+B T 400
+B M 0100 1234
+B M 0200 4321
+A A 12340000
+A AR4 101
+A AR5 201
+A B 10d0000
+A FRCT 0
+A T 400
+A M 0100 1234
+A M 0200 4321
+E
+T 94 LD Xmem, dst | LD *AR4+, A
+W 1094
+B A 1000
+B AR4 100
+B AR5 200
+B B 1111
+B FRCT 0
+B T 400
+B M 0100 1234
+B M 0200 4321
+A A 12340000
+A AR4 101
+A AR5 201
+A B fffef38d11
+A FRCT 0
+A T 400
+A M 0100 1234
+A M 0200 4321
+E
+T 95 LD Xmem, dst | LD *AR4+, A
+W 1094
+B A 1000
+B AR4 100
+B AR5 200
+B B 1111
+B FRCT 0
+B T 400
+B M 0100 1234
+B M 0200 4321
+A A 12340000
+A AR4 101
+A AR5 201
+A B fffef40000
+A FRCT 0
+A T 400
+A M 0100 1234
+A M 0200 4321
+E
+T 96 LDR Smem, dst | LDR *AR1, A
+W 1681
+B A 0
+B AR1 200
+B SXM 0
+B M 0200 fedc
+A A fedc8000
+A AR1 200
+A SXM 0
+A M 0200 fedc
+E
+T 97 LDU Smem, dst | LDU *AR1, A
+W 1281
+B A 0
+B AR1 200
+B M 0200 fedc
+A A fedc
+A AR1 200
+A M 0200 fedc
+E
+T 98 LMS Xmem, Ymem | LMS *AR3+, *AR4+
+W e19a
+B A 77778888
+B AR3 100
+B AR4 200
+B B 100
+B FRCT 0
+B M 0100 0055
+B M 0200 00aa
+A A 77cd0888
+A AR3 101
+A AR4 201
+A B 3972
+A FRCT 0
+A M 0100 0055
+A M 0200 00aa
+E
+T 99 LTD Smem | LTD *AR3
+W 4c83
+B AR3 100
+B T 0
+B M 0100 6cac
+B M 0101 6cac
+A AR3 100
+A T 6cac
+A M 0100 6cac
+E
+T 100 4: Class 6B (see page 3-11) | MAC *AR5+, A
+W 2895
+B A 1000
+B AR5 100
+B FRCT 0
+B T 400
+B M 0100 1234
+A A 48e000
+A AR5 101
+A FRCT 0
+A T 400
+A M 0100 1234
+E
+T 101 4: Class 6B (see page 3-11) | MAC #345h, A, B
+W f167 0345
+B A 1000
+B B 0
+B FRCT 1
+B T 400
+A A 1000
+A B 1a3800
+A FRCT 1
+A T 400
+E
+T 102 4: Class 6B (see page 3-11) | MAC *AR5+, #1234h, A
+W 6495 1234
+B A 1000
+B AR5 100
+B FRCT 0
+B T 0
+B M 0100 5678
+A A 6261060
+A AR5 101
+A FRCT 0
+A T 5678
+A M 0100 5678
+E
+T 103 4: Class 6B (see page 3-11) | MAC *AR5+, *AR4+,A, B ;(AR6->AR4)
+W b1ba
+B A 1000
+B AR4 200
+B AR5 100
+B B 4
+B FRCT 1
+B T 8
+B M 0100 5678
+B M 0200 1234
+A A 1000
+A AR4 201
+A AR5 101
+A B c4c10c0
+A FRCT 1
+A T 5678
+A M 0100 5678
+A M 0200 1234
+E
+T 104 4: Class 6B (see page 3-11) | MACR *AR5+, A
+W 2a95
+B A 1000
+B AR5 100
+B FRCT 0
+B T 400
+B M 0100 1234
+A A 490000
+A AR5 101
+A FRCT 0
+A T 400
+A M 0100 1234
+E
+T 105 4: Class 6B (see page 3-11) | MACR *AR5+, *AR4+,A, B ;(AR6->AR4)
+W b5ba
+B A 1000
+B AR4 200
+B AR5 100
+B B 4
+B FRCT 1
+B T 8
+B M 0100 5678
+B M 0200 1234
+A A 1000
+A AR4 201
+A AR5 101
+A B c4c0000
+A FRCT 1
+A T 5678
+A M 0100 5678
+A M 0200 1234
+E
+T 106 MACA[R] Smem [, B ] | MACA *AR5+
+W 3595
+B A 12340000
+B AR5 100
+B B 0
+B FRCT 0
+B T 400
+B M 0100 5678
+A A 12340000
+A AR5 101
+A B 6260060
+A FRCT 0
+A T 5678
+A M 0100 5678
+E
+T 107 MACA[R] Smem [, B ] | MACA T, B, B
+W f788
+B A 12340000
+B B 20000
+B FRCT 1
+B T 444
+A A 12340000
+A B 9d4ba0
+A FRCT 1
+A T 444
+E
+T 108 MACA[R] Smem [, B ] | MACAR *AR5+, B
+W 3795
+B A 12340000
+B AR5 100
+B B 0
+B FRCT 0
+B T 400
+B M 0100 5678
+A A 12340000
+A AR5 101
+A B 6260000
+A FRCT 0
+A T 5678
+A M 0100 5678
+E
+T 109 MACA[R] Smem [, B ] | MACAR T, B, B
+W f789
+B A 12340000
+B B 20000
+B FRCT 1
+B T 444
+A A 12340000
+A B 9d0000
+A FRCT 1
+A T 444
+E
+S 110 MACD Smem, pmad, src | MACD *AR3–, COEFFS, A | macd['OP_Smem', 'OP_pmad', 'OP_SRC1']: nombre: 'COEFFS'
+S 111 MACP Smem, pmad, src | MACP *AR3–, COEFFS, A | macp['OP_Smem', 'OP_pmad', 'OP_SRC1']: nombre: 'COEFFS'
+T 112 MACSU Xmem, Ymem, src | MACSU *AR4+, *AR5+, A
+W a6ab
+B A 1000
+B AR4 100
+B AR5 200
+B FRCT 0
+B T 8
+B M 0100 8765
+B M 0200 1234
+A A 9a0aa84
+A AR4 101
+A AR5 201
+A FRCT 0
+A T 8765
+A M 0100 8765
+A M 0200 1234
+E
+T 113 MAR Smem | MAR *AR3+
+W 6d93
+B AR3 100
+B ARP 0
+B CMPT 0
+A AR3 101
+A ARP 0
+A CMPT 0
+E
+T 114 MAR Smem | MAR *AR0–
+W 6d88
+B AR4 100
+B ARP 4
+B CMPT 1
+A AR4 ff
+A ARP 4
+A CMPT 1
+E
+T 115 MAR Smem | MAR *AR3
+W 6d83
+B AR0 8
+B AR3 100
+B ARP 0
+B CMPT 1
+A AR0 8
+A AR3 100
+A ARP 3
+A CMPT 1
+E
+T 116 MAR Smem | MAR *+AR3
+W 6d9b
+B AR3 100
+B ARP 0
+B CMPT 1
+A AR3 101
+A ARP 3
+A CMPT 1
+E
+T 117 MAR Smem | MAR *AR3–
+W 6d8b
+B AR3 100
+B ARP 0
+B CMPT 1
+A AR3 ff
+A ARP 3
+A CMPT 1
+E
+T 118 2: Class 7 (see page 3-12) | MAS *AR5+, A
+W 2c95
+B A 1000
+B AR5 100
+B FRCT 0
+B T 400
+B M 0100 1234
+A A ffffb74000
+A AR5 101
+A FRCT 0
+A T 400
+A M 0100 1234
+E
+T 119 2: Class 7 (see page 3-12) | MAS *AR5+, *AR4+, A, B ;(AR6->AR4)
+W b9ba
+B A 1000
+B AR4 200
+B AR5 100
+B B 4
+B FRCT 1
+B T 8
+B M 0100 5678
+B M 0200 1234
+A A 1000
+A AR4 201
+A AR5 101
+A B fff9da0fa0
+A FRCT 1
+A T 5678
+A M 0100 5678
+A M 0200 1234
+E
+T 120 2: Class 7 (see page 3-12) | MASR *AR5+, A
+W 2e95
+B A 1000
+B AR5 100
+B FRCT 0
+B T 400
+B M 0100 1234
+A A ffffb70000
+A AR5 101
+A FRCT 0
+A T 400
+A M 0100 1234
+E
+T 121 2: Class 7 (see page 3-12) | MASR *AR5+, *AR4+, A, B ;(AR6->AR4)
+W bdba
+B A 1000
+B AR4 200
+B AR5 100
+B B 4
+B FRCT 1
+B T 8
+B M 0100 5678
+B M 0200 1234
+A A 1000
+A AR4 201
+A AR5 101
+A B fff9da0000
+A FRCT 1
+A T 5678
+A M 0100 5678
+A M 0200 1234
+E
+T 122 2: Class 1 (see page 3-3) | MASA *AR5+
+W 3395
+B A 12340000
+B AR5 100
+B B 20000
+B FRCT 0
+B T 400
+B M 0100 5678
+A A 12340000
+A AR5 101
+A B fff9dbffa0
+A FRCT 0
+A T 5678
+A M 0100 5678
+E
+T 123 2: Class 1 (see page 3-3) | MASA T, B
+W f78a
+B A 12340000
+B B 20000
+B FRCT 1
+B T 444
+A A 12340000
+A B ffff66b460
+A FRCT 1
+A T 444
+E
+T 124 2: Class 1 (see page 3-3) | MASAR T, B
+W f78b
+B A 12340000
+B B 20000
+B FRCT 1
+B T 444
+A A 12340000
+A B ffff670000
+A FRCT 1
+A T 444
+E
+T 125 MAX dst | MAX A
+W f486
+B A fff6
+B B ffcb
+B C 1
+A A fff6
+A B ffcb
+A C 0
+E
+T 126 MAX dst | MAX A
+W f486
+B A 55
+B B 1234
+B C 0
+A A 1234
+A B 1234
+A C 1
+E
+T 127 MIN dst | MIN A
+W f487
+B A ffcb
+B B fff6
+B C 1
+A A ffcb
+A B fff6
+A C 0
+E
+T 128 MIN dst | MIN A
+W f487
+B A 1234
+B B 1234
+B C 0
+A A 1234
+A B 1234
+A C 1
+E
+T 129 4: Class 2 (see page 3-4) | MPY 13, A
+W 200d
+B A 36
+B DP 8
+B FRCT 1
+B T 6
+B M 040d 0007
+A A 54
+A DP 8
+A FRCT 1
+A T 6
+A M 040d 0007
+E
+T 130 4: Class 2 (see page 3-4) | MPY *AR2–, *AR4+0%, B;
+W a54e
+B AR0 1
+B AR2 1ff
+B AR4 300
+B B ffffffffe0
+B FRCT 0
+B M 01ff 0010
+B M 0300 0002
+A AR0 1
+A AR2 1fe
+A AR4 301
+A B 20
+A FRCT 0
+A M 01ff 0010
+A M 0300 0002
+E
+T 131 4: Class 2 (see page 3-4) | MPY #0FFFEh, A
+W f066 fffe
+B A 0
+B FRCT 0
+B T 2000
+A A ffffffc000
+A FRCT 0
+A T 2000
+E
+T 132 4: Class 2 (see page 3-4) | MPYR 0, B
+W 2300
+B B fffe000001
+B DP 4
+B FRCT 0
+B T 1234
+B M 0200 5678
+A B 6260000
+A DP 4
+A FRCT 0
+A T 1234
+A M 0200 5678
+E
+T 133 2: Class 1 (see page 3-3) | MPYA *AR2
+W 3182
+B A ff87651111
+B AR2 200
+B B 320
+B FRCT 0
+B T 1234
+B M 0200 5678
+A A ff87651111
+A AR2 200
+A B ffd7436558
+A FRCT 0
+A T 5678
+A M 0200 5678
+E
+T 134 2: Class 1 (see page 3-3) | MPYA B
+W f58c
+B A ff87651111
+B B 320
+B FRCT 0
+B T 4567
+A A ff87651111
+A B ffdf4db2a3
+A FRCT 0
+A T 4567
+E
+T 135 MPYU Smem, dst | MPYU *AR0–, A
+W 2488
+B A ff80000000
+B AR0 1000
+B FRCT 0
+B T 4000
+B M 1000 fe00
+A A 3f800000
+A AR0 fff
+A FRCT 0
+A T 4000
+A M 1000 fe00
+E
+T 136 MVDD Xmem, Ymem | MVDD *AR3+, *AR5+
+W e59b
+B AR3 8000
+B AR5 200
+B M 0200 abcd
+B M 8000 1234
+A AR3 8001
+A AR5 201
+A M 0200 1234
+A M 8000 1234
+E
+T 137 MVDK Smem, dmad | MVDK 10, 8000h
+W 710a 8000
+B DP 4
+B M 020a 1234
+B M 8000 abcd
+A DP 4
+A M 020a 1234
+A M 8000 1234
+E
+T 138 MVDK Smem, dmad | MVDK *AR3–, 1000h
+W 718b 1000
+B AR3 1ff
+B M 01ff 1234
+B M 1000 abcd
+A AR3 1fe
+A M 01ff 1234
+A M 1000 1234
+E
+T 139 MVDM dmad, MMR | MVDM 300h, BK
+W 7219 0300
+B BK abcd
+B M 0300 1234
+A BK 1234
+A M 0300 1234
+E
+T 140 MVDP Smem, pmad | MVDP 0, 0FE00h
+W 7d00 fe00
+B DP 4
+B M 0200 0123
+B P fe00 ffff
+A DP 4
+A M 0200 0123
+E
+T 141 MVKD dmad, Smem | MVKD 300h, 0
+W 7000 0300
+B DP 4
+B M 0200 abcd
+B M 0300 1234
+A DP 4
+A M 0200 1234
+A M 0300 1234
+E
+T 142 MVKD dmad, Smem | MVKD 1000h, *+AR5
+W 709d 1000
+B AR5 1ff
+B M 0200 abcd
+B M 1000 1234
+A AR5 200
+A M 0200 1234
+A M 1000 1234
+E
+T 143 MVMD MMR, dmad | MVMD AR7, 8000h
+W 7317 8000
+B AR7 1234
+B M 8000 abcd
+A AR7 1234
+A M 8000 1234
+E
+T 144 MVMM MMRx, MMRy | MVMM SP, AR1
+W e781
+B AR1 3eff
+B SP 200
+A AR1 200
+A SP 200
+E
+T 145 MVPD pmad, Smem | MVPD 0FE00h, 5
+W 7c05 fe00
+B DP 6
+B M 0305 ffff
+B P fe00 8a55
+A DP 6
+A M 0305 8a55
+E
+T 146 MVPD pmad, Smem | MVPD 2000h, *AR7–0
+W 7caf 2000
+B AR0 2
+B AR7 ffe
+B M 0ffe abcd
+B P 2000 1234
+A AR0 2
+A AR7 ffc
+A M 0ffe 1234
+E
+T 147 NEG src [, dst ] | NEG A, B
+W f584
+B A fffffff228
+B B 1234
+B OVA 0
+A A fffffff228
+A B dd8
+A OVA 0
+E
+T 148 NEG src [, dst ] | NEG B, A
+W f684
+B A 1234
+B B 80000000
+B OVB 0
+A A ff80000000
+A B 80000000
+A OVB 0
+E
+T 149 NEG src [, dst ] | NEG A
+W f484
+B A 8000000000
+B OVA 0
+B OVM 0
+A A 8000000000
+A OVA 1
+A OVM 0
+E
+T 150 NEG src [, dst ] | NEG A
+W f484
+B A 8000000000
+B OVA 0
+B OVM 1
+A A 7fffffff
+A OVA 1
+A OVM 1
+E
+T 152 NORM src [, dst ] | NORM A
+W f48f
+B A fffffff001
+B T 13
+A A ff80080000
+A T 13
+E
+T 153 NORM src [, dst ] | NORM B, A
+W f68f
+B A fffffff001
+B B 210a0a0a0a
+B T ff9
+A A 42141414
+A B 210a0a0a0a
+A T ff9
+E
+T 154 4: Class 1 (see page 3-3) | OR *AR3+, A
+W 1a93
+B A ff1200
+B AR3 100
+B M 0100 1500
+A A ff1700
+A AR3 101
+A M 0100 1500
+E
+T 155 4: Class 1 (see page 3-3) | OR A, +3, B
+W f1a3
+B A 1200
+B B 1800
+A A 1200
+A B 9800
+E
+T 156 ORM #lk, Smem | ORM 0404h, *AR4+
+W 6994 0404
+B AR4 100
+B M 0100 4444
+A AR4 101
+A M 0100 4444
+E
+T 157 POLY Smem | POLY *AR3+%
+W 36d3
+B A 12340000
+B AR3 200
+B B 10000
+B T 5678
+B M 0200 2000
+A A 6270000
+A AR3 201
+A B 20000000
+A T 5678
+A M 0200 2000
+E
+T 158 POPD Smem | POPD 10
+W 8b0a
+B DP 8
+B SP 300
+B M 0300 0092
+B M 040a 0055
+A DP 8
+A SP 301
+A M 0300 0092
+A M 040a 0092
+E
+T 159 POPM MMR | POPM AR5
+W 8a15
+B AR5 55
+B SP 3f0
+B M 03f0 0060
+A AR5 60
+A SP 3f1
+A M 03f0 0060
+E
+S 160 PORTR PA, Smem | PORTR 05, INDAT ; INDAT .equ 60h | portr['OP_PA', 'OP_Smem']: nombre: 'INDAT'
+S 161 PORTW Smem, PA | PORTW OUTDAT, 5h ; OUTDAT .equ 07h | portw['OP_Smem', 'OP_PA']: nombre: 'OUTDAT'
+T 162 PSHD Smem | PSHD *AR3+
+W 4b93
+B AR3 200
+B SP 8000
+B M 0200 07ff
+B M 7fff 0092
+A AR3 201
+A SP 7fff
+A M 0200 07ff
+A M 7fff 07ff
+E
+T 163 PSHM MMR | PSHM BRC
+W 4a1a
+B BRC 1234
+B SP 2000
+B M 1fff 07ff
+A BRC 1234
+A SP 1fff
+A M 1fff 1234
+E
+T 164 RC[D] cond [, cond [, condĂ] ] | RC AGEQ, ANOV              ; return is executed if the accumulator A
+W fc62
+B OVA 0
+B PC 807
+B SP 308
+B M 0308 2002
+A OVA 0
+A PC 2002
+A SP 309
+A M 0308 2002
+E
+T 165 READA Smem | READA 6
+W 7e06
+B A 23
+B DP 4
+B M 0206 0075
+B P 0023 0306
+A A 23
+A DP 4
+A M 0206 0306
+E
+T 166 RESET | RESET
+W f7e0
+B INTM 0
+B PC 25
+A INTM 1
+A PC 80
+E
+T 167 RET[D] | RET
+W fc00
+B PC 2112
+B SP 300
+B M 0300 1000
+A PC 1000
+A SP 301
+A M 0300 1000
+E
+T 168 RETE[D] | RETE
+W f4eb
+B PC 1c3
+B SP 2001
+B M 2001 0110
+A PC 110
+A SP 2002
+A M 2001 0110
+# valeur: ['xCxx']
+E
+T 169 RETF[D] | RETF
+W f49b
+B PC 1c3
+B SP 2001
+B M 2001 0110
+A PC 110
+A SP 2002
+A M 2001 0110
+# valeur: ['xCxx']
+E
+T 170 RND src [, dst ] | RND A, B
+W f59f
+B A ffffffffff
+B B 1
+B OVM 0
+A A ffffffffff
+A B 7fff
+A OVM 0
+E
+T 171 RND src [, dst ] | RND A
+W f49f
+B A 7fffffff
+B OVM 1
+A A 7fffffff
+A OVM 1
+E
+T 172 ROL src | ROL A
+W f491
+B A 5fb0001234
+B C 0
+A A 60002468
+A C 1
+E
+T 173 ROLTC src | ROLTC A
+W f492
+B A 81c0005555
+B TC 1
+A A 8000aaab
+A C 1
+A TC 1
+E
+T 174 ROR src | ROR A
+W f490
+B A 7fb0001235
+B C 0
+A A 5800091a
+A C 1
+E
+S 175 3: Class 2 (see page 3-4) | RPT DAT127 ; DAT127 .EQU 0FFF | rpt['OP_Smem']: nombre: 'DAT127'; rpt['OP_k8u']: nombre: 'DAT127'; rpt['OP_lku']: nombre: 'DAT127'
+T 178 RPTB[D] pmad | ST #99, BRC
+W 761a 0063
+B BRC 1234
+B PC 1000
+B RSA 5678
+A BRC 63
+A PC 1002
+A RSA 1002
+# valeur: ['end_block', '-', '1']
+E
+T 179 RPTB[D] pmad | ST #99, BRC ;execute the block 100 times
+W 761a 0063
+B BRC 1234
+B PC 1000
+B RSA 5678
+A BRC 63
+A PC 1004
+A RSA 1004
+# valeur: ['end_block', '-', '1']
+E
+T 180 RPTZ dst, #lk | RPTZ A, 1023 ; Repeat the next instruction 1024 times
+W f071 03ff
+B A ffe008000
+A A 0
+E
+T 181 RSBX N, SBIT | RSBX SXM ; SXM means: n=1 and SBIT=8
+W f6b8
+B ST1 35cd
+A ST1 34cd
+E
+T 182 RSBX N, SBIT | RSBX 1,8
+W f6b8
+B ST1 35cd
+A ST1 34cd
+E
+T 183 SACCD src, Xmem, cond | SACCD A, *AR3+0%, ALT
+W 9ed3
+B A fffe004321
+B AR0 2
+B AR3 202
+B ASM 1
+B M 0202 0101
+A A fffe004321
+A AR0 2
+A AR3 204
+A ASM 1
+A M 0202 fc00
+E
+T 184 SAT src | SAT B
+W f583
+B B 7123456789
+A B 7fffffff
+A OVB 1
+E
+T 185 SAT src | SAT A
+W f483
+B A f812345678
+A A ff80000000
+A OVA 1
+E
+T 186 SAT src | SAT B
+W f583
+B B 123456
+A B 123456
+A OVB 0
+E
+T 187 SFTA src, SHIFT [, dst ] | SFTA A, –5, B
+W f57b
+B A ff87650055
+B B 43211234
+B SXM 1
+A A ff87650055
+A B fffc3b2802
+A C 1
+A SXM 1
+E
+T 188 SFTA src, SHIFT [, dst ] | SFTA B, +5
+W f765
+B B 80aa001234
+B C 0
+B OVM 0
+B SXM 0
+A B 1540024680
+A C 1
+A OVM 0
+A SXM 0
+E
+T 189 SFTC src | SFTC A
+W f494
+B A fffffff001
+A A ffffffe002
+A TC 0
+E
+T 190 SFTL src, SHIFT [, dst ] | SFTL A, –5, B
+W f1fb
+B A ff87650055
+B B ff80000000
+B C 0
+A A ff87650055
+A B 43b2802
+A C 1
+E
+T 191 SFTL src, SHIFT [, dst ] | SFTL B, +5
+W f3e5
+B B 80aa001234
+B C 0
+A B 40024680
+A C 1
+E
+S 192 SQDST Xmem, Ymem | SQDST *AR3+, AR4+ | sqdst['OP_Xmem', 'OP_Ymem']: Xmem: 'AR4+'
+T 193 2: Class 1 (see page 3-3) | SQUR 30, B
+W 271e
+B B 1f4
+B DP 6
+B FRCT 0
+B T 3
+B M 031e 000f
+A B e1
+A DP 6
+A FRCT 0
+A T f
+A M 031e 000f
+E
+T 194 2: Class 1 (see page 3-3) | SQUR A, B
+W f58d
+B A f0000
+B B 1010101
+B FRCT 1
+A A f0000
+A B 1c2
+A FRCT 1
+E
+T 195 SQURA Smem, src | SQURA 30, B
+W 391e
+B B 3200000
+B DP 6
+B FRCT 0
+B T 3
+B M 031e 000f
+A B 32000e1
+A DP 6
+A FRCT 0
+A T f
+A M 031e 000f
+E
+T 196 SQURA Smem, src | SQURA *AR3+, A
+W 3893
+B A 1f4
+B AR3 31e
+B FRCT 0
+B T 3
+B M 031e 000f
+A A 2d5
+A AR3 31f
+A FRCT 0
+A T f
+A M 031e 000f
+E
+T 197 SQURS Smem, src | SQURS 9, A
+W 3a09
+B A 14b5db0
+B DP 6
+B FRCT 0
+B T 8765
+B M 0309 1234
+A A 320
+A DP 6
+A FRCT 0
+A T 1234
+A M 0309 1234
+E
+T 198 SQURS Smem, src | SQURS *AR3, B
+W 3b83
+B AR3 309
+B B 14b5db0
+B FRCT 0
+B T 8765
+B M 0309 1234
+A AR3 309
+A B 320
+A FRCT 0
+A T 1234
+A M 0309 1234
+E
+T 199 SRCCD Xmem, cond | SRCCD *AR5–, AGT
+W 9d76
+B A 70ffffff
+B AR5 202
+B BRC 4321
+B M 0202 1234
+A A 70ffffff
+A AR5 201
+A BRC 4321
+A M 0202 4321
+E
+T 200 SSBX N, SBIT | SSBX SXM     ; SXM means: N=1, SBIT=8
+W f7b8
+B ST1 34cd
+A ST1 35cd
+E
+T 201 SSBX N, SBIT | SSBX 1,8
+W f7b8
+B ST1 34cd
+A ST1 35cd
+E
+T 202 3: Class 12B (see page 3-27) | ST FFFFh, 0
+W 7600 ffff
+B DP 4
+B M 0200 0101
+A DP 4
+A M 0200 ffff
+E
+T 203 3: Class 12B (see page 3-27) | ST TRN, 5
+W 8d05
+B DP 4
+B TRN 1234
+B M 0205 0030
+A DP 4
+A TRN 1234
+A M 0205 1234
+E
+T 204 3: Class 12B (see page 3-27) | ST T, *AR7–
+W 8c8f
+B AR7 321
+B T 4210
+B M 0321 1200
+A AR7 320
+A T 4210
+A M 0321 4210
+E
+T 205 4: Class 11B (see page 3-25) | STH A, 10
+W 820a
+B A ff87654321
+B DP 4
+B M 020a 1234
+A A ff87654321
+A DP 4
+A M 020a 8765
+E
+S 206 4: Class 11B (see page 3-25) | STH B, –8, *AR7– | sth['OP_SRC1', 'OP_Smem']: Smem direct hors 0..7F: '-8'; sth['OP_SRC1', 'OP_ASM', 'OP_Smem']: ASM attendu; sth['OP_SRC1'
+S 207 4: Class 11B (see page 3-25) | STH A, –4, 10 | sth['OP_SRC1', 'OP_Smem']: Smem direct hors 0..7F: '-4'; sth['OP_SRC1', 'OP_ASM', 'OP_Smem']: ASM attendu; sth['OP_SRC1'
+T 208 4: Class 11B (see page 3-25) | STL A, 11
+W 800b
+B A ff87654321
+B DP 4
+B M 020b 1234
+A A ff87654321
+A DP 4
+A M 020b 4321
+E
+S 209 4: Class 11B (see page 3-25) | STL B, –8, *AR7– | stl['OP_SRC1', 'OP_Smem']: Smem direct hors 0..7F: '-8'; stl['OP_SRC1', 'OP_ASM', 'OP_Smem']: ASM attendu; stl['OP_SRC1'
+S 210 4: Class 11B (see page 3-25) | STL A, 7, 11 | stl['OP_SRC1', 'OP_Smem']: operandes en trop: ['11']; stl['OP_SRC1', 'OP_ASM', 'OP_Smem']: ASM attendu; stl['OP_SRC1', '
+T 211 STLM src, MMR | STLM A, BRC
+W 881a
+B A ff87654321
+A A ff87654321
+E
+T 212 STLM src, MMR | STLM B, *AR1–
+W 8989
+B AR1 3f17
+B B ff84211234
+A AR1 16
+A B ff84211234
+E
+T 213 STM #lk, MMR | STM 0FFFFh, IMR
+W 7700 ffff
+B IMR ff01
+A IMR ffff
+E
+T 214 STM #lk, MMR | STM 8765h, *AR7+
+W 7797 8765
+B AR0 0
+B AR7 8010
+A AR0 8765
+A AR7 11
+E
+S 215 ST src, Ymem | ST A, *AR3 | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 216 ST src, Ymem | ST B, *AR2– | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'B'
+S 217 ST src, Ymem | ST A, *AR3 | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 219 ST src, Ymem | ST A, *AR4– | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 220 ST src, Ymem | ST A, *AR4+ | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 221 ST src, Ymem | ST A, *AR4+ | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 222 ST src, Ymem | ST A, *AR4+ | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 223 ST src, Ymem | ST A, *AR3+ | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+S 224 ST src, Ymem | ST A, *AR3– | st['OP_T', 'OP_Smem']: T attendu; st['OP_TRN', 'OP_Smem']: TRN attendu; st['OP_lk', 'OP_Smem']: nombre: 'A'
+T 225 STRCD Xmem, cond | STRCD *AR5–, AGT
+W 9c76
+B A 70ffffff
+B AR5 202
+B T 4321
+B M 0202 1234
+A A 70ffffff
+A AR5 201
+A T 4321
+A M 0202 4321
+E
+S 226 6: Class 7 (see page 3-12) | SUB *AR1+, 14, A | sub['OP_SRC', 'OPT|OP_SHIFT', 'OPT|OP_DST']: src attendu, '*AR1+'; sub['OP_SRC', 'OP_ASM', 'OPT|OP_DST']: src attendu, '
+T 227 6: Class 7 (see page 3-12) | SUB A, –8, B
+W f538
+B A 1200
+B B 1800
+B SXM 1
+A A 1200
+A B 17ee
+A C 1
+A SXM 1
+E
+T 228 6: Class 7 (see page 3-12) | SUB #12345, 8, A, B
+W f118 3039
+B A 1200
+B B 1800
+B SXM 1
+A A 1200
+A B ffffcfd900
+A C 0
+A SXM 1
+E
+T 229 SUBB Smem, src | SUBB 5, A
+W 0e05
+B A 6
+B C 0
+B DP 8
+B M 0405 0006
+A A ffffffffff
+A C 0
+A DP 8
+A M 0405 0006
+E
+T 230 SUBB Smem, src | SUBB *AR1+, B
+W 0f91
+B AR1 405
+B B ff80000006
+B C 1
+B OVM 1
+B M 0405 0006
+A AR1 406
+A B ff80000000
+A C 1
+A OVM 1
+A M 0405 0006
+E
+T 231 SUBC Smem, src | SUBC 2, A
+W 1e02
+B A 4
+B DP 6
+B M 0302 0001
+A A 8
+A C 0
+A DP 6
+A M 0302 0001
+E
+T 232 SUBC Smem, src | RPT #15
+W 470f
+B AR1 1000
+B B 41
+B M 1000 0007
+A AR1 1000
+A B 20009
+A C 1
+A M 1000 0007
+E
+T 233 SUBS Smem, src | SUBS *AR2–, B
+W 0b8a
+B AR2 100
+B B 2
+B M 0100 f006
+A AR2 ff
+A B ffffff0ffc
+A C 0
+A M 0100 f006
+E
+T 234 TRAP K | TRAP 10h
+W f4d0
+B PC 1233
+B SP 3ff
+B M 03fe 9653
+A PC ffc0
+A SP 3fe
+A M 03fe 1234
+E
+T 235 WRITA Smem | WRITA 5
+W 7f05
+B A 257
+B DP 32
+B M 1005 4339
+B P 0257 0306
+A A 257
+A DP 32
+A M 1005 4339
+E
+T 236 n       Opcode N | XC 1, ALEQ
+W fd47
+B A ffffffffff
+B AR1 32
+A A ffffffffff
+A AR1 33
+E
+T 237 4: Class 1 (see page 3-3) | XOR *AR3+, A
+W 1c93
+B A ff1200
+B AR3 100
+B M 0100 1500
+A A ff0700
+A AR3 101
+A M 0100 1500
+E
+T 238 4: Class 1 (see page 3-3) | XOR A, +3, B
+W f1c3
+B A 1200
+B B 1800
+A A 1200
+A B 8800
+E
+T 239 XORM #lk, Smem | XORM 0404h, *AR4–
+W 6a8c 0404
+B AR4 100
+B M 0100 4444
+A AR4 ff
+A M 0100 4040
+# ligne registre incomplete: C†
+# ligne registre incomplete: TC†
+# ligne registre incomplete: TC = 1
+# ligne registre incomplete: TC = 0
+# ligne registre incomplete: ST0 and ST1 contain the status of various conditions and modes; PMST con-
+# ligne registre incomplete: ARP                           Auxiliary register pointer
+# ligne registre incomplete: ASM                           Accumulator shift mode
+# ligne registre incomplete: BRAF                          Block repeat active flag
+# ligne registre incomplete: C                             Carry
+# ligne registre incomplete: CMPT                          Compatibility mode
+# ligne registre incomplete: CPL                           Compiler mode
+# ligne registre incomplete: C16                           Dual 16-bit/double-precision arithmetic mode
+# ligne registre incomplete: DP                            Data page pointer
+# ligne registre incomplete: FRCT                          Fractional mode
+# ligne registre incomplete: HM                                     Hold mode
+# ligne registre incomplete: INTM                                   Interrupt mode
+# ligne registre incomplete: OVA                                    Overflow flag A
+# ligne registre incomplete: OVB                                    Overflow flag B
+# ligne registre incomplete: OVM                                    Overflow mode
+# ligne registre incomplete: SXM                                    Sign-extension mode
+# ligne registre incomplete: TC                                     Test/control flag
+# ligne registre incomplete: XF                                     External flag status
+# ligne registre incomplete: ARP                 TC        C       OVA      OVB                                    DP
+# ligne registre incomplete: BRAF      CPL        XF       HM      INTM        0      OVM        SXM       C16        FRCT     CMPT          ASM
+# ligne registre incomplete: A
+# ligne registre incomplete: B
+# ligne registre incomplete: C
+# ligne registre incomplete: a single instruction is executed.
+# ligne registre incomplete: T
+# ligne registre incomplete: XF pin.
+# ligne registre incomplete: a 0.
+# ligne registre incomplete: a 0.
+# ligne registre incomplete: A                                                   subtract instructions 2-3 to 2-4
+# ligne registre incomplete: B instruction 4-14
+# ligne registre incomplete: C                                              DELAY instruction 4-41
+# ligne registre incomplete: C address bus (CAB) C-3                         direct memory address, definition C-4
+# ligne registre incomplete: C bus (CB), definition C-3                      DLD instruction 4-42
+# ligne registre incomplete: C16 C-3                                         double (32-bit operand) instructions 2-6
+# ligne registre incomplete: T                                       zero detect bit A (ZA), definition C-10
+E

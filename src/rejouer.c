@@ -22,7 +22,11 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "cellule.h"
 #include "calypso_twl3025.h"
+#include "calypso_rhea_dma.h"
 #include "rejouer.h"
+#include <osmocom/core/bits.h>
+#include <osmocom/core/crcgen.h>
+#include <osmocom/coding/gsm0503_parity.h>
 
 /* ---- API offsets in WORDS from the API base (= DSP 0x800) --------------- */
 #define W_PAGE(p)     ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 words */
@@ -80,11 +84,11 @@ static int marge_tete(void)
 
 #define R_SCH         15u           /* a_sch[5] */
 #define B_SCH_CRC     8
-#define B_GSM_TASK    2
+/* B_GSM_TASK comes from calypso_api.h (bit mask, (1u << 1)) */
 #define B_AFC         4
 #define FB_DSP_TASK   5
 #define SB_DSP_TASK   6
-#define BITS_PER_TDMA 156
+#define BITS_PER_TDMA 1250   /* tpu.h: a TDMA frame is 8 x 156.25 = 1250 bit periods */
 
 /* firmware thresholds (prim_fbsb.c: SNR not gating, #else FB*_SNR_THRESH=0) */
 #define THRESH1       (11000 - 1000)
@@ -141,6 +145,9 @@ static unsigned long hit_7d1c, hit_7d1d, hit_7d1e, hit_81e4;
  * distinct opcodes executed inside the SB demod with their pass count and one
  * witness PC: that gives a finite list to audit against SPRU172C instead of an
  * intuition. REJEU_OPCODES=1. */
+/* Environment flags read ONCE in rejouer(): getenv() inside the per-instruction
+ * loop was a linear scan of environ per emulated instruction. */
+static int env_div, env_softs_continu, env_firs, env_probe_t, env_decodeur;
 static uint16_t g_ad_avant;
 static uint32_t g_vie_fn; static uint16_t g_vie_ad;
 static int g_dans_sb;            /* true between 0x7c31 (demod) and 0x9841 (decoder) */
@@ -149,6 +156,7 @@ static unsigned long g_op_dec[65536];   /* DECODER opcodes, region 0x9800-0x9bff
 static unsigned long g_op_eq[65536];    /* EQUALIZER opcodes, region 0x8400-0x84ff */
 static unsigned long g_n_dec;           /* number of decodes (passes at 0x9841) */
 static uint16_t      g_op_pc[65536];
+static unsigned long g_op_tous[65536];   /* every executed opcode word, both paths */
 
 /* [2026-09-18] REAL SCH BURSTS. Until now the DSP only ever saw our own
  * fixture, a synthetic GMSK SCH at 1 sample/symbol, so "is the ROM sound, or is
@@ -174,7 +182,7 @@ static int reels_charger(const char *chemin)
     g_reels_code = calloc(n, sizeof *g_reels_code);
     g_reels_fn = calloc(n, sizeof *g_reels_fn);
     g_reels_bsic = calloc(n, sizeof *g_reels_bsic);
-    if (!g_reels || !g_reels_fn || !g_reels_bsic) { fclose(f); return -1; }
+    if (!g_reels || !g_reels_code || !g_reels_fn || !g_reels_bsic) { fclose(f); return -1; }
     for (uint32_t i = 0; i < n; i++) {
         uint32_t fn; uint16_t bsic; uint8_t pad[2];
         if (fread(&fn,4,1,f)!=1 || fread(&bsic,2,1,f)!=1 || fread(pad,1,2,f)!=2 ||
@@ -354,6 +362,8 @@ static void sbdet_cmd(int attempt)
                (p % 10 == 1 && p <= 41) ? "<- trame SCH (bon)" : "<- PAS une trame SCH"); }
     dbw()[W_TASK_MD] = SB_DSP_TASK;
     api[NDB_FB_MODE] = 0;
+    if (trace) printf("  [SBcmd W] page=%u W=%04x %04x %04x %04x %04x ..%04x %04x  NDB page=%04x fb_mode=%04x fb_det=%04x\n",
+                      w_page, dbw()[0], dbw()[1], dbw()[2], dbw()[3], dbw()[4], dbw()[15], dbw()[16], api[NDB_PAGE], api[NDB_FB_MODE], api[NDB_FB_DET]);
 }
 
 static void sbdet_resp(int attempt)
@@ -512,23 +522,28 @@ static void sbdet_resp(int attempt)
      * is qualified and the run continues instead of stopping on the first.
      * REJEU_ARRET_1ER=1 restores stopping.
      *
-     * REJEU_SCH_PARTOUT=1 CORRUPTS THE REFERENCE TRUTH: cellule.c computes
-     * t3p = p51 / 10 for any p51, which only holds on 1, 11, 21, 31 and 41. At p51=45
-     * the cell encodes T3'=4, which the decoder turns back into T3=41, so
-     * sb_fn != fn_cur even for a PERFECT decode. FN can only be validated without
-     * that flag. */
+     * REJEU_SCH_PARTOUT=1 CORRUPTS THE REFERENCE TRUTH: T3' has three bits, so
+     * a SCH emitted on p51=45 encodes T3'=4, which the decoder turns back into
+     * T3=41 and sb_fn != fn_cur even for a PERFECT decode. FN can only be
+     * validated without that flag. */
     int t3_ok = (t3 <= 50), bsic_ok = (sb_bsic == (unsigned)g_bsic_injecte);
-    int fn_ok = (sb_fn == fn_cur);
+    /* [2026-09-20] The SB word carries the frame number of the BURST that was
+     * demodulated, i.e. the frame of the last SB command (g_sb_cmd_fn), not the
+     * frame on which the ARM reads the result (fn_cur, 2-3 frames later). The
+     * first genuine decodes (BSIC 7, FN 31 read at fn 34; FN 62 read at fn 64)
+     * were being counted as false positives by the old fn_cur comparison. */
+    int fn_ok = (sb_fn == g_sb_cmd_fn);
     n_crc_ok++;
     if (bsic_ok && t3_ok && fn_ok) n_sb_vraies++;
-    printf("  SB%d fn=%u : sb=0x%08x BSIC=%d (injecte %d) T1=%u T2=%u T3=%u -> FN=%u  %s%s\n",
-           attempt, fn_cur, sb_word, sb_bsic, g_bsic_injecte, t1, t2, t3, sb_fn,
+    printf("  SB%d fn=%u : sb=0x%08x BSIC=%d (injecte %d) T1=%u T2=%u T3=%u -> FN=%u (burst demodule fn=%u)  %s%s\n",
+           attempt, fn_cur, sb_word, sb_bsic, g_bsic_injecte, t1, t2, t3, sb_fn, g_sb_cmd_fn,
            (bsic_ok && t3_ok && fn_ok) ? "** VRAIE **"
            : !bsic_ok ? "FAUX POSITIF (BSIC ne colle pas)"
            : !t3_ok   ? "FAUX POSITIF (T3 > 50, impossible)"
-           :            "FAUX POSITIF (FN ne colle pas)",
+           :            "FAUX POSITIF (FN != trame du burst demodule)",
            cellule_sch_partout ? "  [FN non qualifiable sous SCH_PARTOUT]" : "");
-    if (drapeau_env("REJEU_ARRET_1ER") || (bsic_ok && t3_ok && fn_ok)) { verdict = 1; return; }
+    if (drapeau_env("REJEU_ARRET_1ER") || ((bsic_ok && t3_ok && fn_ok) && !drapeau_env("REJEU_CONTINUER"))) { verdict = 1; return; }
+    if (bsic_ok && t3_ok && fn_ok) { sched_reset(); plan_fb_set(1, 0); return; }   /* REJEU_CONTINUER: restart the acquisition */
     /* [2026-09-18] An unqualified CRC OK (false positive) must reschedule, or the
      * bench freezes and the freeze reads as a result: the item queue drains, no
      * command is posted again, and the replay crosses the remaining thousands of
@@ -651,7 +666,7 @@ static void l1_sync(void)
         dbr()[R_SCH + 0] = (1u << B_SCH_CRC);
         r_page ^= 1;
     }
-    api[NDB_PAGE] = (uint16_t)((1u << (B_GSM_TASK - 1)) | w_page);  /* B_GSM_TASK=bit1 */
+    api[NDB_PAGE] = (uint16_t)(B_GSM_TASK | w_page);      /* dsp_end_scenario() */
     w_page ^= 1;
 }
 
@@ -659,6 +674,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             const char *iq_mode, int amp, int bsic, int verbeux)
 {
     dsp = d; api = api_ram; trace = verbeux;
+    env_div = getenv("REJEU_DIV") != NULL;
+    env_softs_continu = getenv("REJEU_SOFTS_CONTINU") != NULL;
+    env_firs = getenv("REJEU_FIRS") != NULL;
+    env_probe_t = drapeau_env("REJEU_PROBE_T");
+    env_decodeur = getenv("REJEU_DECODEUR") != NULL;
     w_page = r_page = r_page_used = 0; fn_cur = 0; afc_dac = -700;
     fb_mode = 0; afc_retries = fb0_retries = 0; n_sched = 0; verdict = 0;
     n_fb_ok = n_sb_try = n_sb_crcfail = n_crc_ok = n_sb_vraies = 0;
@@ -675,12 +695,16 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
            trames, insns, bsic, iq_mode ? iq_mode : "cell");
     /* firmware dsp_power_on(): bootloader boot + parameters + NDB */
     arm_dsp_init();
+    { static int16_t rempl[2 * 148];         /* TS1..TS7 of the C0 carrier: dummy bursts */
+      cellule_factice(amp, DECALAGE_SYMB, rempl);
+      calypso_bsp_set_remplissage(rempl, 2 * 148); }
     plan_fb_set(1, 0);                       /* first FBSB_REQ */
 
     int16_t iq[2 * 256]; int n_iq;
     for (long t = 0; t < trames && !verdict; t++) {
         fn_cur = (uint32_t)t;
         g_c54x_exe_fn = fn_cur;
+        uint32_t insn_debut_trame = dsp->insn_count;
         l1_sync();
         /* [2026-09-18] The firmware (sync.c) reads d_error_status every frame, prints
          * it and clears it; replay ignored it entirely, hence its silence about the
@@ -708,7 +732,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
         n_iq = 2 * 148;
         int injecter = (!iq_mode || strcmp(iq_mode, "none") != 0);
         if (injecter && rx_avant) {
-            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
+            g_livre_type = cellule_burst(fn_cur, (uint8_t)g_bsic_injecte, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
             g_livre_fn = fn_cur; g_livre_n = n_iq;
             g_ad_avant = calypso_bsp_get_daram_addr();
             { static int da = -1; static unsigned nd;
@@ -728,7 +752,33 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             while (arm < insns / 4 && dsp->running && !dsp->idle) {
                 int ex = c54x_run(dsp, 64); if (ex <= 0) break; arm += ex;
             }
-            g_livre_type = cellule_burst(fn_cur, (uint8_t)bsic, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
+            g_livre_type = cellule_burst(fn_cur, (uint8_t)g_bsic_injecte, amp, DECALAGE_SYMB, marge_tete(), iq, &n_iq);
+            /* [2026-09-20] FULL FRAME for the FB search. On silicon the FB task
+             * streams 156.25 symbols per TDMA frame (148 burst + 8.25 guard); the
+             * TOA it reports counts frames in those units and the firmware turns
+             * it back into frames with BITS_PER_TDMA = 1250. Delivering 148
+             * samples per frame made a 9-frame distance read as 5. Pad every
+             * non-SCH burst with silence to 156 samples (157 on one frame in four,
+             * so the average is 156.25). REJEU_TRAME_PLEINE=0 restores 148. */
+            /* The SCH frame is delivered as the 190-sample WINDOW block (margins
+             * 21/21) only while the DSP has its one-shot SB window armed; inside
+             * an FB search (continuous DMA) it is a plain frame of the stream like
+             * any other, or the stream would gain 34 symbols on every SCH frame.
+             * The TOA origin (the firmware's "23") is not set here but by the DMA
+             * model at arm time (CALYPSO_RHEA_DMA_ARM_SKIP): the burst position
+             * inside the frame can only move within the 8.25 idle symbols. */
+            { static int pleine = -1;
+              if (pleine < 0) { const char *e = getenv("REJEU_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
+              bool fenetre_sb = calypso_rhea_dma_one_shot();
+              if (pleine && !(g_livre_type == 'S' && fenetre_sb)) {
+                  if (g_livre_type == 'S') {          /* drop the window margins: burst only */
+                      int m = marge_tete();
+                      memmove(iq, iq + 2 * m, 2 * 148 * sizeof(int16_t));
+                      n_iq = 2 * 148;
+                  }
+                  int cible = 156 + ((fn_cur & 3) == 3 ? 1 : 0);
+                  if (n_iq < 2 * cible) { memset(iq + n_iq, 0, (size_t)(2 * cible - n_iq) * sizeof(int16_t)); n_iq = 2 * cible; }
+              } }
             g_livre_fn = fn_cur; g_livre_n = n_iq;
             /* Replace the SCH CONTENT with a real burst, without touching the framing. */
             if (g_n_reels && g_livre_type == 'S') {
@@ -795,7 +845,53 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
                          fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
                          calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
-            calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
+            /* [2026-09-20] PAGE-BY-PAGE DELIVERY (REJEU_PAGES=<words>, e.g. 96).
+             * On silicon the RIF streams continuously and DMA2 completes one
+             * 96-word page at a time, each completion interrupting the DSP; the
+             * FB correlator runs per page. Handing the whole frame in one call
+             * drains 3-4 pages in one pass with ONE interrupt, so the ROM
+             * processes one page per frame and its TOA advanced by 96 per frame
+             * instead of 156 symbols. Here the frame's samples are delivered in
+             * chunks, the DSP running a slice after each, so every page gets its
+             * own completion. */
+            { static long pages_mots = -1;
+              if (pages_mots < 0) { const char *e = getenv("REJEU_PAGES"); pages_mots = (e && *e) ? atol(e) : 0; }
+              if (pages_mots > 0) {
+                  int pos = 0, npage = 0;
+                  while (pos < n_iq) {
+                      int m = n_iq - pos < pages_mots ? n_iq - pos : (int)pages_mots;
+                      uint16_t b34 = dsp->data[0x3fb4], b35 = dsp->data[0x3fb5];
+                      calypso_bsp_rx_burst(0, fn_cur, iq + pos, m);
+                      pos += m; npage++;
+                      { static unsigned nb; if (nb < 40 && fn_cur >= 2 && fn_cur <= 14) { nb++;
+                          printf("  [bloc] fn=%u page %d (%d mots) : 0x3fb4=%04x 0x3fb5=%04x avant", fn_cur, npage, m, b34, b35); } }
+                      /* completion interrupt already pending: let the DSP serve it */
+                      if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
+                      long slice = 0;
+                      while (slice < insns / 8 && dsp->running && !dsp->idle) {
+                          int ex = c54x_run(dsp, 64); if (ex <= 0) break; slice += ex;
+                      }
+                      { static unsigned nb2; if (nb2 < 40 && fn_cur >= 2 && fn_cur <= 14) { nb2++;
+                          printf(" -> apres 0x3fb4=%04x 0x3fb5=%04x (idle=%d, %ld insn)\n", dsp->data[0x3fb4], dsp->data[0x3fb5], dsp->idle, slice); } }
+                  }
+                  { static unsigned np; if (np < 3) { np++;
+                      printf("  [pages] fn=%u : %d mots livres en %d pages de %ld\n", fn_cur, n_iq, npage, pages_mots); } }
+              } else
+                  calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
+            }
+            /* [2026-09-20] STREAM PUMP. The DMA now fills its double buffer with
+             * full pages only and interrupts once per pair; the ROM's ISR consumes
+             * both halves and the DSP goes idle. Then the next pair is handed
+             * over, as the hardware would once the ISR is out of the way. A frame
+             * carries 3.25 pages, so this runs 1 or 2 times per frame. */
+            for (int k = 0; k < 40; k++) {          /* a 1250-symbol frame is 26 pages = 13 pairs */
+                if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
+                long sl = 0;
+                while (sl < insns / 4 && dsp->running && !dsp->idle) {
+                    int ex = c54x_run(dsp, 64); if (ex <= 0) break; sl += ex;
+                }
+                if (!calypso_rhea_dma_pump(dsp)) break;
+            }
             if (getenv("CALYPSO_BSP_VERIF")) {
                 static int dit;
                 if (!dit) { dit = 1;
@@ -847,6 +943,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   g_vie_fn = fn_cur; g_vie_ad = ad; } }
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
         }
+        { static int tf = -1; if (tf < 0) tf = getenv("REJEU_TRACE_FB") ? 1 : 0;
+          if (tf && fn_cur < 60)
+              printf("  [fb] fn=%-3u apres pompe : 0x3fb4=%04x 0x3fb3=%04x d_fb_det=%u fb_mode=%u task_md=%u/%u idle=%d insn_trame=%u  sync=%04x %04x %04x %04x\n",
+                     fn_cur, dsp->data[0x3fb4], dsp->data[0x3fb3], api[NDB_FB_DET], api[NDB_FB_MODE],
+                     api[W_PAGE(0) + W_TASK_MD], api[W_PAGE(1) + W_TASK_MD], dsp->idle, dsp->insn_count - insn_debut_trame,
+                     api[NDB_SYNC], api[NDB_SYNC+1], api[NDB_SYNC+2], api[NDB_SYNC+3]); }
         long done = 0;
         static int probe = -1;
         if (probe < 0) probe = drapeau_env("REJEU_PROBE_TOA") ? 1 : 0;
@@ -882,7 +984,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 case 0x7d10: case 0x7d11: case 0x7d12: case 0x7d13:
                 case 0x7d14: case 0x7d15: case 0x7d16: case 0x7d17:
                 case 0x7d18: case 0x7d19: case 0x7d1a: case 0x7d1b:
-                    if (getenv("REJEU_DIV")) {
+                    if (env_div) {
                         static int dumpe;
                         if (!dumpe) { dumpe = 1;
                             printf("    [rom] 0x7d10-0x7d20 :");
@@ -898,7 +1000,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     }
                     break;
                 case 0x7d1c: hit_7d1c++;
-                    if (getenv("REJEU_DIV")) {
+                    if (env_div) {
                         unsigned dp = dsp->st0 & 0x1FF;
                         uint16_t dv = dsp->data[(uint16_t)((dp << 7) | 0x0B)];
                         static unsigned nd;
@@ -910,7 +1012,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     break;
                 case 0x7d1d: hit_7d1d++; break;
                 case 0x7d1e: hit_7d1e++;
-                    if (getenv("REJEU_DIV")) {
+                    if (env_div) {
                         static unsigned nq;
                         if (nq < 12) { nq++;
                             printf("    [div] apres : quotient A=%010llx  (mot bas = %d)\n",
@@ -1174,7 +1276,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * at EVERY step of the demodulation window, not only at the decoder
                  * entry -- otherwise a read before 0x9841 escapes the injection and "no
                  * effect" means nothing. */
-                if (pc == 0x9841 || (getenv("REJEU_SOFTS_CONTINU") && g_dans_sb)) {
+                if (pc == 0x9841 || (env_softs_continu && g_dans_sb)) {
                     static int amp = -2, pol = -1;
                     if (amp == -2) { const char *e = getenv("REJEU_SOFTS_PARFAITS");
                                      amp = e ? atoi(e) : -1;
@@ -1190,6 +1292,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                          * rev = reversed order; entrelace = even/odd separated. */
                         static const char *perm; static int perm_lu;
                         if (!perm_lu) { perm = getenv("REJEU_SOFTS_PERM"); perm_lu = 1; }
+                        /* [2026-09-20] The decoder reads its 78 softs at 0x2a00
+                         * (ROM 0x984a `stm #0x2a00,AR1`; packing 0x7e65-0x7e7a),
+                         * NOT at 0x2c72. Writing 0x2c72 tested nothing.
+                         * REJEU_SOFTS_ADDR overrides (default 0x2a00). */
+                        static long sa = -1;
+                        if (sa < 0) { const char *e = getenv("REJEU_SOFTS_ADDR");
+                                      sa = (e && *e) ? strtol(e, NULL, 0) : 0x2a00; }
                         for (int k = 0; k < 78; k++) {
                             int j = k;
                             if (perm && !strcmp(perm, "swap"))       j = (k < 39) ? k + 39 : k - 39;
@@ -1197,11 +1306,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                             else if (perm && !strcmp(perm, "entrelace")) j = (k < 39) ? 2*k : 2*(k-39)+1;
                             int bit = att[j] & 1;
                             int v = (pol ? bit : !bit) ? amp : -amp;
-                            dsp->data[0x2c72 + k] = (uint16_t)(int16_t)v;
+                            dsp->data[(uint16_t)(sa + k)] = (uint16_t)(int16_t)v;
                         }
                         static unsigned ns; if (ns < 3) { ns++;
-                            printf("  [softs] fn_demod=%u : 78 souples IDEAUX ecrits en 0x2c72 "
-                                   "(amp=%d pol=%d, source=%s)\n", g_sb_cmd_fn, amp, pol,
+                            printf("  [softs] fn_demod=%u : 78 souples IDEAUX ecrits en 0x%04lx "
+                                   "(amp=%d pol=%d, source=%s)\n", g_sb_cmd_fn, sa, amp, pol,
                                    ri >= 0 ? "burst reel" : "fixture"); }
                     }
                 }
@@ -1351,7 +1460,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                    * included) and data[] at the same address: null or constant
                    * coefficients mean the equalizer output CANNOT depend on its input,
                    * which would be the root cause. */
-                  if (getenv("REJEU_FIRS") && dans_sb2 && h == 0xE0) {
+                  if (env_firs && dans_sb2 && h == 0xE0) {
                       static unsigned nf;
                       if (nf < 10) {
                           uint16_t pmad = prog_ovly(dsp, (uint16_t)(pc + 1));
@@ -1604,6 +1713,66 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     ring_pc[ri] = pc; ring_op[ri] = o; ring_st0[ri] = dsp->st0;
                     ri = (ri + 1) & 3;
                     if (h == 0xFD || h == 0xFF) n_xc_reg[pc >> 10]++; } }
+                /* [2026-09-20] DECODER ORACLE (REJEU_DECODEUR=1). Ideal softs at
+                 * 0x2a00 still give no CRC OK, so the fault is inside 0x9841..: ACS
+                 * (0x9a78), traceback (0x9aaf) or CRC (0x9887). Dump each stage's
+                 * output next to what libosmocoding says it should be: u[0..34] =
+                 * 25 info bits of sb_info + 10 parity bits (gsm0503_sch_crc10). */
+                if (env_decodeur) {
+                    static unsigned nd;
+                    { static unsigned nt;
+                      if (pc == 0x9a7f && nt < 6) { nt++;
+                          printf("  [dec] apres `sth @0x0e,B` (pc=9a7e) : T=%04x  B=%010llx (hi=%04x)  DP=%03x CPL=%d  ST0=%04x ST1=%04x  AR1=%04x\n",
+                                 dsp->t, (unsigned long long)(dsp->b & 0xffffffffffULL), (unsigned)((dsp->b >> 16) & 0xffff),
+                                 dsp->st0 & 0x1ff, !!(dsp->st1 & 0x4000), dsp->st0, dsp->st1, dsp->ar[1]); } }
+                    { static int cpl_prev = -1; static uint16_t pc_prev; static unsigned ncpl;
+                      int cpl = !!(dsp->st1 & 0x4000);
+                      if (cpl_prev >= 0 && cpl != cpl_prev && ncpl < 16) { ncpl++;
+                          printf("  [cpl] CPL %d -> %d apres l'instruction pc=%04x op=%04x  (fn=%u ST1=%04x SP=%04x)\n",
+                                 cpl_prev, cpl, pc_prev, prog_ovly(dsp, pc_prev), fn_cur, dsp->st1, dsp->sp); }
+                      cpl_prev = cpl; pc_prev = pc; }
+                    if (pc == 0x9866 && nd < 3) {
+                        printf("  [dec] fn_demod=%u ACS termine : TRN[0..38] @0x2c82 =", g_sb_cmd_fn);
+                        for (int k = 0; k < 39; k++) printf(" %04x", dsp->data[0x2c82 + k]);
+                        printf("\n        metriques @0x2c00..0x2c1f =");
+                        for (int k = 0; k < 32; k++) printf(" %04x", dsp->data[0x2c00 + k]);
+                        printf("\n        softs @0x2a00[0..7] = %04x %04x %04x %04x %04x %04x %04x %04x  BK=%04x AR0=%04x ST1=%04x\n",
+                               dsp->data[0x2a00], dsp->data[0x2a01], dsp->data[0x2a02], dsp->data[0x2a03],
+                               dsp->data[0x2a04], dsp->data[0x2a05], dsp->data[0x2a06], dsp->data[0x2a07],
+                               dsp->bk, dsp->ar[0], dsp->st1);
+                    }
+                    if (pc == 0x987b && nd < 3) {
+                        int ri = g_n_reels ? g_reel_pour_fn[g_sb_cmd_fn & 63] : -1;
+                        unsigned char u[35];
+                        if (ri >= 0) { /* decode the real codeword back to u: not available, print softs only */
+                            memset(u, 9, sizeof u);
+                        } else {
+                            uint32_t fn = g_sb_cmd_fn;
+                            uint32_t t1 = fn / 1326, t2 = fn % 26, t3 = fn % 51, t3p = t3 ? (t3 - 1) / 10 : 0;
+                            uint8_t sb_info[4] = {
+                                (uint8_t)(((g_bsic_injecte & 0x3f) << 2) | ((t1 & 0x600) >> 9)),
+                                (uint8_t)((t1 & 0x1fe) >> 1),
+                                (uint8_t)(((t1 & 0x001) << 7) | ((t2 & 0x1f) << 2) | ((t3p & 0x6) >> 1)),
+                                (uint8_t)(t3p & 0x1) };
+                            ubit_t ub[35];
+                            osmo_pbit2ubit_ext(ub, 0, sb_info, 0, 25, 1);
+                            osmo_crc16gen_set_bits(&gsm0503_sch_crc10, ub, 25, ub + 25);
+                            for (int k = 0; k < 35; k++) u[k] = ub[k];
+                        }
+                        unsigned long long um = 0, ul = 0;
+                        for (int k = 0; k < 35; k++) { um = (um << 1) | u[k]; ul |= (unsigned long long)u[k] << k; }
+                        printf("  [dec] traceback termine : mots @0x2c00 = %04x %04x %04x %04x | attendu u[0..34] MSB-first=0x%09llx LSB-first=0x%09llx\n",
+                               dsp->data[0x2c00], dsp->data[0x2c01], dsp->data[0x2c02], dsp->data[0x2c03], um, ul);
+                        printf("        u = "); for (int k = 0; k < 35; k++) printf("%d", u[k]); printf("\n");
+                    }
+                    if (pc == 0x98a2 && nd < 3) {
+                        printf("  [dec] CRC : drapeau 0x2bf8=%u  A=%010llx  mots @0x2c00 = %04x %04x %04x\n",
+                               dsp->data[0x2bf8], (unsigned long long)(dsp->a & 0xffffffffffULL),
+                               dsp->data[0x2c00], dsp->data[0x2c01], dsp->data[0x2c02]);
+                        nd++;
+                    }
+                }
+                g_op_tous[prog_ovly(dsp, pc)]++;
                 int ex = c54x_run(dsp, 1);
                 if (ex <= 0) break;
                 done += ex;
@@ -1669,7 +1838,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       int meil_f = -1, meil_s = -1, s0 = -1;
                       for (int df = -12; df <= 3; df++) {
                           long f = (long)g_livre_fn + df; if (f < 0) continue;
-                          unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)bsic, a2);
+                          unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)g_bsic_injecte, a2);
                           int ok = 0;
                           for (int k = 0; k < 78; k++) { int bit = sb[k] < 0 ? 1 : 0; if (bit == a2[k]) ok++; }
                           int meilleur = ok > 78 - ok ? ok : 78 - ok;
@@ -1687,7 +1856,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       for (int k = 0; k < 380; k++) ech[k] = (int16_t)dsp->data[0x0cce + k];
                       unsigned char b148[148]; int off = 0;
                       unsigned char att[78];
-                      cellule_code_attendu(g_livre_fn, (uint8_t)bsic, att);
+                      cellule_code_attendu(g_livre_fn, (uint8_t)g_bsic_injecte, att);
                       if (cellule_demod_reference(ech, 190, b148, &off) == 0) {
                           /* sanity of the reference demod: the midamble must come back out */
                           int okm = 0;
@@ -1712,7 +1881,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int okdat = 0, ndat = 0, meil_f = -1, meil_s = -1;
                           for (int df = -12; df <= 3; df++) {
                               long f = (long)g_livre_fn + df; if (f < 0) continue;
-                              unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)bsic, a2);
+                              unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)g_bsic_injecte, a2);
                               unsigned char burst[148];
                               memset(burst, 0, 3);
                               memcpy(burst + 3, a2, 39);
@@ -1738,7 +1907,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int meilleure = -1, meilleur_score = -1;
                           for (int df = -12; df <= 3; df++) {
                               long f = (long)g_livre_fn + df; if (f < 0) continue;
-                              unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)bsic, a2);
+                              unsigned char a2[78]; cellule_code_attendu((uint32_t)f, (uint8_t)g_bsic_injecte, a2);
                               int ok2 = 0;
                               for (int i = 0; i < 39; i++) if (b148[3 + i] == a2[i]) ok2++;
                               for (int i = 0; i < 39; i++) if (b148[106 + i] == a2[39 + i]) ok2++;
@@ -1788,7 +1957,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 { static int nb;
                   if (pc == 0x9841 && nb < 400) {
                       unsigned char att[78];
-                      cellule_code_attendu(g_livre_fn, (uint8_t)bsic, att);
+                      cellule_code_attendu(g_livre_fn, (uint8_t)g_bsic_injecte, att);
                       /* Try the plausible conventions: polarity, halves swapped (the
                        * DSP may return 39+39 in the other order), and a shift. A
                        * combination clearly above chance means the demodulator is sound
@@ -2244,16 +2413,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 { static uint16_t tprev, tpc, ppc; static int tn;
                   if (dsp->t != tprev) { tpc = ppc; tprev = dsp->t; }
                   ppc = pc;
-                  if (pc == 0x7947 && tn < 10 && drapeau_env("REJEU_PROBE_T")) {
+                  if (pc == 0x7947 && tn < 10 && env_probe_t) {
                       printf("    [T] au mpya (0x7947) : T=%04x (%u), dernier ecrit par pc=%04x\n",
                              dsp->t, dsp->t, tpc); tn++; } }
-                if (!drapeau_env("REJEU_PROBE_T") && pc >= 0x7940 && pc <= 0x795c && nlog < 60) {
+                if (!env_probe_t && pc >= 0x7940 && pc <= 0x795c && nlog < 60) {
                     printf("    [toa] pc=%04x A=%010llx B=%010llx T=%04x 3fb4=%04x AR4=%04x\n",
                            pc, (unsigned long long)(dsp->a & 0xffffffffffULL),
                            (unsigned long long)(dsp->b & 0xffffffffffULL),
                            dsp->t, dsp->data[0x3fb4], dsp->ar[4]);
                     nlog++;
                 }
+                g_op_tous[prog_ovly(dsp, pc)]++;
                 int ex = c54x_run(dsp, 1);
                 if (ex <= 0) break;
                 done += ex;
@@ -2277,6 +2447,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x7cb0) % 8 == 7) ? "\n" : "");
         printf("\n");
     }
+    { const char *e = getenv("REJEU_OPCODES_TOUS");
+      if (e && *e) { FILE *fo = fopen(e, "w");
+          if (fo) { for (unsigned o = 0; o < 65536; o++) if (g_op_tous[o]) fprintf(fo, "%04x %lu\n", o, g_op_tous[o]);
+                    fclose(fo); printf("  opcodes executes ecrits dans %s\n", e); } } }
     printf("\n─── bilan rejeu (deterministe) ───\n");
     {
         printf("  instructions DSP executees : %lu\n", insn_total);

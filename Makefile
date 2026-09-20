@@ -40,7 +40,16 @@ all: c54x_exe
 c54x_exe: $(SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRC) $(LDLIBS)
 
+# ISA conformance: the SPRU172C worked examples replayed on the core.
+#   make isa_test && ./isa_test tools/isa_tests.txt 2>/dev/null
+COEUR := $(filter-out src/%,$(SRC))
+tools/isa_tests.txt: tools/isa_examples.py
+	python3 tools/isa_examples.py > $@
+
+isa_test: tools/isa_test.c src/pcb-minimal.c $(COEUR) tools/isa_tests.txt
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ tools/isa_test.c src/pcb-minimal.c $(COEUR) $(LDLIBS)
+
 clean:
-	rm -f c54x_exe
+	rm -f c54x_exe isa_test
 
 .PHONY: all clean

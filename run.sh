@@ -15,7 +15,7 @@
 #   MODE=grgsm ./run.sh      montage gr-gsm         ./run.sh --logs      suivre les journaux
 #   PONT=1 ./run.sh          avec le pont           ./run.sh --stop      tout arreter, nettoyer
 #   ./run.sh --step N        une seule etape (les precedentes doivent tourner)
-# Variables : MODE, PONT, INSNS (32000), VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
+# Variables : MODE, PONT, INSNS (200000), VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
 # Details, attendus et verifications : LAUNCH.md a cote.
 set -uo pipefail
@@ -33,7 +33,7 @@ PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont.py}"
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2_pont}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
-INSNS="${INSNS:-32000}"
+INSNS="${INSNS:-200000}"
 VERB="${VERB:--v}"
 IQ="${IQ:-none}"
 AMP="${AMP:-30000}"

@@ -17,6 +17,7 @@
 #define OS 16          /* internal oversampling factor */
 #define L  3           /* pulse length, in symbols */
 #define BT 0.3
+#define GMSK_MAX_BITS 512   /* longest burst gmsk_moduler() accepts */
 
 static double q_tab[L * OS + 1];   /* q(t) for t in [-1.5T, 1.5T], step T/OS */
 static int q_pret;
@@ -53,9 +54,10 @@ static double q_de(double t)   /* t in symbols, relative to the pulse centre */
 void gmsk_moduler(const uint8_t *bits, int n, int amp, double phase0, double decalage, int16_t *iq)
 {
     if (!q_pret) q_init();
+    if (n > GMSK_MAX_BITS) n = GMSK_MAX_BITS;   /* alpha[] bound; callers pass 148 */
     int prev = 1;                       /* b_{-1} = 1 (45.004 2.2) */
-    double alpha[200];
-    for (int i = 0; i < n && i < 200; i++) {
+    double alpha[GMSK_MAX_BITS];
+    for (int i = 0; i < n; i++) {
         int d = (bits[i] & 1) ^ prev;
         prev = bits[i] & 1;
         alpha[i] = 1.0 - 2.0 * d;

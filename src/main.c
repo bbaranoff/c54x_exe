@@ -75,8 +75,8 @@ static void usage(const char *prog)
     fprintf(stderr,
         "usage: %s [options]\n"
         "  --rom-dir DIR     ou sont calypso_dsp.*.bin   (defaut /opt/GSM)\n"
-        "  --trames N        nombre de trames TDMA       (defaut 100)\n"
-        "  --insns N         instructions par trame      (defaut 2300, 32000 avec --arm)\n"
+        "  --trames N        nombre de trames TDMA       (defaut 100, 4000 avec --rejouer)\n"
+        "  --insns N         instructions par trame      (defaut 2300, 200000 avec --arm)\n"
         "  --verbeux         une ligne par trame\n"
         "  --iq MODE         avec --arm : injecter un burst I/Q a chaque trame :\n"
         "                    fcch (rotation +pi/2/ech.), noise, tone:<dphi>, none,\n"
@@ -105,7 +105,7 @@ int main(int argc, char **argv)
     int rejeu = 0, bsic_rej = 7;
     const char *iq_mode = "none";
     int amp = 30000;
-    long trames = 100, insns = -1;
+    long trames = -1, insns = -1;
     bool verbeux = false;
     int niveau = 0;
 
@@ -129,7 +129,15 @@ int main(int argc, char **argv)
         else { usage(argv[0]); return 2; }
     }
     if (insns < 0) {
-        insns = arm_sock ? 32000 : 2300;   /* 32000 = CALYPSO_DSP_BUDGET from bsp.env */
+        /* [2026-09-20] 200000 under --arm: the FB search over whole 1250-symbol
+         * frames costs the ROM 24-36k instructions per frame, and a frame cut
+         * short by the budget leaves the ARM reading half-written results (a
+         * zeroed a_sch read as a CRC-OK SB). Silicon has ~360k cycles per frame
+         * at 78 MHz; 32000 was a bench constant, not a hardware one. */
+        insns = arm_sock ? 200000 : 2300;
+    }
+    if (trames < 0) {
+        trames = rejeu ? 4000 : 100;       /* an explicit --trames is honoured as is */
     }
     verbosite_installer(niveau);
 
@@ -143,14 +151,18 @@ int main(int argc, char **argv)
     static uint16_t api_ram_privee[CALYPSO_API_WORDS];
     uint16_t *api_ram = api_ram_privee;
     C54xState *dsp;
-    if (arm_sock) {
+    if (arm_sock || rejeu) {
         /* A pending interrupt (IFR&IMR) is taken as soon as INTM drops: real
          * C54x behaviour (SPRU131 ch.6), not a workaround. The core gates it
          * behind CALYPSO_C54X_IRQ_LEVEL; turn it on here unless explicitly
-         * overridden (empty CALYPSO_C54X_IRQ_LEVEL turns it off). */
-        { const char *e = getenv("CALYPSO_C54X_IRQ_LEVEL");
-          if (!e) setenv("CALYPSO_C54X_IRQ_LEVEL", "1", 1);
-          else if (!*e) unsetenv("CALYPSO_C54X_IRQ_LEVEL"); }
+         * overridden (empty CALYPSO_C54X_IRQ_LEVEL turns it off). Applied to
+         * BOTH benches: the replay used to run the core without it and could
+         * not reproduce the bridge. */
+        const char *e = getenv("CALYPSO_C54X_IRQ_LEVEL");
+        if (!e) setenv("CALYPSO_C54X_IRQ_LEVEL", "1", 1);
+        else if (!*e) unsetenv("CALYPSO_C54X_IRQ_LEVEL");
+    }
+    if (arm_sock) {
         dsp = pont_allouer_dsp();
         if (!dsp) { return 1; }
         api_ram = &dsp->data[C54X_API_BASE];
@@ -186,9 +198,9 @@ int main(int argc, char **argv)
         calypso_bsp_init(dsp);
         if (insns < 32000) insns = 32000;
         if (!iq_mode || !*iq_mode || !strcmp(iq_mode, "none")) iq_mode = "cell";
-        int rc = rejouer(dsp, api_ram, trames > 100 ? trames : 4000, insns,
-                         iq_mode ? iq_mode : "cell", amp, bsic_rej, verbeux);
+        int rc = rejouer(dsp, api_ram, trames, insns, iq_mode, amp, bsic_rej, verbeux);
         verbosite_retirer();
+        verbosite_bilan(stdout);
         return rc;
     }
     if (arm_sock) {

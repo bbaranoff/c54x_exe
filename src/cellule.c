@@ -30,6 +30,22 @@ static const uint8_t factice[148] = {
 };
 
 int cellule_sch_partout;      /* diagnostic: emit SCH on every non-FCCH frame */
+
+/* sb_info of 44.018 9.1.30 for frame fn, byte layout of osmo-bts
+ * sched_lchan_fcch_sch.c. T3' = (T3 - 1) / 10: the SCH sits on T3 in
+ * {1,11,21,31,41}, so T3' in 0..4. Previously computed as T3 / 10 here and as
+ * (T3 - 1) / 10 in pont.c: identical on real SCH frames, different at T3 = 50
+ * under cellule_sch_partout. One encoder now, shared by cellule_burst() and
+ * cellule_code_attendu(). */
+static void sb_info_de_fn(uint32_t fn, uint8_t bsic, uint8_t sb_info[4])
+{
+    uint32_t t1 = fn / 1326, t2 = fn % 26, t3 = fn % 51;
+    uint32_t t3p = t3 ? (t3 - 1) / 10 : 0;
+    sb_info[0] = (uint8_t)(((bsic & 0x3f) << 2) | ((t1 & 0x600) >> 9));
+    sb_info[1] = (uint8_t)((t1 & 0x1fe) >> 1);
+    sb_info[2] = (uint8_t)(((t1 & 0x001) << 7) | ((t2 & 0x1f) << 2) | ((t3p & 0x6) >> 1));
+    sb_info[3] = (uint8_t)(t3p & 0x1);
+}
 /* Caller sets the head margin; the tail margin is trimmed to keep 190 complex
  * samples in total. Sliding the burst inside that fixed-size buffer separates an
  * influence window that is an ABSOLUTE buffer index (late bits lose influence,
@@ -46,13 +62,8 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         memset(bits, 0, sizeof(bits));
         type = 'F';
     } else if ((p51 % 10 == 1 && p51 <= 41) || cellule_sch_partout) {
-        uint32_t t1 = fn / 1326, t2 = fn % 26, t3 = p51, t3p = t3 / 10;
-        uint8_t sb_info[4] = {
-            (uint8_t)(((bsic & 0x3f) << 2) | ((t1 & 0x600) >> 9)),
-            (uint8_t)((t1 & 0x1fe) >> 1),
-            (uint8_t)(((t1 & 0x001) << 7) | ((t2 & 0x1f) << 2) | ((t3p & 0x6) >> 1)),
-            (uint8_t)(t3p & 0x1),
-        };
+        uint8_t sb_info[4];
+        sb_info_de_fn(fn, bsic, sb_info);
         ubit_t code[78];
         gsm0503_sch_encode(code, sb_info);
         /* Demodulator impulse response: flip exactly ONE of the 78 coded bits and
@@ -112,14 +123,8 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
  * the DSP produces. */
 void cellule_code_attendu(uint32_t fn, uint8_t bsic, unsigned char *code78)
 {
-    uint32_t p51 = fn % 51;
-    uint32_t t1 = fn / 1326, t2 = fn % 26, t3 = p51, t3p = t3 / 10;
-    uint8_t sb_info[4] = {
-        (uint8_t)(((bsic & 0x3f) << 2) | ((t1 & 0x600) >> 9)),
-        (uint8_t)((t1 & 0x1fe) >> 1),
-        (uint8_t)(((t1 & 0x001) << 7) | ((t2 & 0x1f) << 2) | ((t3p & 0x6) >> 1)),
-        (uint8_t)(t3p & 0x1),
-    };
+    uint8_t sb_info[4];
+    sb_info_de_fn(fn, bsic, sb_info);
     ubit_t code[78];
     gsm0503_sch_encode(code, sb_info);
     for (int i = 0; i < 78; i++) code78[i] = (unsigned char)code[i];
@@ -182,3 +187,12 @@ int cellule_demod_d(const int16_t *x, int n_ech, int b0, unsigned char *d148)
 }
 
 int cellule_train_sb(int i) { return (i >= 0 && i < 64) ? train_sb[i] : -1; }
+
+/* The dummy burst (45.002 5.2.6) as 148 GMSK samples: what the BCCH carrier
+ * transmits on every timeslot that carries nothing else. The FB search of the
+ * ROM receives the whole frame, so the seven other timeslots must look like a
+ * real C0 carrier, not like silence. */
+void cellule_factice(int amp, double decalage, int16_t *iq)
+{
+    gmsk_moduler(factice, 148, amp, 0.0, decalage, iq);
+}
