@@ -749,8 +749,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                          calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
         }
-        /* frame interrupt: the DSP reads the task and arms its RX window */
-        if (dsp->imr & (1u << 12)) c54x_interrupt_ex(dsp, 28, 12);
+        /* frame interrupt: the DSP reads the task and arms its RX window.
+         * [2026-09-20] REJEU_IRQ_SCENARIO=1: raise it only on frames where the
+         * replayed ARM ended a DSP scenario (a task on the page just handed
+         * over), as dsp_end_scenario() does with tpu_dsp_frameirq_enable(),
+         * a bit the firmware sets again on every scenario. Every other frame
+         * the ROM gets no frame interrupt and does not re-read the page. */
+        { static int irq_sc = -1;
+          if (irq_sc < 0) irq_sc = drapeau_env("REJEU_IRQ_SCENARIO") ? 1 : 0;
+          unsigned wp_donnee = (api[NDB_PAGE] & 1u);
+          bool scenario = api[W_PAGE(wp_donnee) + W_TASK_MD] != 0 || api[W_PAGE(wp_donnee) + 0] != 0;
+          if ((dsp->imr & (1u << 12)) && (!irq_sc || scenario)) c54x_interrupt_ex(dsp, 28, 12); }
         if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
         if (injecter && !rx_avant) {
             /* let the DSP arm (short budget), THEN deliver the samples */
