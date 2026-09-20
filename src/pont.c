@@ -304,6 +304,7 @@ static void profil_publier(void)
  * starved, TOA = 1251 for an FCCH four frames away. The replay bench delivers
  * after a short slice of the frame, once the ISR has armed; the bridge now does
  * the same: budget/8, inject (synthetic cell and UDP bursts), then the rest. */
+static bool g_tick_irq_trame = true;   /* TICK.b bit 16 : l'ARM a arme l'interruption trame du DSP */
 static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned long *injectes; bool udp; } g_inj;
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn, unsigned long *injectes);
 
@@ -336,7 +337,19 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
             c54x_interrupt_ex(dsp, 30, 14);
         if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800))
             dsp->idle = false;
-        if (dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) {
+        /* [2026-09-20] The DSP frame interrupt is TPU_CTRL_DSP_EN, a bit the
+         * firmware sets in dsp_end_scenario() on EVERY scenario and that the
+         * TPU consumes: the ROM gets a frame interrupt only on frames where
+         * the ARM handed it a page. Raising it on every tick made the ROM
+         * re-read the same page for 10+ frames (the firmware only flips the
+         * write page on frames with a DSP item and the ROM never clears
+         * d_task_md): the FB task restarted at each FCCH and the SB job never
+         * ran (0xaba4 dispatched every frame, no 764-byte window armed).
+         * QEMU now says in TICK.b bit 16 whether the ARM armed it.
+         * PONT_IRQ_TRAME=1 restores the interrupt on every tick (A/B). */
+        static int irq_chaque = -1;
+        if (irq_chaque < 0) { const char *e = getenv("PONT_IRQ_TRAME"); irq_chaque = (e && *e == '1') ? 1 : 0; }
+        if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (irq_chaque || g_tick_irq_trame)) {
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         }
         if (getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
@@ -750,6 +763,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             break;
         case PONT_TICK: {
             g_c54x_exe_fn = m.a;
+            g_tick_irq_trame = (m.b & CALYPSO_PONT_TICK_IRQ_TRAME) != 0;
+            m.b &= 1u;
             calypso_bsp_set_tpu_offset((int)m.c);   /* firmware RX window */
             /* AFC relay, closing the loop. The ARM writes d_afc (word 15 of the W
              * page) into the shared API RAM; on silicon the DSP serialises it to

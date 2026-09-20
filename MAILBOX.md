@@ -312,3 +312,56 @@ romload, qui a un delai par bloc, decrochait. Les runs precedents passaient
 de justesse. Correctif (qosmo 77f61dd) : l'UART est pompee aussi sur le
 chemin d'attente du DSP. Mesure : 71 blocs, « your code is running now »,
 puis FBSB_REQ dans la foulee.
+
+## L'interruption trame du DSP est un bit a usage unique [2026-09-20]
+
+Etat de depart, en pas-a-pas : timing FB juste (TOA 11239/11243, delay=10),
+tache SB postee sur la trame SCH avec le burst S livre, et pourtant 1 SB en
+130 cycles. Sondes :
+
+    D_TASK_MD-RD : la ROM lit d_task_md a CHAQUE trame (0xb011 -> 0xb554 ->
+                   0xb0b4 -> 0xab7a pour FB, -> 0xaba4 pour SB) et relit la
+                   MEME page avec la meme valeur 3 a 4 trames de suite.
+    PONT_PC_COUNT : aba4 (dispatch SB) 27 passages / 217 trames, b219 : 0.
+    DMA2 (PC ajoute aux journaux) : armements par 0xa5ef/0xa5f6, desarmement
+                   0xa646 ; en vivant, flux continu FB rearme a CHAQUE FCCH
+                   (trames 204, 214, 234, 244...), jamais de fenetre 764.
+    Rejeu : fenetre one-shot de 764 octets (382 mots) armee sur la trame de
+                   la commande SB, et la FB1 (mode etroit) en une fenetre 764
+                   a la trame predite, pas en flux continu.
+
+Pourquoi la ROM relit la page : sync.c l1_sync() efface la page W COURANTE a
+chaque trame (ligne 244) mais ne bascule w_page que si la trame porte un item
+DSP (dsp_end_scenario, ligne 276). La page remise au DSP garde donc sa tache
+tant qu'aucun nouveau scenario ne rebascule ; la ROM n'ecrit jamais d_task_md
+ni d_dsp_page (WATCH-WR : 0 ecriture). Le rejeu, lui, bascule w_page a chaque
+trame (rejouer.c l1_sync) : les pages y sont propres, d'ou le decodage.
+
+Ce qui l'empeche sur silicium : dsp_end_scenario() appelle
+tpu_dsp_frameirq_enable() (TPU_CTRL_DSP_EN) a CHAQUE scenario et personne ne
+l'eteint jamais (tpu_frame_irq_en(1,1) seulement). Un bit qu'on rearme a
+chaque fois est un bit a usage unique : le TPU ne donne l'interruption trame
+au DSP que sur les trames ou l'ARM lui a remis une page. Le pont la levait a
+chaque tick. qosmo ne modelisait pas ce bit (le commentaire de calypso_c54x.c
+qui le pretend est perime : grep TPU_CTRL_DSP_EN ne donne que le #define).
+
+Correctif : qosmo (calypso_trx.c) met dans TICK.b bit 16 « l'ARM a arme
+DSP_EN depuis le tick precedent » et consomme le bit ; pont.c ne leve vec 28
+que sur ce bit (PONT_IRQ_TRAME=1 pour l'ancien comportement). Verifie d'abord
+en rejeu avec REJEU_IRQ_SCENARIO=1 : memes TOA, meme taux SB (27/76).
+
+Mesure en vivant, 10 cycles FB1 :
+
+    SB acceptees            : 5, toutes BSIC=42, TOA=24, -51 dBm   (avant : 1/130)
+    fenetres one-shot 764   : 7 (380 mots), burst S (n_iq=380) sur p51 = 41/11/31
+    flux FB continu         : plus rearme a chaque FCCH
+
+Restes :
+- FB1 lue vide : `FB1 (5294:8): TOA=0 Power=-138dBm` deux fois de suite, meme
+  mecanisme que la SB delirante (a_sync pas encore ecrit), l'ARM retente.
+- FB0 a l'essai 1 avec TOA=1296 : la premiere paire de pages porte encore une
+  FCCH du flux precedent (src=GRILLE), detection immediate et fausse distance.
+- Apres une SB vraie le mobile lit le BCCH et jette tout (`Dropping frame with
+  208 bit errors`, `MM_EVENT_NO_CELL_FOUND`) : la cellule synthetique n'a ni
+  SI1-4 ni bursts normaux. Etape suivante : bursts BCCH dans cellule.c, ou
+  `PONT=1` avec le BTS.
