@@ -35,6 +35,7 @@
 #include "pont.h"
 
 /* ── what the platform would otherwise provide ─────────────────────────── */
+extern int c54x_rapide;      /* calypso_c54x.h : fast path of the core */
 uint32_t g_c54x_exe_fn;      /* non-static: pont.c updates it on every TICK */
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 
@@ -140,6 +141,9 @@ int main(int argc, char **argv)
         trames = rejeu ? 4000 : 100;       /* an explicit --trames is honoured as is */
     }
     verbosite_installer(niveau);
+    /* Fast path of the core (calypso_c54x.h): on unless a probe is armed. */
+    { const char *d = getenv("CALYPSO_DEBUG"), *r = getenv("CALYPSO_C54X_RAPIDE");
+      c54x_rapide = (r && *r) ? (*r != '0') : !(d && *d); }
 
     qemu_mutex_init(&calypso_pcb_daram_lock);
 
