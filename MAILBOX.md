@@ -365,3 +365,30 @@ Restes :
   208 bit errors`, `MM_EVENT_NO_CELL_FOUND`) : la cellule synthetique n'a ni
   SI1-4 ni bursts normaux. Etape suivante : bursts BCCH dans cellule.c, ou
   `PONT=1` avec le BTS.
+
+## Banc BTS reel (pont.py --dsp-port 6702) : ce qui manquait [2026-09-20]
+
+1. pont.py sans `--dsp-port 6702` : rien ne part vers le DSP (defaut 0 = coupe).
+2. Le BSP n'appariait les bursts que par FN (fenetre +-64) : le FN du firmware
+   est arbitraire avant la SB et saute de centaines de milliers a chaque
+   detection FB (prim_fbsb.c, l1s_time_inc absolu). Rien n'etait livre.
+   `CALYPSO_BSP_STREAM=1` livre dans l'ordre d'arrivee, c'est le chemin a
+   utiliser des qu'une source temps reel alimente le DSP.
+3. Le BSP ajoutait ses 7 timeslots de remplissage derriere chaque TS0 alors
+   que pont.py envoie les 8 TS : 15 TS par trame (qosmo 6ad7003).
+4. Le DSP consomme ~100 trames/s contre 217 emises : la file de 128 bursts
+   par TS debordait chaque seconde et jetait les plus anciens ; espacements
+   FCCH mesures 4, 26, 18 trames au lieu de 10, 88 SB tentees / 0 decodee.
+   File portee a 8192 (qosmo 54d8320) : flux coherent, seulement en retard.
+5. La livraison STREAM chargeait les bursts bruts (148 symboles) et rien pour
+   les TS idle que le BTS n'envoie pas : trames de 1184 symboles ou moins, le
+   compteur de la ROM derivait (offsets intra-trame du TOA FB : 264, 434,
+   632, 399). Assembleur de trame (qosmo 28e9989) : 8 TS a 156/157 symboles,
+   burst factice pour les absents, fenetre SB = TS0 + 21 de marge.
+
+Vitesse du coeur (qosmo d68baaf, 54d8320) : getenv memoise, chemin rapide
+sans sondes ni mutex par acces memoire. Rejeu 6,7 -> 2,5-3,0 ms/trame. Le
+vivant reste vers 10 ms (24-38 k instructions de ROM par trame, ~200 ns
+chacune, le corps de c54x_run porte encore des dizaines de comparaisons de
+sonde par instruction) : lockstep toujours necessaire, et la file profonde
+compense le retard sur le BTS.
