@@ -359,6 +359,17 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         if (g_inj.actif) {
             int fait = 0;
             if (!dsp->idle) fait = c54x_run_profile(dsp, (int)budget / 8);   /* the ISR arms DMA2 */
+            /* [2026-09-20] Deliver only once the receive window is armed. On a
+             * frame where the ROM first finishes the previous burst's demod
+             * (20-30k instructions of Viterbi) before it programs the one-shot
+             * NB window, the fixed budget/8 slice delivered the frame BEFORE the
+             * arming, the RIF discarded it (no window) and the result page stayed
+             * empty: measured on the BTS bench, one normal-burst result in four
+             * missing (b0 absent in 23 of 97 BCCH blocks), read by the firmware
+             * as EMPTY / BURST ID n!=m. Keep running, in slices, until DMA2 is
+             * armed or the DSP idles, half the budget at most. */
+            while (!dsp->idle && !calypso_rhea_dma_rx_armed() && fait < (int)budget / 2)
+                fait += c54x_run_profile(dsp, 256);
             if (g_inj.udp) calypso_bsp_service(g_inj.fn);
             if (g_inj.iq_mode) injecter_burst(dsp, g_inj.iq_mode, g_inj.amp, g_inj.fn, g_inj.injectes);
             if (dsp->idle && calypso_rhea_dma_irq_level() && (dsp->imr & (1u << 14)) && !(dsp->ifr & (1u << 14)))
