@@ -32,6 +32,7 @@ INSNS=8000 VERB=-vv ./run.sh            # budget DSP par trame, niveau de traces
 MODE=grgsm ./run.sh                     # l'autre montage : couche 1 gr-gsm dans QEMU, sans c54x_exe
 PONT=0 ./run.sh                         # sans l'etape 5 (pont.py) : le mobile seul, cellule synthetique
 IQ=cell ./run.sh                        # c54x_exe fabrique une cellule GMSK (FCCH/SCH) a chaque trame
+LOCKSTEP=0 ./run.sh                     # horloge murale : QEMU n'attend pas le DSP et saute des trames (defaut 1)
 ```
 
 `run.sh` connait deux montages (`MODE=dsp`, le defaut, et `MODE=grgsm`) et une

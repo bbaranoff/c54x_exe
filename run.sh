@@ -15,7 +15,8 @@
 #   MODE=grgsm ./run.sh      montage gr-gsm         ./run.sh --logs      suivre les journaux
 #   PONT=1 ./run.sh          avec le pont           ./run.sh --stop      tout arreter, nettoyer
 #   ./run.sh --step N        une seule etape (les precedentes doivent tourner)
-# Variables : MODE, PONT, INSNS (200000), VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
+# Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (200000),
+#   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
 # Details, attendus et verifications : LAUNCH.md a cote.
 set -uo pipefail
@@ -34,6 +35,14 @@ RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2_pont}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
 INSNS="${INSNS:-200000}"
+# [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
+# le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
+# donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
+# sur 4 a 6, son compteur de blocs FB n'avancait pas et le TOA valait 1251 quelle que
+# soit la distance de la FCCH. En pas-a-pas QEMU n'avance la trame que quand le DSP
+# a fini la precedente : TOA = 23 + n x 1250, delay=10, SB decodable.
+LOCKSTEP="${LOCKSTEP:-1}"
+[ "$MODE" = dsp ] && [ "$LOCKSTEP" = 1 ] && export CALYPSO_PONT_LOCKSTEP=1
 VERB="${VERB:--v}"
 IQ="${IQ:-none}"
 AMP="${AMP:-30000}"

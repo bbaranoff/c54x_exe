@@ -224,3 +224,78 @@ des adresses :
   a_serv_demod (chemin SB) ou il prend des valeurs variees.
 - "le doublement d'horloge est benin car ecrase par la pose absolue" : faux,
   l'ordre reel est inverse sur le chemin FB (prim_fbsb.c:492).
+
+## Pourquoi le TOA vaut 1251 en vivant et pas en rejeu [2026-09-20]
+
+Rejeu (`--rejouer`) : le TOA du FB1 croit avec la distance de la FCCH dans la
+fenetre (6288, 7584, 8832, 9991, 11243 = 5 a 9 trames), ntdma est juste, la SB
+est decodee : 56 CRC OK sur 3000 trames, 56/56 avec le BSIC injecte, T3 valide
+et FN = trame du burst. Balayage BSIC 0/7/13/21/42/63 : `BSIC=(sb>>2)&0x3f`
+colle a chaque fois. La sortie depend de l'entree.
+
+Vivant (`run.sh`) : TOA = 1251 (ou 1247, 1296) a CHAQUE detection, quelle que
+soit la distance de la FCCH. Cause, dans qemu.log :
+
+    [trx] pont DSP : DSP en retard, tick saute (fn=5548, 4340 sauts, 1202 trames jouees)
+
+Le C54x emule coute 6,7 ms par trame (mesure : 500 trames de rejeu en 3,35 s)
+contre 4,615 ms de temps reel GSM. QEMU cadence le TDMA a l'horloge murale et
+saute la trame quand le DONE du DSP n'est pas arrive : 3 trames sur 4 perdues,
+la ROM ne recoit qu'une trame sur 4 a 6 (transferts DMA en paquets de 13 paires
+aux fn 252, 258, 264, 270, 276...). Son compteur de blocs FB n'avance donc que
+d'une trame environ entre la commande et la FCCH : TOA ~ 1250 + quelques
+echantillons, ntdma = 0, fn_offset faux, la SB visee tombe 1 a 2 trames apres
+la trame SCH, CRC KO a tous les coups.
+
+Correctif : `CALYPSO_PONT_LOCKSTEP=1` (calypso_trx.c, existait deja) - QEMU
+n'avance la trame que quand le DSP a fini la precedente. `run.sh` l'exporte
+par defaut en montage dsp (`LOCKSTEP=0` pour revenir a l'horloge murale).
+Mesure en pas-a-pas : plus aucun saut (trames=1953 a fn=1951), TOA = 11239 a
+11243 (ntdma=8, delay=10, comme en rejeu), et dans osmocon.log :
+
+    SB1 (1089343:1): TOA=   24, Power= -52dBm, Angle= -152Hz
+    => SB 0x001001a8: BSIC=42 fn=3826(2/ 4/ 1) qbits=4
+
+BSIC 42 = celui de la cellule synthetique, TOA 24 pour un attendu de 23 : la
+ROM a decode une vraie SB sur le chemin vivant, ARM reel + DSP reel.
+
+## Les SB « delirantes » : une page R lue a zero [2026-09-20]
+
+Symptome (osmocon.log) :
+
+    SB1 (1649571:1): TOA=    0, Power=-138dBm, Angle=    0Hz
+    => SB 0x00000000: BSIC=0 fn=52(0/ 0/ 1) qbits=4908
+
+Le mot SB vaut 0, TOA 0, puissance -138 dBm (a_serv_demod a zero aussi) : l'ARM
+a lu une page R que la ROM venait de remettre a zero en 0xb446 (init de tache,
+LES DEUX pages) et sur laquelle aucun resultat n'etait encore ecrit.
+`l1s_sbdet_resp` ne teste que B_SCH_CRC (bit 8) : 0x0000 passe pour un CRC OK
+et BSIC=0 / FN=52 sont pris pour argent comptant. Le firmware se cale alors sur
+un FN faux, lit les bursts normaux n'importe ou et le mobile jette tout
+(`Dropping frame with 210 bit errors` : ~46 % d'erreurs sur 456 bits, du hasard).
+Vu dans qemu.log comme `page0 0100->0000` suivi d'une lecture ARM de la page 0.
+
+Deux populations de CRC OK, a distinguer par le mot lui-meme :
+
+    sb = 0, TOA = 0, PM = -138 dBm    -> page vide, faux positif
+    sb != 0, TOA ~ 23, PM ~ -52 dBm   -> vraie SB (BSIC 42 ici)
+
+En rejeu le faux positif n'existe pas : l'ARM rejoue lit a la fin de la trame,
+apres l'ecriture du DSP. Il n'apparait qu'avec l'ARM QEMU, dont la lecture peut
+tomber entre la remise a zero et le resultat, ou sur l'autre page R quand les
+bascules r_page (ARM) et page du DSP se sont desynchronisees par des trames
+sautees. Le pas-a-pas reduit le second cas ; le premier reste a mesurer.
+
+Le mobile apres une SB acceptee : avec `PONT=0` la cellule synthetique n'a que
+FCCH, SCH et bursts factices ; les trames BCCH decodees sont donc du bruit
+(`Dropping frame with N bit errors`, N ~ 190-224) meme quand la SB est vraie.
+Pour aller au-dela il faut le BTS via pont.py (`PONT=1`) ou des bursts BCCH
+(SI1-4) dans cellule.c.
+
+## Etat du banc ISA [2026-09-20]
+
+`make isa_test && ./isa_test tools/isa_tests.txt` : 208 exemples SPRU172C,
+139 ok, 69 FAIL, 22 non assembles. Une partie des FAIL vient d'attendus mal
+extraits du PDF (ex. `LD *AR4+, A` attend un AR5 qui n'intervient pas), le
+reste sont de vrais ecarts (RETF, RPTB, SUBC, MVDP/MVPD, NEG/RND/SFTA sur les
+drapeaux). Aucun n'empeche le decodage SB observe ci-dessus.
