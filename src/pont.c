@@ -35,6 +35,7 @@
 #include "pont.h"
 #include "gmsk.h"
 #include "cellule.h"
+#include "hw/arm/calypso/calypso_debug.h"
 
 extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c : provenance du TOA */
 extern uint32_t g_c54x_exe_fn;          /* main.c: value returned by calypso_trx_get_fn() */
@@ -108,8 +109,8 @@ static void trace_armer(void)
     static bool fait;
     if (fait) return;
     fait = true;
-    const char *e = getenv("PONT_TRACE_FB");
-    const char *r = getenv("PONT_TRACE_PC");
+    const char *e = calypso_getenv("PONT_TRACE_FB");
+    const char *r = calypso_getenv("PONT_TRACE_PC");
     if (e && *e) { g_trace_reste = atol(e); g_trace_f = fopen("/tmp/c54x-pont/trace-fb.txt", "w"); }
     if (r && *r) {
         char *fin = NULL; g_trace_pc_lo = (uint32_t)strtoul(r, &fin, 0);
@@ -207,7 +208,7 @@ static void pcc_armer(void)
 {
     if (g_pcc_k >= 0) return;
     g_pcc_k = 0;
-    const char *e = getenv("PONT_PC_COUNT");
+    const char *e = calypso_getenv("PONT_PC_COUNT");
     while (e && *e && g_pcc_k < 16) {
         char *fin = NULL; long v = strtol(e, &fin, 0);
         if (fin == e) break;
@@ -218,7 +219,7 @@ static void pcc_armer(void)
 /* PONT_DUMP_DATA=addr:n,addr:n : DARAM words printed along with the profile. */
 static void dump_publier(C54xState *dsp)
 {
-    const char *e = getenv("PONT_DUMP_DATA");
+    const char *e = calypso_getenv("PONT_DUMP_DATA");
     while (e && *e) {
         char *fin = NULL; long a = strtol(e, &fin, 0); long n = 8;
         if (fin == e) break;
@@ -244,7 +245,7 @@ static int c54x_run_profile(C54xState *dsp, int budget)
     while (fait < budget && !dsp->idle && dsp->running) {
         int n = budget - fait < PROFIL_SEAU ? budget - fait : PROFIL_SEAU;
         static long minfn = -1;
-        if (minfn < 0) { const char *e = getenv("PONT_TRACE_MINFN"); minfn = (e && *e) ? atol(e) : 0; }
+        if (minfn < 0) { const char *e = calypso_getenv("PONT_TRACE_MINFN"); minfn = (e && *e) ? atol(e) : 0; }
         if (g_trace_reste > 0 && !g_trace_ouverte && g_trace_pc_hi && (long)g_c54x_exe_fn >= minfn &&
             (dsp->pc & 0xffff) >= g_trace_pc_lo && (dsp->pc & 0xffff) <= g_trace_pc_hi && g_trace_f) {
             g_trace_ouverte = true;
@@ -348,11 +349,11 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
          * QEMU now says in TICK.b bit 16 whether the ARM armed it.
          * PONT_IRQ_TRAME=1 restores the interrupt on every tick (A/B). */
         static int irq_chaque = -1;
-        if (irq_chaque < 0) { const char *e = getenv("PONT_IRQ_TRAME"); irq_chaque = (e && *e == '1') ? 1 : 0; }
+        if (irq_chaque < 0) { const char *e = calypso_getenv("PONT_IRQ_TRAME"); irq_chaque = (e && *e == '1') ? 1 : 0; }
         if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (irq_chaque || g_tick_irq_trame)) {
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         }
-        if (getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
+        if (calypso_getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
             printf("  [irq] fn=%u APRES vec28 : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x\n",
                    g_c54x_exe_fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr);
         if (g_inj.actif) {
@@ -626,11 +627,11 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
             iq_synthese(iq_mode, amp, fn, iq);
         }
         static int irqdbg = -1; static unsigned irqdbg_n;
-        if (irqdbg < 0) irqdbg = getenv("PONT_IRQ_DEBUG") ? 1 : 0;
+        if (irqdbg < 0) irqdbg = calypso_getenv("PONT_IRQ_DEBUG") ? 1 : 0;
         bool dbg = irqdbg && fn > 5000 && irqdbg_n < 12;
         if (dbg) printf("  [irq] fn=%u AVANT rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x PMST=%04x SP=%04x\n",
                         fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr, dsp->pmst, dsp->sp);
-        { static int dj = -1; if (dj < 0) dj = getenv("PONT_DEBUG_INJ") ? 1 : 0;
+        { static int dj = -1; if (dj < 0) dj = calypso_getenv("PONT_DEBUG_INJ") ? 1 : 0;
           int md0 = dsp->api_ram ? (dsp->api_ram[4] & 0xff) : 0, md1 = dsp->api_ram ? (dsp->api_ram[0x18] & 0xff) : 0;
           if (dj && (calypso_rhea_dma_one_shot() || md0 == 6 || md1 == 6 || (fn >= 300 && fn <= 312)))
               printf("  [inj] fn=%u p51=%u AVANT : type=%c n_iq=%d dma armee=%d one_shot=%d task_md=%d/%d rif=%d mots idle=%d pc=%04x"
@@ -640,7 +641,7 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
                      dsp->api_ram[0x14], dsp->api_ram[0x15], dsp->api_ram[0x16], dsp->api_ram[0x17], dsp->api_ram[0x18], dsp->api_ram[0x14+15], dsp->api_ram[0x14+16],
                      dsp->api_ram[0xd4], dsp->api_ram[0xd4+37], dsp->api_ram[0xd4+36]); }
         calypso_bsp_rx_burst(0, fn, iq, n_iq);
-        { static int dj2 = -1; if (dj2 < 0) dj2 = getenv("PONT_DEBUG_INJ") ? 1 : 0;
+        { static int dj2 = -1; if (dj2 < 0) dj2 = calypso_getenv("PONT_DEBUG_INJ") ? 1 : 0;
           if (dj2 && fn >= 300 && fn <= 312)
               printf("  [inj] fn=%u APRES : rif=%d mots idle=%d IFR=%04x\n", fn, calypso_rif_level(), dsp->idle, dsp->ifr); }
         if (dbg) { printf("  [irq] fn=%u APRES rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x SP=%04x\n",
@@ -689,7 +690,7 @@ static const char *hacks_actifs(void)
         {"CALYPSO_FIXES","FIXES",0},
     };
     for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
-        const char *v = getenv(t[i].env); if (!v || !*v) continue;
+        const char *v = calypso_getenv(t[i].env); if (!v || !*v) continue;
         int on = 0; long n = atol(v);
         switch (t[i].mode) { case 0: on = 1; break; case 1: on = (*v=='1'); break; case 2: on = (*v=='0'); break;
                              case 3: on = (n != 0); break; case 4: on = (n >= 0); break; }
@@ -701,7 +702,7 @@ static const char *hacks_actifs(void)
     /* a decoder fix turned off is a departure from native too */
     static const char *fx[] = {"NORM_SD","F7_DELAYED","MPY_MAC_LK","MACP_MACD","PAR_ST_DSTBAR","STL_STH_SHFT","XCCD","ADDSUB_XSHFT","FIRS_RPT","RPT_COUNT"};
     for (unsigned i = 0; i < sizeof fx / sizeof fx[0]; i++) {
-        char e[64]; snprintf(e, sizeof e, "CALYPSO_FIX_%s", fx[i]); const char *v = getenv(e);
+        char e[64]; snprintf(e, sizeof e, "CALYPSO_FIX_%s", fx[i]); const char *v = calypso_getenv(e);
         if (v && *v == '0') { size_t l = strlen(buf); snprintf(buf + l, sizeof buf - l, "%sFIX_%s=0", l ? "," : "", fx[i]); }
     }
     return buf[0] ? buf : "aucun";
@@ -714,7 +715,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     unsigned long injectes = 0;
     const uint16_t *a_sync = &api_ram[(API_NDB + NDB_A_SYNC_DEMOD) / 2];
     bool init_done = false;
-    if (g_verif_sonde < 0) g_verif_sonde = getenv("CALYPSO_BSP_VERIF") ? 1 : 0;
+    if (g_verif_sonde < 0) g_verif_sonde = calypso_getenv("CALYPSO_BSP_VERIF") ? 1 : 0;
     unsigned long trames = 0, irqs = 0, resets = 0;
     uint64_t insns_total = 0;
     const uint16_t *d_fb_det = &api_ram[(API_NDB + NDB_D_FB_DET) / 2];
@@ -789,12 +790,12 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                            m.a, wp, dac, d0, d1);
                 p0 = d0; p1 = d1; }
               if (first || dac != prev) { calypso_twl3025_set_afc_dac(dac); prev = dac; first = 0; } }
-            { static unsigned _to=0; if (getenv("PONT_TPU_DEBUG") && (_to<5 || _to%2000==0)) printf("  [tpu] fn=%u tpu_offset=%u\n", m.a, m.c); _to++; }
+            { static unsigned _to=0; if (calypso_getenv("PONT_TPU_DEBUG") && (_to<5 || _to%2000==0)) printf("  [tpu] fn=%u tpu_offset=%u\n", m.a, m.c); _to++; }
             trace_armer();
             if (g_trace_reste > 0 && g_trace_f && !g_trace_ouverte && !g_trace_pc_hi) {
                 /* wait for the first FB task posted by the ARM (W page 0 or 1) */
                 static int md_cible = -1;
-                if (md_cible < 0) { const char *e = getenv("PONT_TRACE_MD"); md_cible = (e && *e) ? atoi(e) : 5; }
+                if (md_cible < 0) { const char *e = calypso_getenv("PONT_TRACE_MD"); md_cible = (e && *e) ? atoi(e) : 5; }
                 if (api_ram[(API_W_PAGE(0) + WP_D_TASK_MD) / 2] == md_cible ||
                     api_ram[(API_W_PAGE(1) + WP_D_TASK_MD) / 2] == md_cible) {
                     g_trace_ouverte = true;
@@ -813,7 +814,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             /* PONT_RX_MODE : milieu (default, see jouer_trame) | apres | avant.
              * PONT_RX_APRES=0/1 is still honoured as avant/apres. */
             static int rx_mode = -1;   /* 0 = milieu, 1 = apres, 2 = avant */
-            if (rx_mode < 0) { const char *e = getenv("PONT_RX_MODE"); const char *a = getenv("PONT_RX_APRES");
+            if (rx_mode < 0) { const char *e = calypso_getenv("PONT_RX_MODE"); const char *a = calypso_getenv("PONT_RX_APRES");
                                rx_mode = (e && !strcmp(e, "apres")) ? 1 : (e && !strcmp(e, "avant")) ? 2
                                        : (a && *a == '1') ? 1 : (a && *a == '0') ? 2 : 0; }
             bool rx_apres = (rx_mode == 1);
@@ -881,14 +882,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * TOA is correct. -1, the default, disables canning. */
             {
                 static int can_toa = -2;
-                if (can_toa == -2) { const char *e = getenv("PONT_CAN_TOA"); can_toa = (e && *e) ? atoi(e) : -1; }
+                if (can_toa == -2) { const char *e = calypso_getenv("PONT_CAN_TOA"); can_toa = (e && *e) ? atoi(e) : -1; }
                 if (can_toa >= 0 && *d_fb_det)
                     api_ram[(API_NDB + NDB_A_SYNC_DEMOD) / 2 + D_TOA] = (uint16_t)can_toa;
                 /* SB: the firmware reads a_serv_demod[D_TOA] from the read page
                  * and expects about 4. PONT_CAN_SB_TOA=4 pins it on both R
                  * pages, which frames the SCH correctly. */
                 static int can_sb = -2;
-                if (can_sb == -2) { const char *e = getenv("PONT_CAN_SB_TOA"); can_sb = (e && *e) ? atoi(e) : -1; }
+                if (can_sb == -2) { const char *e = calypso_getenv("PONT_CAN_SB_TOA"); can_sb = (e && *e) ? atoi(e) : -1; }
                 if (can_sb >= 0) {
                     api_ram[(API_R_PAGE(0) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
                     api_ram[(API_R_PAGE(1) + RP_A_SERV_DEMOD) / 2 + D_TOA] = (uint16_t)can_sb;
@@ -901,7 +902,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                  * asks for SB (d_task_md=6 on a W page) and on an SCH frame,
                  * fn%51 in {1,11,21,31,41}. */
                 static int can_sb_full = -2, can_sb_bsic = 7;
-                if (can_sb_full == -2) { const char *e = getenv("PONT_CAN_SB"); can_sb_full = (e && *e) ? 1 : 0; if (e && *e) can_sb_bsic = atoi(e) & 0x3f; }
+                if (can_sb_full == -2) { const char *e = calypso_getenv("PONT_CAN_SB"); can_sb_full = (e && *e) ? 1 : 0; if (e && *e) can_sb_bsic = atoi(e) & 0x3f; }
                 if (can_sb_full) {
                     int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;   /* d_task_md on W pages 0 and 1 */
                     if (md0 == 6 || md1 == 6) {

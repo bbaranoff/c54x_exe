@@ -9,6 +9,7 @@
  * assembly follows osmo-bts sched_lchan_fcch_sch.c and scheduler.c.
  */
 #include <string.h>
+#include "hw/arm/calypso/calypso_debug.h"
 #include <stdlib.h>
 #include <osmocom/core/bits.h>
 #include <osmocom/coding/gsm0503_coding.h>
@@ -77,8 +78,8 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
              * compares two histories instead of two bursts.
              * REJEU_INVERSER_FN=<f> restricts the flip to frame f. */
             static int inv = -2; static long invfn = -2;
-            if (inv == -2) { const char *e = getenv("REJEU_INVERSER_BIT"); inv = e ? atoi(e) : -1; }
-            if (invfn == -2) { const char *e = getenv("REJEU_INVERSER_FN"); invfn = e ? atol(e) : -1; }
+            if (inv == -2) { const char *e = calypso_getenv("REJEU_INVERSER_BIT"); inv = e ? atoi(e) : -1; }
+            if (invfn == -2) { const char *e = calypso_getenv("REJEU_INVERSER_FN"); invfn = e ? atol(e) : -1; }
             if (inv >= 0 && inv < 78 && (invfn < 0 || (long)fn == invfn)) code[inv] ^= 1;
         }
         memset(bits, 0, 3);
@@ -95,9 +96,9 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
              * burst of the run is hit. REJEU_INVERSER_FN is shared with
              * REJEU_INVERSER_BIT, so only one thing is probed at a time. */
             static int im = -2; static long imfn = -2;
-            if (im == -2) { const char *e = getenv("REJEU_INVERSER_MIDAMBULE");
+            if (im == -2) { const char *e = calypso_getenv("REJEU_INVERSER_MIDAMBULE");
                             im = e ? atoi(e) : -1; }
-            if (imfn == -2) { const char *e = getenv("REJEU_INVERSER_FN");
+            if (imfn == -2) { const char *e = calypso_getenv("REJEU_INVERSER_FN");
                               imfn = e ? atol(e) : -1; }
             if (im >= 0 && im < 64 && (imfn < 0 || (long)fn == imfn)) bits[42 + im] ^= 1;
         }

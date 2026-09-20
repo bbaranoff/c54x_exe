@@ -27,6 +27,7 @@
 #include <osmocom/core/bits.h>
 #include <osmocom/core/crcgen.h>
 #include <osmocom/coding/gsm0503_parity.h>
+#include "hw/arm/calypso/calypso_debug.h"
 
 /* ---- API offsets in WORDS from the API base (= DSP 0x800) --------------- */
 #define W_PAGE(p)     ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 words */
@@ -66,7 +67,7 @@
 static double decalage_symb(void)
 {
     static double d = -1.0;
-    if (d < 0) { const char *e = getenv("REJEU_DECALAGE_SYMB");
+    if (d < 0) { const char *e = calypso_getenv("REJEU_DECALAGE_SYMB");
                  d = (e && *e) ? atof(e) : 0.5;
                  if (d < 0 || d >= 1.0) d = 0.5; }
     return d;
@@ -76,7 +77,7 @@ static double decalage_symb(void)
 static int marge_tete(void)
 {
     static int m = -1;
-    if (m < 0) { const char *e = getenv("REJEU_MARGE"); m = e ? atoi(e) : 21;
+    if (m < 0) { const char *e = calypso_getenv("REJEU_MARGE"); m = e ? atoi(e) : 21;
                  if (m < 0 || m > 41) m = 21;
                  cellule_marge_fin = 190 - 148 - m; }
     return m;
@@ -145,7 +146,7 @@ static unsigned long hit_7d1c, hit_7d1d, hit_7d1e, hit_81e4;
  * distinct opcodes executed inside the SB demod with their pass count and one
  * witness PC: that gives a finite list to audit against SPRU172C instead of an
  * intuition. REJEU_OPCODES=1. */
-/* Environment flags read ONCE in rejouer(): getenv() inside the per-instruction
+/* Environment flags read ONCE in rejouer(): calypso_getenv() inside the per-instruction
  * loop was a linear scan of environ per emulated instruction. */
 static int env_div, env_softs_continu, env_firs, env_probe_t, env_decodeur;
 static uint16_t g_ad_avant;
@@ -221,12 +222,12 @@ static void fbdet_cmd(int unused);
 static void fbdet_resp(int attempt);
 static void sbdet_cmd(int attempt);
 
-/* getenv("X") alone is TRUE even for X=0, so a line written
+/* calypso_getenv("X") alone is TRUE even for X=0, so a line written
  * `REJEU_SCH_PARTOUT=0 REJEU_SB_FORCE=0` enabled every hack instead of cutting
  * them. Here "0", "", "non", "no" and "off" are false. */
 static int drapeau_env(const char *nom)
 {
-    const char *e = getenv(nom);
+    const char *e = calypso_getenv(nom);
     if (!e || !*e) return 0;
     if (e[0] == '0' && e[1] == 0) return 0;
     if (!strcmp(e, "non") || !strcmp(e, "no") || !strcmp(e, "off")) return 0;
@@ -344,7 +345,7 @@ static void fbdet_resp(int attempt)
                  * softs, identical range from frame to frame, and CRC OKs all returning
                  * the same word tens of frames apart. Stepping back one frame aligns the
                  * CONSUMED frame with the SCH. REJEU_SB_DECALAGE=<n> (default -1). */
-                { static int d = -2; if (d == -2) { const char *e = getenv("REJEU_SB_DECALAGE");
+                { static int d = -2; if (d == -2) { const char *e = calypso_getenv("REJEU_SB_DECALAGE");
                                                     d = e ? atoi(e) : -1; }
                   delay += d; if (delay < 0) delay = 0; }
                 if (trace) printf("    [force] SB vise fn=%u (p51=%u), delay=%d\n", f, f % 51, delay);
@@ -390,7 +391,7 @@ static void sbdet_resp(int attempt)
              * with the last delivered burst and look for the best alignment: a maximum
              * away from 0 means the burst is shifted; low everywhere means it is not
              * our burst at all. */
-            if (getenv("REJEU_FEED")) {
+            if (calypso_getenv("REJEU_FEED")) {
                 uint16_t ad = calypso_bsp_get_daram_addr();
                 int nl = g_livre_niq;
                 int best = 0, bestn = -1, n0 = 0;
@@ -419,7 +420,7 @@ static void sbdet_resp(int attempt)
             /* [2026-09-19] FIRS reads its input at 0x2a8e..0x2a9a (zone 0x2a00) while
              * the BSP drops the burst at 0x0cce. Is that intermediate zone filled, and
              * does it carry our burst? */
-            if (getenv("REJEU_ZONE2A")) {
+            if (calypso_getenv("REJEU_ZONE2A")) {
                 uint16_t ad = calypso_bsp_get_daram_addr();
                 int nz0 = 0, nz2 = 0;
                 for (int k = 0; k < 296; k++) {
@@ -435,7 +436,7 @@ static void sbdet_resp(int attempt)
                        dsp->data[0x2a8e], dsp->data[0x2a8f], dsp->data[0x2a90],
                        dsp->data[0x2a91], dsp->data[0x2a92], dsp->data[0x2a93]);
             }
-            if (getenv("REJEU_PROFIL")) {
+            if (calypso_getenv("REJEU_PROFIL")) {
                 unsigned char att78[78];
                 int ri = g_n_reels ? g_reel_pour_fn[g_sb_cmd_fn & 63] : -1;
                 if (ri >= 0) memcpy(att78, g_reels_code[ri], 78);   /* real ground truth */
@@ -490,7 +491,7 @@ static void sbdet_resp(int attempt)
                        g_sb_cmd_fn, g_sb_cmd_fn % 51, dsp->data[0x2f06],
                        acc[0], acc[1], map[best], map[best] + 39);
             }
-            if (getenv("REJEU_DUMP_SOUPLES")) {
+            if (calypso_getenv("REJEU_DUMP_SOUPLES")) {
                 printf("    [souples] fn=%u pic=%u :", fn_cur, dsp->data[0x2f06]);
                 for (int k = 0; k < 78; k++) printf(" %04x", dsp->data[0x2c72 + k]);
                 printf("\n");
@@ -680,17 +681,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             const char *iq_mode, int amp, int bsic, int verbeux)
 {
     dsp = d; api = api_ram; trace = verbeux;
-    env_div = getenv("REJEU_DIV") != NULL;
-    env_softs_continu = getenv("REJEU_SOFTS_CONTINU") != NULL;
-    env_firs = getenv("REJEU_FIRS") != NULL;
+    env_div = calypso_getenv("REJEU_DIV") != NULL;
+    env_softs_continu = calypso_getenv("REJEU_SOFTS_CONTINU") != NULL;
+    env_firs = calypso_getenv("REJEU_FIRS") != NULL;
     env_probe_t = drapeau_env("REJEU_PROBE_T");
-    env_decodeur = getenv("REJEU_DECODEUR") != NULL;
+    env_decodeur = calypso_getenv("REJEU_DECODEUR") != NULL;
     w_page = r_page = r_page_used = 0; fn_cur = 0; afc_dac = -700;
     fb_mode = 0; afc_retries = fb0_retries = 0; n_sched = 0; verdict = 0;
     n_fb_ok = n_sb_try = n_sb_crcfail = n_crc_ok = n_sb_vraies = 0;
     n_err_dsp = n_err8 = 0;
     g_bsic_injecte = bsic;
-    { const char *r = getenv("REJEU_SCH_REEL");
+    { const char *r = calypso_getenv("REJEU_SCH_REEL");
       if (r && *r && reels_charger(r) == 0) g_bsic_injecte = g_reels_bsic[0]; }
     memset(&fb, 0, sizeof fb);
 
@@ -742,7 +743,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             g_livre_fn = fn_cur; g_livre_n = n_iq;
             g_ad_avant = calypso_bsp_get_daram_addr();
             { static int da = -1; static unsigned nd;
-              if (da < 0) da = getenv("REJEU_ADR") ? 1 : 0;
+              if (da < 0) da = calypso_getenv("REJEU_ADR") ? 1 : 0;
               if (da && nd < 14) { nd++;
                   printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
                          fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
@@ -783,7 +784,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
              * model at arm time (CALYPSO_RHEA_DMA_ARM_SKIP): the burst position
              * inside the frame can only move within the 8.25 idle symbols. */
             { static int pleine = -1;
-              if (pleine < 0) { const char *e = getenv("REJEU_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
+              if (pleine < 0) { const char *e = calypso_getenv("REJEU_TRAME_PLEINE"); pleine = (e && *e == '0') ? 0 : 1; }
               bool fenetre_sb = calypso_rhea_dma_one_shot();
               if (pleine && !(g_livre_type == 'S' && fenetre_sb)) {
                   if (g_livre_type == 'S') {          /* drop the window margins: burst only */
@@ -800,7 +801,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 int m = marge_tete();
                 unsigned r = g_reel_i % g_n_reels;
                 { static double gn = -1;
-                  if (gn < 0) { const char *e = getenv("REJEU_REEL_GAIN"); gn = e ? atof(e) : 1.0;
+                  if (gn < 0) { const char *e = calypso_getenv("REJEU_REEL_GAIN"); gn = e ? atof(e) : 1.0;
                                 if (gn <= 0) gn = 1.0; }
                   if (gn == 1.0) memcpy(iq + 2 * m, g_reels[r], 296 * sizeof(int16_t));
                   else for (int q = 0; q < 296; q++) {
@@ -820,8 +821,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
              * the scheduling change a coded-bit flip causes. REJEU_PERTURBER_ECH=<n>
              * adds a delta to complex sample n of the delivered buffer. */
             { static int pe = -2; static long pf = -2;
-              if (pe == -2) { const char *e = getenv("REJEU_PERTURBER_ECH"); pe = e ? atoi(e) : -1; }
-              if (pf == -2) { const char *e = getenv("REJEU_PERTURBER_FN");  pf = e ? atol(e) : -1; }
+              if (pe == -2) { const char *e = calypso_getenv("REJEU_PERTURBER_ECH"); pe = e ? atoi(e) : -1; }
+              if (pf == -2) { const char *e = calypso_getenv("REJEU_PERTURBER_FN");  pf = e ? atol(e) : -1; }
               if (pe >= 0 && 2 * pe + 1 < n_iq && (pf < 0 || (long)fn_cur == pf)) {
                   iq[2 * pe]     = (int16_t)(iq[2 * pe]     + 3000);
                   iq[2 * pe + 1] = (int16_t)(iq[2 * pe + 1] - 3000);
@@ -835,7 +836,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
              *   conj    : Q negated (conjugate)
              * REJEU_FEED_XFORM=derot-|derot+|swap|conj|none (default none). */
             { static const char *xf = NULL; static int init = 0;
-              if (!init) { xf = getenv("REJEU_FEED_XFORM"); init = 1; }
+              if (!init) { xf = calypso_getenv("REJEU_FEED_XFORM"); init = 1; }
               if (xf && *xf && strcmp(xf, "none")) {
                   int ns = n_iq / 2;
                   if (!strcmp(xf, "swap")) {
@@ -855,7 +856,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
               } }
             memcpy(g_livre_iq, iq, (size_t)n_iq * sizeof(int16_t)); g_livre_niq = n_iq;
             { static int da = -1; static unsigned nd;
-              if (da < 0) da = getenv("REJEU_ADR") ? 1 : 0;
+              if (da < 0) da = calypso_getenv("REJEU_ADR") ? 1 : 0;
               if (da && nd < 14) { nd++;
                   printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
                          fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
@@ -870,7 +871,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
              * chunks, the DSP running a slice after each, so every page gets its
              * own completion. */
             { static long pages_mots = -1;
-              if (pages_mots < 0) { const char *e = getenv("REJEU_PAGES"); pages_mots = (e && *e) ? atol(e) : 0; }
+              if (pages_mots < 0) { const char *e = calypso_getenv("REJEU_PAGES"); pages_mots = (e && *e) ? atol(e) : 0; }
               if (pages_mots > 0) {
                   int pos = 0, npage = 0;
                   while (pos < n_iq) {
@@ -907,7 +908,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 }
                 if (!calypso_rhea_dma_pump(dsp)) break;
             }
-            if (getenv("CALYPSO_BSP_VERIF")) {
+            if (calypso_getenv("CALYPSO_BSP_VERIF")) {
                 static int dit;
                 if (!dit) { dit = 1;
                     printf("  [mem] api est-il un alias de data[0x0800] ? %s\n",
@@ -923,7 +924,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                            id == vn ? "   VALIDE" : "   <<< ECRITURE FAUSSE"); }
             }
             { static int vv = -1; static unsigned nv;
-              if (vv < 0) vv = getenv("REJEU_VIE") ? 1 : 0;
+              if (vv < 0) vv = calypso_getenv("REJEU_VIE") ? 1 : 0;
               if (vv && g_livre_type == 'S' && nv < 6) { nv++;
                   uint16_t ad = calypso_bsp_get_daram_addr();
                   printf("  [vie] fn=%-4u adresse APRES l'appel : 0x%04x (avant : 0x%04x)\n",
@@ -958,7 +959,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   g_vie_fn = fn_cur; g_vie_ad = ad; } }
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
         }
-        { static int tf = -1; if (tf < 0) tf = getenv("REJEU_TRACE_FB") ? 1 : 0;
+        { static int tf = -1; if (tf < 0) tf = calypso_getenv("REJEU_TRACE_FB") ? 1 : 0;
           if (tf && fn_cur < 60)
               printf("  [fb] fn=%-3u apres pompe : 0x3fb4=%04x 0x3fb3=%04x d_fb_det=%u fb_mode=%u task_md=%u/%u idle=%d insn_trame=%u  sync=%04x %04x %04x %04x\n",
                      fn_cur, dsp->data[0x3fb4], dsp->data[0x3fb3], api[NDB_FB_DET], api[NDB_FB_MODE],
@@ -1045,7 +1046,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * data[0x084b..0x084f] (page 1). Record the PC of each write.
                  * REJEU_QUI_ASCH=1. */
                 { static int qa = -1; static uint16_t sh[10]; static int ini; static unsigned nqa;
-                  if (qa < 0) qa = getenv("REJEU_QUI_ASCH") ? 1 : 0;
+                  if (qa < 0) qa = calypso_getenv("REJEU_QUI_ASCH") ? 1 : 0;
                   if (qa) {
                       static const uint16_t adr[10] = {0x0837,0x0838,0x0839,0x083a,0x083b,
                                                        0x084b,0x084c,0x084d,0x084e,0x084f};
@@ -1081,7 +1082,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * transition to that value. REJEU_QUI_A=1. */
                 { static int qA = -1; static int64_t aprec; static unsigned long parpc[0x10000];
                   static unsigned long tA; static int armA;
-                  if (qA < 0) qA = getenv("REJEU_QUI_A") ? 1 : 0;
+                  if (qA < 0) qA = calypso_getenv("REJEU_QUI_A") ? 1 : 0;
                   if (qA) {
                       int64_t a40 = dsp->a & 0xffffffffffLL;
                       int pin = (a40 == 0x0040000000LL || a40 == 0xffc0000000LL);
@@ -1108,7 +1109,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 { static int qc = -1; static uint16_t sh2[64]; static int ini3;
                   static unsigned long par_pc_butee[0x10000], par_pc_autre[0x10000];
                   static unsigned long tot2;
-                  if (qc < 0) qc = getenv("REJEU_QUI2AC0") ? 1 : 0;
+                  if (qc < 0) qc = calypso_getenv("REJEU_QUI2AC0") ? 1 : 0;
                   if (qc) {
                       if (!ini3) { for (int k=0;k<64;k++) sh2[k]=dsp->data[0x2ac0+k]; ini3=1; }
                       for (int k=0;k<64;k++) {
@@ -1141,7 +1142,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * REJEU_CMP2A=1: at the first pass at 0x84a0 (correlator entry, so the
                  * copy is done) on an SCH frame. */
                 { static int cm = -1; static int fait2;
-                  if (cm < 0) cm = getenv("REJEU_CMP2A") ? 1 : 0;
+                  if (cm < 0) cm = calypso_getenv("REJEU_CMP2A") ? 1 : 0;
                   if (cm && fait2 < 3 && pc == 0x84a0 && g_n_reels &&
                       g_reel_pour_fn[g_sb_cmd_fn & 63] >= 0) {
                       fait2++;
@@ -1181,7 +1182,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * examined: the burst arrives exact at 0x0cce and buffer 0x2a80 is
                  * filled by 0x81d0..0x81da. What does that loop READ? */
                 { static int rc = -1; static unsigned n;
-                  if (rc < 0) rc = getenv("REJEU_RECOPIE") ? 1 : 0;
+                  if (rc < 0) rc = calypso_getenv("REJEU_RECOPIE") ? 1 : 0;
                   if (rc && pc >= 0x81c8 && pc <= 0x81e0) {
                       /* Does AR5 sweep a table, or stay on two cells? */
                       static unsigned lo = 0xffff, hi = 0, vus[64], nv;
@@ -1221,7 +1222,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * conditions, or clobbering? Print the program words of the area and the
                  * registers on entry, once. REJEU_DUMP832=1. */
                 { static int d8 = -1; static int fait;
-                  if (d8 < 0) d8 = getenv("REJEU_DUMP832") ? 1 : 0;
+                  if (d8 < 0) d8 = calypso_getenv("REJEU_DUMP832") ? 1 : 0;
                   if (d8 && !fait && pc == 0x8320) {
                       fait = 1;
                       printf("  [832] programme 0x8318-0x8340 (alias OVLY compris) :\n");
@@ -1243,7 +1244,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * per-pass count decides. Count each PC in 0x84a0..0x84d0 during the
                  * FIRST decode, then print. REJEU_BLOC=1. */
                 { static int bl = -1; static unsigned long cnt[0x40]; static int fini, vu_dec;
-                  if (bl < 0) bl = getenv("REJEU_BLOC") ? 1 : 0;
+                  if (bl < 0) bl = calypso_getenv("REJEU_BLOC") ? 1 : 0;
                   if (bl && !fini) {
                       if (pc >= 0x84a0 && pc <= 0x84df) cnt[pc - 0x84a0]++;
                       if (pc == 0x9841) {
@@ -1265,9 +1266,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  *   all / none       -> these are not per-bit softs
                  * REJEU_IMPULSION=<k> REJEU_IMPULSION_VAL=<v>. */
                 { static int ik = -2, iv;
-                  if (ik == -2) { const char *e = getenv("REJEU_IMPULSION");
+                  if (ik == -2) { const char *e = calypso_getenv("REJEU_IMPULSION");
                                   ik = e ? atoi(e) : -1;
-                                  const char *w = getenv("REJEU_IMPULSION_VAL");
+                                  const char *w = calypso_getenv("REJEU_IMPULSION_VAL");
                                   iv = w ? atoi(w) : 20000; }
                   if (ik >= 0 && ik < 78 && g_dans_sb)
                       dsp->data[0x2c72 + ik] = (uint16_t)(int16_t)iv; }
@@ -1277,7 +1278,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * nothing downstream changes, it is not consumed and the equalizer is
                  * aligned on nothing. REJEU_FORCER_PIC=<n>. */
                 { static int fp = -2;
-                  if (fp == -2) { const char *e = getenv("REJEU_FORCER_PIC"); fp = e ? atoi(e) : -1; }
+                  if (fp == -2) { const char *e = calypso_getenv("REJEU_FORCER_PIC"); fp = e ? atoi(e) : -1; }
                   if (fp >= 0 && g_dans_sb) dsp->data[0x2f06] = (uint16_t)fp; }
                 /* [2026-09-19] PERFECT SOFTS. The fault lies somewhere between the
                  * correlator (sound) and the soft-bit write. Split the space in two:
@@ -1293,9 +1294,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * effect" means nothing. */
                 if (pc == 0x9841 || (env_softs_continu && g_dans_sb)) {
                     static int amp = -2, pol = -1;
-                    if (amp == -2) { const char *e = getenv("REJEU_SOFTS_PARFAITS");
+                    if (amp == -2) { const char *e = calypso_getenv("REJEU_SOFTS_PARFAITS");
                                      amp = e ? atoi(e) : -1;
-                                     const char *q = getenv("REJEU_SOFTS_POLARITE");
+                                     const char *q = calypso_getenv("REJEU_SOFTS_POLARITE");
                                      pol = q ? atoi(q) : 0; }
                     if (amp > 0) {
                         int ri = g_n_reels ? g_reel_pour_fn[g_sb_cmd_fn & 63] : -1;
@@ -1306,13 +1307,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                          * none = as is; swap = the two halves of 39 exchanged;
                          * rev = reversed order; entrelace = even/odd separated. */
                         static const char *perm; static int perm_lu;
-                        if (!perm_lu) { perm = getenv("REJEU_SOFTS_PERM"); perm_lu = 1; }
+                        if (!perm_lu) { perm = calypso_getenv("REJEU_SOFTS_PERM"); perm_lu = 1; }
                         /* [2026-09-20] The decoder reads its 78 softs at 0x2a00
                          * (ROM 0x984a `stm #0x2a00,AR1`; packing 0x7e65-0x7e7a),
                          * NOT at 0x2c72. Writing 0x2c72 tested nothing.
                          * REJEU_SOFTS_ADDR overrides (default 0x2a00). */
                         static long sa = -1;
-                        if (sa < 0) { const char *e = getenv("REJEU_SOFTS_ADDR");
+                        if (sa < 0) { const char *e = calypso_getenv("REJEU_SOFTS_ADDR");
                                       sa = (e && *e) ? strtol(e, NULL, 0) : 0x2a00; }
                         for (int k = 0; k < 78; k++) {
                             int j = k;
@@ -1335,7 +1336,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * in what order, and where the filling stops. REJEU_QUI2A=1. */
                 { static int q2 = -1; static uint16_t shadow[0x30]; static int init2;
                   static unsigned nq;
-                  if (q2 < 0) q2 = getenv("REJEU_QUI2A") ? 1 : 0;
+                  if (q2 < 0) q2 = calypso_getenv("REJEU_QUI2A") ? 1 : 0;
                   if (q2) {
                       if (!init2) { for (int k = 0; k < 0x30; k++) shadow[k] = dsp->data[0x2a80 + k]; init2 = 1; }
                       for (int k = 0; k < 0x30; k++) {
@@ -1368,7 +1369,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                  * whether the burst is destroyed before or after the SB reads it.
                  * REJEU_CHRONO=<fn>. */
                 { static long cf = -2; static uint16_t sh2[380]; static int ini2; static unsigned nl;
-                  if (cf == -2) { const char *e = getenv("REJEU_CHRONO"); cf = e ? atol(e) : -1; }
+                  if (cf == -2) { const char *e = calypso_getenv("REJEU_CHRONO"); cf = e ? atol(e) : -1; }
                   if (cf >= 0 && (long)fn_cur == cf) {
                       if (!ini2) { for (int k=0;k<380;k++) sh2[k]=dsp->data[0x0cce + k]; ini2=1;
                                    printf("  [chrono] trame %ld\n", cf); }
@@ -1387,7 +1388,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   } }
                 { static int qc = -1; static uint16_t sh[380]; static int ini;
                   static unsigned long par_pc[0x10000], tot; static unsigned long nfr[64];
-                  if (qc < 0) qc = getenv("REJEU_QUI_CCE") ? 1 : 0;
+                  if (qc < 0) qc = calypso_getenv("REJEU_QUI_CCE") ? 1 : 0;
                   if (qc) {
                       if (!ini) { for (int k=0;k<380;k++) sh[k]=dsp->data[0x0cce + k]; ini=1; }
                       unsigned chg = 0;
@@ -1410,7 +1411,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       }
                   } }
                 { static int vv2 = -1; static unsigned nv2;
-                  if (vv2 < 0) vv2 = getenv("REJEU_VIE") ? 1 : 0;
+                  if (vv2 < 0) vv2 = calypso_getenv("REJEU_VIE") ? 1 : 0;
                   if (vv2 && pc == 0x84a0 && g_vie_ad && nv2 < 5) { nv2++;
                       int ex = 0;
                       for (int k = 0; k < 296; k++)
@@ -1418,7 +1419,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       printf("  [vie] fn=%-4u ENTREE CORRELATEUR (depot de fn=%u) : %d/296 identiques\n",
                              fn_cur, g_vie_fn, ex); } }
                 { static int db = -1; static FILE *fb;
-                  if (db < 0) { const char *e = getenv("REJEU_DUMP_BUF");
+                  if (db < 0) { const char *e = calypso_getenv("REJEU_DUMP_BUF");
                                 db = e ? 1 : 0; if (db) fb = fopen(e, "wb"); }
                   if (db && fb && pc == 0x84a0 && g_n_reels) {
                       int ri = g_reel_pour_fn[g_sb_cmd_fn & 63];
@@ -1439,7 +1440,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       }
                   } }
                 { static int q4 = -1; static unsigned n4; static int64_t avant; static int arme;
-                  if (q4 < 0) q4 = getenv("REJEU_Q4485") ? 1 : 0;
+                  if (q4 < 0) q4 = calypso_getenv("REJEU_Q4485") ? 1 : 0;
                   if (q4) {
                       if (arme) { arme = 0;
                           printf("        -> A apres = %010llx\n",
@@ -1454,7 +1455,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       }
                   } }
                 { static int tb = -1; static unsigned ntb;
-                  if (tb < 0) tb = getenv("REJEU_TRACE_B") ? 1 : 0;
+                  if (tb < 0) tb = calypso_getenv("REJEU_TRACE_B") ? 1 : 0;
                   if (tb && ntb < 70 && pc >= 0x8470 && pc <= 0x84a0) {
                       ntb++;
                       printf("    [B] pc=%04x op=%04x A=%010llx B=%010llx AR2=%04x->%04x AR3=%04x->%04x\n",
@@ -2045,7 +2046,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                        * A flat agreement whatever the peak clears the correlator. */
                       /* fingerprint of the 78 soft bits, to diff two runs */
                       { static int nemq; static long cible = -2;
-                        if (cible == -2) { const char *e = getenv("REJEU_EMPREINTE_FN");
+                        if (cible == -2) { const char *e = calypso_getenv("REJEU_EMPREINTE_FN");
                                            cible = e ? atol(e) : -1; }
                         /* [2026-09-18] THE FRAME MUST BE LOCKED. Taking whichever
                          * occurrence comes first does not compare the same thing across
@@ -2066,7 +2067,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                             printf("\n"); nemq++;
                         } }
                       { static int nemp; static long cible2 = -2;
-                        if (cible2 == -2) { const char *e = getenv("REJEU_EMPREINTE_FN");
+                        if (cible2 == -2) { const char *e = calypso_getenv("REJEU_EMPREINTE_FN");
                                             cible2 = e ? atol(e) : -1; }
                         if (nemp < 3 && (cible2 < 0 || (long)g_livre_fn == cible2)) {
                             printf("    [empreinte] fn=%u (trame courante %u%s) pic=%u :", g_livre_fn, fn_cur,
@@ -2462,7 +2463,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x7cb0) % 8 == 7) ? "\n" : "");
         printf("\n");
     }
-    { const char *e = getenv("REJEU_OPCODES_TOUS");
+    { const char *e = calypso_getenv("REJEU_OPCODES_TOUS");
       if (e && *e) { FILE *fo = fopen(e, "w");
           if (fo) { for (unsigned o = 0; o < 65536; o++) if (g_op_tous[o]) fprintf(fo, "%04x %lu\n", o, g_op_tous[o]);
                     fclose(fo); printf("  opcodes executes ecrits dans %s\n", e); } } }
@@ -2495,8 +2496,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
    * the synthetic fixture, by the real capture in replay and by the bridge: three
    * inputs with nothing in common. A constant word looks like a CONSTANT, not a
    * computation. Sweep data space AND program space for the pattern. */
-  if (getenv("REJEU_CHERCHER_MOT")) {
-      unsigned long v = strtoul(getenv("REJEU_CHERCHER_MOT"), NULL, 0);
+  if (calypso_getenv("REJEU_CHERCHER_MOT")) {
+      unsigned long v = strtoul(calypso_getenv("REJEU_CHERCHER_MOT"), NULL, 0);
       uint16_t lo = (uint16_t)(v & 0xffff), hi = (uint16_t)(v >> 16);
       printf("  recherche de 0x%04x%04x (lo=%04x hi=%04x) :\n", hi, lo, lo, hi);
       int n = 0;
@@ -2515,7 +2516,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
       printf("    occurrences isolees en data : lo(%04x) x%d, hi(%04x) x%d\n", lo, nlo, hi, nhi);
       if (!n) printf("    motif absent de la memoire : le mot est CALCULE, pas stocke\n");
   }
-  if (getenv("REJEU_OPCODES")) {
+  if (calypso_getenv("REJEU_OPCODES")) {
       printf("  %lu decodages\n", g_n_dec);
       printf("  opcodes de l'EGALISEUR (0x8400-0x84ff), par decodage :\n");
       for (int rang = 0; rang < 16; rang++) {
