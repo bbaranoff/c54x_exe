@@ -392,3 +392,77 @@ vivant reste vers 10 ms (24-38 k instructions de ROM par trame, ~200 ns
 chacune, le corps de c54x_run porte encore des dizaines de comparaisons de
 sonde par instruction) : lockstep toujours necessaire, et la file profonde
 compense le retard sur le BTS.
+
+## Bursts BCCH dans la cellule, ordre ARM/DSP dans la trame [2026-09-21]
+
+cellule.c porte maintenant les bursts normaux du TN0 : SI1-4 sur le bloc BCCH
+(p51 2..5, TC = (fn/51)%8 : SI1 0/4, SI2 1/5, SI3 2/6, SI4 3/7), paging vide
+sur les CCCH (6..9, 12..15, 16..19), factice ailleurs. Codage libosmocoding
+(gsm0503_xcch_encode) + assemblage sched_lchan_xcch.c d'osmo-bts, TSC = BCC,
+identite MCC 001 MNC 01 LAC 1 CI 6001 ARFCN 514 (CELLULE_MCC/MNC/LAC/CI/ARFCN).
+Verifie hors DSP : les 4 bursts reassembles redonnent les 23 octets exacts
+(xcch_decode). Fenetre NB de la ROM : 151 echantillons (ALGTH 604), burst a
+3 de marge (tpu_window.c L1_NB_MARGIN_Q), trame remplie a la longueur exacte.
+
+Premier symptome cote firmware : `EMPTY`, `BURST ID 2!=1`, `3!=2`, `2!=0`
+avec un decalage qui derive. Cause : dans le tick QEMU, le TICK partait au DSP
+et l'IRQ trame a l'ARM en meme temps ; le DSP (un autre processus) ecrivait
+la page R du burst N pendant que l1_sync(N) lisait encore le burst N-2, avec
+un retard variable selon la charge de l'ARM. Ordre silicium mesure par sonde
+(PONT_NB_DEBUG, [pgA]/[pgG]/[pgB]) : la ROM copie d_task_d/d_burst_d dans la
+page R et arme la fenetre dans son ISR de trame, AVANT que l'ARM ne change
+d_dsp_page ; le resultat est ecrit apres le burst, dans la meme trame.
+Correctif (qosmo calypso_trx.c + calypso_inth.c, c54x_exe pont.c) : TICK en
+deux phases. QEMU envoie TICK(N) (bit 17 CALYPSO_PONT_TICK_DEUX_PHASES), le
+DSP joue l'ISR jusqu'a l'armement de la fenetre et repond DONE|PHASE_A ; QEMU
+leve alors l'IRQ trame, attend la fin de l1_sync(N) (ecriture IRQ_CTRL bit 0
+par irq() apres le handler, comptee par l'INTH quand IRQ_NUM valait 4), puis
+envoie PONT_GO ; le DSP livre le burst et finit la trame. Cible EOI
+cumulative, resynchronisee sur timeout (256 x 290 us). Mesure : 0 EMPTY,
+0 BURST ID sur des dizaines de blocs, aucun timeout. CALYPSO_PONT_ARM_FIRST=0
+revient a l'ancien ordre.
+
+Ce qui reste, et ce qui a ete mesure sur la demodulation NB de la ROM :
+
+- Les bits demodules sont dans data[0x2be2..+148] (sonde [scan] : signe
+  positif = 1, 146-147/148 sur un bon burst, le dernier bit toujours faux :
+  la ROM lit 150 echantillons). Par bloc, 1 a 3 bursts sortent parfaits, les
+  autres a ~45 % d'erreurs avec un motif CONSTANT sur la sequence
+  d'apprentissage ; TOA=3 SNR>0 quand c'est bon, TOA=5 SNR=0 quand c'est
+  mauvais. Deterministe : meme burst, meme resultat d'un run a l'autre.
+- Le meme burst repete aux 4 positions donne 4 resultats differents : ce
+  n'est pas le contenu seul, l'etat interne de la ROM entre en jeu.
+- Sans effet sur le partage bon/mauvais : amplitude (30000 -> 6000), moyenne
+  nulle forcee, phase porteuse (0/22.5/45), TSC 0..7 dans le burst (2 = BCC
+  attendu), marge 0..7 (seule 3 donne quelque chose), fenetre exacte.
+- Instant d'echantillonnage : SEUL 0.5 symbole marche (balayage 2.3 a 4.7
+  par pas de 0.1 : 3.4 et 3.6 echouent sur tous les bursts) ; MSK pur
+  (diagonales exactes) echoue partout. Un egaliseur se degraderait en pente
+  douce ; ici c'est un fil du rasoir.
+- SNR rapporte par la ROM sur un burst PARFAIT : 91 a 600 (la SB rend
+  16384). L'estimateur voit un gros residu meme quand les decisions sont
+  justes.
+- Le tampon DARAM (AAD 0x0cce, 302 mots) est identique aux echantillons
+  livres juste apres le DMA ; la ROM y recrit ensuite les mots 1..29.
+- La capture reelle (IQ=reelle, BSIC 48) : TOA stable 1-2, SNR 500-660,
+  ~200 erreurs sur 456 a chaque bloc, le motif 0x9999 dans a_cd aussi.
+- Coeur C54x : histogramme d'opcodes de la phase B (PONT_NB_HIST) : 12-14 k
+  instructions par burst, 39 k sur le 4e (decodage). La ROM bascule OVM 20
+  fois par burst, SAT 214 fois, NEG 720, SFTA 193, NORM 217. Le coeur
+  n'implementait ni OVA/OVB ni la saturation OVM (le mot n'apparaissait
+  qu'en commentaire) : ajoute en post-instruction (calypso_c54x.c,
+  CALYPSO_C54X_OVM=0 pour revenir), plus RND src/dst, MIN/MAX (C=1 si egaux),
+  SFTA (C = bit 32-SHIFT), SUBB (retenue inversee), retenue de ADD/SUB
+  src,SHIFT,dst, OV efface une fois teste. Banc ISA : 139 -> 147 ok. Aucun
+  effet sur le partage bon/mauvais des bursts.
+
+Le decodage SB en rejeu (56 CRC OK / ~300 SCH) a le meme profil : une
+demodulation qui reussit sur une fraction des bursts selon le contenu. Cause
+commune probable, dans le coeur emule ou dans la forme du signal 1 ech/symbole
+que la ROM attend de la chaine analogique ; a chercher sur le chemin SB, mieux
+instrumente (rejouer.c), plutot que sur le NB.
+
+Rejouer : `IQ=cell PONT_NB_DEBUG=1 ./run.sh` puis `grep -a '\[scan\]\|\[nb\]\|\[pg'
+/tmp/c54x-pont/dsp.log` ; balayages CELLULE_NB_DEC=auto|x, CELLULE_NB_PHASE,
+CELLULE_TSC=auto, PONT_NB_MARGE=auto, CELLULE_NB_FINE=1, CELLULE_NB_REPEAT=k,
+CELLULE_NB_AMP, CELLULE_NB_ZERO_DC, CELLULE_NB_MSK ; PONT_NB_HIST=<dir>.

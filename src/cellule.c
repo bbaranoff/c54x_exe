@@ -9,6 +9,7 @@
  * assembly follows osmo-bts sched_lchan_fcch_sch.c and scheduler.c.
  */
 #include <string.h>
+#include <math.h>
 #include "hw/arm/calypso/calypso_debug.h"
 #include <stdlib.h>
 #include <osmocom/core/bits.h>
@@ -31,6 +32,181 @@ static const uint8_t factice[148] = {
 };
 
 int cellule_sch_partout;      /* diagnostic: emit SCH on every non-FCCH frame */
+
+/* ---- BCCH / CCCH : normal bursts of the synthetic cell [2026-09-20] ----
+ *
+ * Downlink TN0 of a combined CCCH+SDCCH/4 cell (44.018 6.3.1.3, 45.002 clause
+ * 7 table 3): BCCH norm on p51 2..5, CCCH on 6..9, 12..15, 16..19, SDCCH/4
+ * elsewhere (left as dummy bursts). The BCCH block of 51-multiframe TC =
+ * (fn / 51) % 8 carries SI1 (TC 0, 4), SI2 (1, 5), SI3 (2, 6), SI4 (3, 7);
+ * the CCCH blocks carry an empty PAGING REQUEST TYPE 1. Coding is the one of
+ * osmo-bts sched_lchan_xcch.c: gsm0503_xcch_encode() (Fire CRC, r=1/2
+ * convolutional code, 4-burst diagonal interleaving) then 3 tail, 57 data,
+ * hl, 26-bit training sequence BCC of the BSIC (45.002 5.2.3 set 1), hu, 57
+ * data, 3 tail. The ROM demodulates with the TSC the ARM hands it in
+ * dsp_load_rx_task(ALLC_DSP_TASK, burst_id, tsc), decodes the four bursts and
+ * leaves 23 octets in a_cd[3..] with the Fire result in a_cd[0]; prim_rx_nb.c
+ * copies them into an L1CTL_DATA_IND and mobile's rr reads the SI.
+ *
+ * Identity: MCC 001 MNC 01 LAC 1 CI 6001, ARFCN 514, the bench network of
+ * /etc/osmocom (run_si.sh checks the decoded LAI against it). Override with
+ * CELLULE_MCC / CELLULE_MNC / CELLULE_LAC / CELLULE_CI / CELLULE_ARFCN. */
+#include <arpa/inet.h>
+#include <osmocom/gsm/gsm48.h>
+#include <osmocom/gsm/gsm48_ie.h>
+#include <osmocom/gsm/gsm23003.h>
+#include <osmocom/gsm/protocol/gsm_04_08.h>
+#include <osmocom/gsm/sysinfo.h>
+
+static const uint8_t train_nb[8][26] = {   /* 45.002 table 5.2.3a */
+    { 0,0,1,0,0,1,0,1,1,1,0,0,0,0,1,0,0,0,1,0,0,1,0,1,1,1 },
+    { 0,0,1,0,1,1,0,1,1,1,0,1,1,1,1,0,0,0,1,0,1,1,0,1,1,1 },
+    { 0,1,0,0,0,0,1,1,1,0,1,1,1,0,1,0,0,1,0,0,0,0,1,1,1,0 },
+    { 0,1,0,0,0,1,1,1,1,0,1,1,0,1,0,0,0,1,0,0,0,1,1,1,1,0 },
+    { 0,0,0,1,1,0,1,0,1,1,1,0,0,1,0,0,0,0,0,1,1,0,1,0,1,1 },
+    { 0,1,0,0,1,1,1,0,1,0,1,1,0,0,0,0,0,1,0,0,1,1,1,0,1,0 },
+    { 1,0,1,0,0,1,1,1,1,1,0,1,1,0,0,0,1,0,1,0,0,1,1,1,1,1 },
+    { 1,1,1,0,1,1,1,1,0,0,0,1,0,0,1,0,1,1,1,0,1,1,1,1,0,0 },
+};
+
+int cellule_marge_nb = -1;    /* head margin of a normal burst; < 0: bare 148 samples */
+int cellule_tsc_force = -1;   /* training sequence of the normal bursts; < 0: BCC of the BSIC */
+double cellule_dec_nb = -1;
+double cellule_phase_nb = 0;  /* carrier phase (deg) of the last normal burst (probe) */  /* sampling instant used for the last normal burst (probe) */
+int cellule_fenetre_nb = 0;   /* one-shot NB window length in samples (0: 148 + 2 x margin) */
+int cellule_sans_bcch;        /* 1: dummy bursts on BCCH/CCCH, the old cell */
+
+static int env_int(const char *nom, int defaut)
+{
+    const char *e = calypso_getenv(nom);
+    return (e && *e) ? (int)strtol(e, NULL, 0) : defaut;
+}
+
+/* The 23 octets of the L2 frame carried by BCCH block TC (0..7), or by a CCCH
+ * block (tc < 0). Buffers are static, the caller copies. */
+static const uint8_t *cellule_l2(int tc)
+{
+    static uint8_t si1[23], si2[23], si3[23], si4[23], pag[23];
+    static int pret;
+    if (!pret) {
+        pret = 1;
+        struct osmo_location_area_id lai = {
+            .plmn = { .mcc = (uint16_t)env_int("CELLULE_MCC", 1),
+                      .mnc = (uint16_t)env_int("CELLULE_MNC", 1), .mnc_3_digits = false },
+            .lac = (uint16_t)env_int("CELLULE_LAC", 1) };
+        uint16_t ci = (uint16_t)env_int("CELLULE_CI", 6001);
+        int arfcn = env_int("CELLULE_ARFCN", 514) & 0x3ff;
+        struct gsm48_rach_control rach = { .re = 1, .cell_bar = 0, .tx_integer = 9, .max_trans = 3,
+                                           .t2 = 0x00, .t3 = 0x00 };
+        struct gsm48_cell_sel_par csp = { .ms_txpwr_max_ccch = 0, .cell_resel_hyst = 2,
+                                          .rxlev_acc_min = 0, .neci = 1, .acs = 0 };
+        memset(si1, GSM_MACBLOCK_PADDING, 23); memset(si2, GSM_MACBLOCK_PADDING, 23);
+        memset(si3, GSM_MACBLOCK_PADDING, 23); memset(si4, GSM_MACBLOCK_PADDING, 23);
+        memset(pag, GSM_MACBLOCK_PADDING, 23);
+
+        /* SI1: cell channel description in variable bitmap format (44.018
+         * 10.5.2.13.7, the layout gsm48_decode_freq_list() reads): ORIG-ARFCN
+         * = our carrier, no further bit set. Rest octet 0x2b: L, no NCH; L,
+         * band indicator 1800. */
+        struct gsm48_system_information_type_1 *s1 = (void *)si1;
+        s1->header.l2_plen = (uint8_t)((21 << 2) | 1);
+        s1->header.rr_protocol_discriminator = GSM48_PDISC_RR;
+        s1->header.skip_indicator = 0;
+        s1->header.system_information = GSM48_MT_RR_SYSINFO_1;
+        memset(s1->cell_channel_description, 0, 16);
+        s1->cell_channel_description[0] = (uint8_t)(0x8e | ((arfcn >> 9) & 1));
+        s1->cell_channel_description[1] = (uint8_t)((arfcn >> 1) & 0xff);
+        s1->cell_channel_description[2] = (uint8_t)((arfcn & 1) << 7);
+        s1->rach_control = rach;
+        {   /* self-check: decode what we encoded */
+            static struct gsm_sysinfo_freq f[1024];
+            memset(f, 0, sizeof f);
+            gsm48_decode_freq_list(f, s1->cell_channel_description, 16, 0xce, 1);
+            int n = 0, ok = 0;
+            for (int i = 0; i < 1024; i++) if (f[i].mask) { n++; if (i == arfcn) ok = 1; }
+            if (!ok || n != 1)
+                printf("cellule : SI1 cell channel description FAUSSE (%d ARFCN decodes, %d attendu %s)\n",
+                       n, arfcn, ok ? "present" : "ABSENT");
+        }
+
+        /* SI2: no neighbour (bitmap 0 all clear), all NCC permitted */
+        struct gsm48_system_information_type_2 *s2 = (void *)si2;
+        s2->header.l2_plen = (uint8_t)((22 << 2) | 1);
+        s2->header.rr_protocol_discriminator = GSM48_PDISC_RR;
+        s2->header.skip_indicator = 0;
+        s2->header.system_information = GSM48_MT_RR_SYSINFO_2;
+        memset(s2->bcch_frequency_list, 0, 16);
+        s2->ncc_permitted = 0xff;
+        s2->rach_control = rach;
+
+        /* SI3: identity, combined CCCH, IMSI attach, no periodic LU. Rest
+         * octets 0x2b: every optional element absent (all L). */
+        struct gsm48_system_information_type_3 *s3 = (void *)si3;
+        s3->header.l2_plen = (uint8_t)((18 << 2) | 1);
+        s3->header.rr_protocol_discriminator = GSM48_PDISC_RR;
+        s3->header.skip_indicator = 0;
+        s3->header.system_information = GSM48_MT_RR_SYSINFO_3;
+        s3->cell_identity = htons(ci);
+        gsm48_generate_lai2(&s3->lai, &lai);
+        s3->control_channel_desc.ccch_conf = 1;        /* 1 CCCH combined with SDCCH/4 */
+        s3->control_channel_desc.bs_ag_blks_res = 1;
+        s3->control_channel_desc.att = 1;
+        s3->control_channel_desc.bs_pa_mfrms = 0;      /* 2 multiframes */
+        s3->control_channel_desc.t3212 = 0;
+        s3->cell_options.radio_link_timeout = 7;       /* 32 */
+        s3->cell_options.dtx = 2;
+        s3->cell_options.pwrc = 0;
+        s3->cell_sel_par = csp;
+        s3->rach_control = rach;
+
+        /* SI4: identity again, no CBCH; rest octets all L */
+        struct gsm48_system_information_type_4 *s4 = (void *)si4;
+        s4->header.l2_plen = (uint8_t)((12 << 2) | 1);
+        s4->header.rr_protocol_discriminator = GSM48_PDISC_RR;
+        s4->header.skip_indicator = 0;
+        s4->header.system_information = GSM48_MT_RR_SYSINFO_4;
+        gsm48_generate_lai2(&s4->lai, &lai);
+        s4->cell_sel_par = csp;
+        s4->rach_control = rach;
+
+        /* CCCH: PAGING REQUEST TYPE 1, page mode normal, no identity (the
+         * fill osmo-bts sends on an idle paging block) */
+        static const uint8_t vide[] = { 0x15, 0x06, 0x21, 0x00, 0x01, 0xf0 };
+        memcpy(pag, vide, sizeof vide);
+
+        printf("cellule : BCCH SI1-4 MCC=%03u MNC=%02u LAC=%u CI=%u ARFCN=%d, CCCH = paging vide\n",
+               lai.plmn.mcc, lai.plmn.mnc, lai.lac, ci, arfcn);
+    }
+    if (tc < 0) return pag;
+    switch (tc & 3) { case 0: return si1; case 1: return si2; case 2: return si3; default: return si4; }
+}
+
+/* Normal burst bid (0..3) of the block starting at fn0, or -1 if no block
+ * starts there. The four bursts of one block are cached. */
+static int cellule_nb(uint32_t fn0, int bid, uint8_t bsic, uint8_t bits[148])
+{
+    static uint32_t fn_cache = 0xffffffffu;
+    static ubit_t bursts[4 * 116];
+    if (fn0 != fn_cache) {
+        uint32_t p51 = fn0 % 51;
+        const uint8_t *l2;
+        if (p51 == 2)                                   l2 = cellule_l2((int)((fn0 / 51) % 8));
+        else if (p51 == 6 || p51 == 12 || p51 == 16)    l2 = cellule_l2(-1);
+        else return -1;
+        gsm0503_xcch_encode(bursts, l2);
+        fn_cache = fn0;
+    }
+    /* CELLULE_NB_REPEAT=<k>: burst k of the block in all four positions, to
+     * hand the ROM's decoder four bursts it is known to demodulate. */
+    { static int rep = -2; if (rep == -2) rep = env_int("CELLULE_NB_REPEAT", -1); if (rep >= 0 && rep < 4) bid = rep; }
+    const ubit_t *b = bursts + bid * 116;
+    memset(bits, 0, 3);
+    memcpy(bits + 3, b, 58);                    /* 57 data + hl */
+    memcpy(bits + 61, train_nb[cellule_tsc_force >= 0 ? cellule_tsc_force & 7 : bsic & 7], 26);
+    memcpy(bits + 87, b + 58, 58);              /* hu + 57 data */
+    memset(bits + 145, 0, 3);
+    return 0;
+}
 
 /* sb_info of 44.018 9.1.30 for frame fn, byte layout of osmo-bts
  * sched_lchan_fcch_sch.c. T3' = (T3 - 1) / 10: the SCH sits on T3 in
@@ -103,19 +279,106 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
             if (im >= 0 && im < 64 && (imfn < 0 || (long)fn == imfn)) bits[42 + im] ^= 1;
         }
         type = 'S';
+    } else if (!cellule_sans_bcch && p51 >= 2 && p51 <= 49 && p51 % 10 >= 2 &&
+               cellule_nb(fn - ((p51 % 10 - 2) & 3), (int)((p51 % 10 - 2) & 3), bsic, bits) == 0) {
+        type = (p51 <= 5) ? 'B' : 'C';
     } else {
         memcpy(bits, factice, 148);
         type = '.';
     }
+    /* CELLULE_NB_FINE=1 : burst position swept from 2.3 to 4.7 samples in 0.1
+     * steps by multiframe (head margin + sampling instant together) */
+    if (type == 'B' || type == 'C') {
+        static int fine = -2; if (fine == -2) fine = env_int("CELLULE_NB_FINE", 0);
+        if (fine && cellule_marge_nb >= 0) {
+            double total = 2.3 + 0.1 * (double)((fn / 51u) % 25u);
+            cellule_marge_nb = (int)total; decalage = total - (double)cellule_marge_nb;
+            cellule_dec_nb = decalage;
+        }
+    }
+    int m_tete = -1, m_fin = 0;
     if (type == 'S' && marge > 0) {
-        int mf = (cellule_marge_fin >= 0) ? cellule_marge_fin : marge;
-        memset(iq, 0, (size_t)marge * 2 * sizeof(int16_t));
-        gmsk_moduler(bits, 148, amp, 0.0, decalage, iq + 2 * marge);
-        memset(iq + 2 * (marge + 148), 0, (size_t)mf * 2 * sizeof(int16_t));
-        *n_iq = 2 * (148 + marge + mf);
+        m_tete = marge;
+        m_fin = (cellule_marge_fin >= 0) ? cellule_marge_fin : marge;
+    } else if ((type == 'B' || type == 'C') && cellule_marge_nb >= 0) {
+        /* the ROM takes 151 samples for an NB window (ALGTH 604): 3 + 148 */
+        /* exactly the window: a frame longer than the DMA window leaves
+         * samples in the RIF and the next burst starts on them */
+        m_tete = cellule_marge_nb;
+        m_fin = cellule_fenetre_nb > m_tete + 148 ? cellule_fenetre_nb - m_tete - 148 : 0;
+    }
+    /* CELLULE_NB_AMP=<n>: amplitude of the normal bursts alone (FCCH/SCH keep
+     * amp), to probe the ROM's fixed-point headroom on the NB path. */
+    if (type == 'B' || type == 'C') { static int nb_amp = -2; if (nb_amp == -2) nb_amp = env_int("CELLULE_NB_AMP", -1); if (nb_amp > 0) amp = nb_amp; }
+    /* CELLULE_NB_DEC=<x>|auto : sampling instant of the normal bursts alone
+     * (FCCH/SCH keep decalage); auto sweeps 0, 0.25, 0.5, 0.75 by multiframe */
+    if (type == 'B' || type == 'C') {
+        static int mode = -2; static double d = 0;
+        if (mode == -2) { const char *e = calypso_getenv("CELLULE_NB_DEC"); mode = 0;
+                          if (e && !strcmp(e, "auto")) mode = 2; else if (e && *e) { mode = 1; d = atof(e); } }
+        if (mode == 1) decalage = d; else if (mode == 2) decalage = 0.25 * (double)((fn / 51u) % 4u);
+        cellule_dec_nb = decalage;
+    }
+    /* CELLULE_NB_PHASE=<deg>|auto : carrier phase of the normal bursts (auto:
+     * 0, 22.5, 45, 67.5 degrees by multiframe). Samples exactly on the I/Q
+     * axes (decalage 0, phase 0) or exactly on the diagonals (decalage 0.5)
+     * are what a synthetic GMSK gives and what no radio ever gives. */
+    double phase0 = 0.0;
+    if (type == 'B' || type == 'C') {
+        static int pm = -2; static double pd = 0;
+        if (pm == -2) { const char *e = calypso_getenv("CELLULE_NB_PHASE"); pm = 0;
+                        if (e && !strcmp(e, "auto")) pm = 2; else if (e && *e) { pm = 1; pd = atof(e); } }
+        if (pm == 1) phase0 = pd * M_PI / 180.0; else if (pm == 2) phase0 = 22.5 * (double)((fn / 51u) % 4u) * M_PI / 180.0;
+        cellule_phase_nb = phase0 * 180.0 / M_PI;
+    }
+    /* CELLULE_NB_MSK=1 (experiment): pure MSK for the normal bursts, no
+     * Gaussian filter: the phase advances linearly by +-90 degrees per bit,
+     * so a sample taken at decalage 0.5 sits EXACTLY on a diagonal, with
+     * |I| = |Q|. Tests whether the ROM's NB demodulator hard-decides on the
+     * signs of I and Q (measured: only decalage 0.5 ever works, 0.4 and 0.6
+     * fail on every burst, an equaliser would degrade smoothly). */
+    static int nb_msk = -2; if (nb_msk == -2) nb_msk = env_int("CELLULE_NB_MSK", 0);
+    if (nb_msk && (type == 'B' || type == 'C')) {
+        int16_t *o = iq + 2 * (m_tete >= 0 ? m_tete : 0);
+        double ph = phase0; int prev = 1;
+        for (int k = 0; k < 148; k++) {
+            int d = (bits[k] & 1) ^ prev; prev = bits[k] & 1;
+            double al = 1.0 - 2.0 * d;
+            double pk = ph + al * (M_PI / 2.0) * decalage;     /* phase at the sampling instant */
+            o[2*k] = (int16_t)lrint(amp * cos(pk)); o[2*k+1] = (int16_t)lrint(amp * sin(pk));
+            ph += al * (M_PI / 2.0);
+        }
+        if (m_tete >= 0) {
+            memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));
+            memset(iq + 2 * (m_tete + 148), 0, (size_t)m_fin * 2 * sizeof(int16_t));
+            *n_iq = 2 * (148 + m_tete + m_fin);
+        } else *n_iq = 2 * 148;
+        return type;
+    }
+    int16_t *burst_iq = iq;
+    if (m_tete >= 0) {
+        memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));
+        gmsk_moduler(bits, 148, amp, phase0, decalage, iq + 2 * m_tete);
+        memset(iq + 2 * (m_tete + 148), 0, (size_t)m_fin * 2 * sizeof(int16_t));
+        *n_iq = 2 * (148 + m_tete + m_fin);
+        burst_iq = iq + 2 * m_tete;
     } else {
-        gmsk_moduler(bits, 148, amp, 0.0, decalage, iq);
+        gmsk_moduler(bits, 148, amp, phase0, decalage, iq);
         *n_iq = 2 * 148;
+    }
+    /* [2026-09-21] CELLULE_NB_ZERO_DC=1 (experiment): remove the mean of the
+     * 148 samples of a normal burst. Measured: the ROM demodulates a normal
+     * burst perfectly when the data-induced mean of its samples is below ~7 %
+     * of the amplitude and loses it entirely above ~10 % (16 bursts of SI1-4,
+     * no exception), the SCH being immune. */
+    if (type == 'B' || type == 'C') {
+        static int zdc = -2; if (zdc == -2) zdc = env_int("CELLULE_NB_ZERO_DC", 0);
+        if (zdc) {
+            long si = 0, sq = 0;
+            for (int k = 0; k < 148; k++) { si += burst_iq[2*k]; sq += burst_iq[2*k+1]; }
+            int mi = (int)(si / 148), mq = (int)(sq / 148);
+            for (int k = 0; k < 148; k++) { burst_iq[2*k] = (int16_t)(burst_iq[2*k] - mi); burst_iq[2*k+1] = (int16_t)(burst_iq[2*k+1] - mq); }
+        }
     }
     return type;
 }
@@ -196,4 +459,13 @@ int cellule_train_sb(int i) { return (i >= 0 && i < 64) ? train_sb[i] : -1; }
 void cellule_factice(int amp, double decalage, int16_t *iq)
 {
     gmsk_moduler(factice, 148, amp, 0.0, decalage, iq);
+}
+
+/* The 148 bits of the TN0 burst of frame fn as cellule_burst() sends them, for
+ * probes that look for them inside the DSP memory. 0 if it is a normal burst. */
+int cellule_bits_attendus(uint32_t fn, uint8_t bsic, uint8_t bits[148])
+{
+    uint32_t p51 = fn % 51;
+    if (cellule_sans_bcch || p51 < 2 || p51 > 49 || p51 % 10 < 2) return -1;
+    return cellule_nb(fn - ((p51 % 10 - 2) & 3), (int)((p51 % 10 - 2) & 3), bsic, bits);
 }

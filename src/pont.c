@@ -306,14 +306,23 @@ static void profil_publier(void)
  * after a short slice of the frame, once the ISR has armed; the bridge now does
  * the same: budget/8, inject (synthetic cell and UDP bursts), then the rest. */
 static bool g_tick_irq_trame = true;   /* TICK.b bit 16 : l'ARM a arme l'interruption trame du DSP */
-static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned long *injectes; bool udp; } g_inj;
+static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned long *injectes; bool udp; char dernier_type; int dernier_n_iq; } g_inj;
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn, unsigned long *injectes);
 
-static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32_t *insns)
+uint16_t prog_fetch(C54xState *s, uint16_t pc);
+static int16_t g_dernier_iq[2 * 256]; static int g_dernier_n_iq;
+static uint16_t g_daram_apres_dma[384]; static uint16_t g_daram_aad;
+/* phase : 0 = whole frame ; 1 = frame ISR only, up to the arming of the RX
+ * window (then DONE|PHASE_A and wait for PONT_GO) ; 2 = burst delivery and
+ * the rest of the frame. See CALYPSO_PONT_TICK_DEUX_PHASES. */
+static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32_t *insns, int phase)
 {
     uint32_t drapeaux = 0;
     uint32_t avant = dsp->insn_count;
+    static int fait_a;          /* phase A instructions, charged to phase B's budget */
+    static bool etait_idle_a;   /* idle state at the frame start, for PONT_DONE_API_IRQ */
 
+    if (phase == 2) goto phase_b;
     calypso_dma_tick(dsp);
 
     if (dsp->running && !*init_done) {
@@ -326,7 +335,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         }
     }
     if (dsp->running) {
-        bool etait_idle = dsp->idle;
+        etait_idle_a = dsp->idle;
         /* Wake on a level-held or pending interrupt. The core only vectors a
          * pending interrupt (IFR&IMR, INTM=0) on the next instruction
          * (c54x_irq_level_check, CALYPSO_C54X_IRQ_LEVEL=1), and an idle DSP
@@ -356,7 +365,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         if (calypso_getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
             printf("  [irq] fn=%u APRES vec28 : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x\n",
                    g_c54x_exe_fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr);
-        if (g_inj.actif) {
+        if (g_inj.actif || phase == 1) {
             int fait = 0;
             if (!dsp->idle) fait = c54x_run_profile(dsp, (int)budget / 8);   /* the ISR arms DMA2 */
             /* [2026-09-20] Deliver only once the receive window is armed. On a
@@ -370,16 +379,50 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
              * armed or the DSP idles, half the budget at most. */
             while (!dsp->idle && !calypso_rhea_dma_rx_armed() && fait < (int)budget / 2)
                 fait += c54x_run_profile(dsp, 256);
+            fait_a = fait;
+            if (phase == 1) {
+                /* ISR played, R page written, window armed: the ARM may run
+                 * l1_sync now. The burst comes with PONT_GO. */
+                if (dsp->idle)    drapeaux |= PONT_DONE_IDLE;
+                if (dsp->running) drapeaux |= PONT_DONE_RUNNING;
+                if (*init_done)   drapeaux |= PONT_DONE_INIT;
+                *insns = dsp->insn_count - avant;
+                return drapeaux | PONT_DONE_PHASE_A;
+            }
+phase_b:
+            fait = fait_a;
             if (g_inj.udp) calypso_bsp_service(g_inj.fn);
             if (g_inj.iq_mode) injecter_burst(dsp, g_inj.iq_mode, g_inj.amp, g_inj.fn, g_inj.injectes);
+            { uint16_t aad = calypso_rhea_dma_get_daram();
+              memcpy(g_daram_apres_dma, &dsp->data[aad], sizeof g_daram_apres_dma); g_daram_aad = aad; }
             if (dsp->idle && calypso_rhea_dma_irq_level() && (dsp->imr & (1u << 14)) && !(dsp->ifr & (1u << 14)))
                 c54x_interrupt_ex(dsp, 30, 14);
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
+            /* PONT_NB_HIST=<dir>: opcode histogram of phase B (the burst's demod)
+             * for the first 12 normal bursts, one file per frame, to name the
+             * instructions the NB path leans on and cross them with the ISA
+             * scorecard (isa_test). Single-stepped: prog_fetch() before each. */
+            static const char *hist_dir = NULL; static int hist_init = 0; static unsigned hist_n;
+            if (!hist_init) { hist_init = 1; hist_dir = calypso_getenv("PONT_NB_HIST"); }
+            if (hist_dir && hist_n < 12 && g_inj.dernier_type == 'B' && !dsp->idle && dsp->api_ram &&
+                (dsp->api_ram[API_R_PAGE(0) / 2] == 24 || dsp->api_ram[API_R_PAGE(1) / 2] == 24)) {
+                static unsigned hist[65536]; memset(hist, 0, sizeof hist);
+                int reste = (int)budget - fait, k = 0;
+                while (!dsp->idle && k < reste) {
+                    uint16_t w = prog_fetch(dsp, (uint16_t)dsp->pc);
+                    hist[w]++;
+                    c54x_run(dsp, 1); k++;
+                }
+                char nom[256]; snprintf(nom, sizeof nom, "%s/hist_%u.txt", hist_dir, g_inj.fn);
+                FILE *f = fopen(nom, "w");
+                if (f) { for (unsigned w = 0; w < 65536; w++) if (hist[w]) fprintf(f, "%04x %u\n", w, hist[w]); fclose(f); }
+                hist_n++;
+            }
             if (!dsp->idle) c54x_run_profile(dsp, (int)budget - fait);
         } else if (!dsp->idle) {
             c54x_run_profile(dsp, (int)budget);
         }
-        if (!etait_idle && dsp->idle) {
+        if (!etait_idle_a && dsp->idle) {
             drapeaux |= PONT_DONE_API_IRQ;
         }
     }
@@ -629,11 +672,31 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
              * the DSP has its one-shot SB window armed; otherwise it is a frame of
              * the FB stream like any other (same rule as rejouer.c) */
             int marge_eff = calypso_rhea_dma_one_shot() ? marge : 0;
+            /* [2026-09-20] BCCH/CCCH normal bursts: framed like the BSP stream
+             * assembler (bsp_livrer_trame), 3 silent samples ahead when the
+             * one-shot window is the 151-sample NB one (tpu_window.c
+             * L1_NB_MARGIN_Q), bare 148 samples in the continuous FB stream. */
+            { int nwin = calypso_rhea_dma_one_shot() ? calypso_rhea_dma_get_len_words() / 2 : 0;
+              /* PONT_NB_MARGE=<n> overrides the 3-sample head margin of a normal
+               * burst; "auto" sweeps 0..7 by 51-multiframe (the [scan] probe
+               * prints it), one run to find where the ROM's TSC search lands. */
+              static int mnb = -2; static int mauto = 0;
+              if (mnb == -2) { const char *e = calypso_getenv("PONT_NB_MARGE"); mnb = 3;
+                               if (e && !strcmp(e, "auto")) mauto = 1; else if (e && *e) mnb = atoi(e); }
+              int m_nb = mauto ? (int)((fn / 51u) % 8u) : mnb;
+              /* CELLULE_TSC=<k>|auto : training sequence written in the bursts
+               * (the ARM still tells the ROM tsc = BCC); auto sweeps 0..7 */
+              static int tsc = -2; static int tauto = 0;
+              if (tsc == -2) { const char *e = calypso_getenv("CELLULE_TSC"); tsc = -1;
+                               if (e && !strcmp(e, "auto")) tauto = 1; else if (e && *e) tsc = atoi(e) & 7; }
+              cellule_tsc_force = tauto ? (int)((fn / 51u) % 8u) : tsc;
+              cellule_marge_nb = (nwin >= 150 && nwin < 190) ? m_nb : (nwin >= 190 ? marge : -1);
+              cellule_fenetre_nb = nwin; }
             char t = cellule_burst(fn, (uint8_t)bsic, amp, dec, marge_eff, iq, &n_iq);
-            t_dbg = t;
-            static unsigned nS, nF;
-            if (t == 'S') nS++; else if (t == 'F') nF++;
-            if ((nS + nF) && (nS + nF) % 500 == 1) printf("pont : bursts injectes FCCH=%u SCH=%u (fn=%u)\n", nF, nS, fn);
+            t_dbg = t; g_inj.dernier_type = t; g_inj.dernier_n_iq = n_iq;
+            static unsigned nS, nF, nB, nC, tot;
+            if (t == 'S') nS++; else if (t == 'F') nF++; else if (t == 'B') nB++; else if (t == 'C') nC++;
+            if (++tot % 5000 == 1) printf("pont : bursts injectes FCCH=%u SCH=%u BCCH=%u CCCH=%u (fn=%u)\n", nF, nS, nB, nC, fn);
         } else {
             iq_synthese(iq_mode, amp, fn, iq);
         }
@@ -651,6 +714,7 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
                      dsp->api_ram[0], dsp->api_ram[1], dsp->api_ram[2], dsp->api_ram[3], dsp->api_ram[4], dsp->api_ram[15], dsp->api_ram[16],
                      dsp->api_ram[0x14], dsp->api_ram[0x15], dsp->api_ram[0x16], dsp->api_ram[0x17], dsp->api_ram[0x18], dsp->api_ram[0x14+15], dsp->api_ram[0x14+16],
                      dsp->api_ram[0xd4], dsp->api_ram[0xd4+37], dsp->api_ram[0xd4+36]); }
+        memcpy(g_dernier_iq, iq, (size_t)n_iq * sizeof(int16_t)); g_dernier_n_iq = n_iq;
         calypso_bsp_rx_burst(0, fn, iq, n_iq);
         { static int dj2 = -1; if (dj2 < 0) dj2 = calypso_getenv("PONT_DEBUG_INJ") ? 1 : 0;
           if (dj2 && fn >= 300 && fn <= 312)
@@ -719,6 +783,106 @@ static const char *hacks_actifs(void)
     return buf[0] ? buf : "aucun";
 }
 
+/* PONT_NB_DEBUG=1: pages as seen at one instant of the frame (A = end of the
+ * ROM's frame ISR, G = PONT_GO received i.e. after the ARM's l1_sync, B = end
+ * of the frame). Who reads which W page and who writes which R page, when. */
+static void sonde_pages(const char *quand, uint32_t fn, C54xState *dsp, const uint16_t *api_ram)
+{
+    static int on = -1; static unsigned n;
+    if (on < 0) on = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
+    if (!on || n >= 240) return;
+    const uint16_t *w0 = &api_ram[API_W_PAGE(0) / 2], *w1 = &api_ram[API_W_PAGE(1) / 2];
+    const uint16_t *r0 = &api_ram[API_R_PAGE(0) / 2], *r1 = &api_ram[API_R_PAGE(1) / 2];
+    if (!(w0[0] == 24 || w1[0] == 24 || r0[0] == 24 || r1[0] == 24)) return;
+    n++;
+    printf("  [pg%s] fn=%u p51=%u W0=%u/%u W1=%u/%u R0=%u/%u R1=%u/%u dsp_page=%04x idle=%d pc=%04x IFR=%04x IMR=%04x INTM=%d irq_trame=%d dma_armee=%d\n",
+           quand, fn, fn % 51u, w0[0], w0[1], w1[0], w1[1], r0[0], r0[1], r1[0], r1[1],
+           api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2], dsp->idle, dsp->pc & 0xffff, dsp->ifr, dsp->imr,
+           !!(dsp->st1 & 0x800), g_tick_irq_trame, calypso_rhea_dma_rx_armed());
+}
+
+/* PONT_NB_DEBUG=1, after a normal burst: look for the demodulated bits in the
+ * DSP data memory. Two templates, the 116 data bits (57+hl, hu+57) and the
+ * whole 148-bit burst, matched against the sign of each int16 word (soft bits,
+ * both polarities) and against hard 0/1 words. Reports the best run. */
+static uint32_t g_insn_a, g_insn_b;
+static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
+{
+    static int on = -1; static unsigned n;
+    if (on < 0) on = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
+    if (!on || n >= 40) return;
+    uint8_t bits[148];
+    if (cellule_bits_attendus(fn, bsic, bits) < 0) return;
+    uint8_t t116[116]; memcpy(t116, bits + 3, 58); memcpy(t116 + 58, bits + 87, 58);
+    const struct { const uint8_t *t; int len; const char *nom; } tpl[2] = { { t116, 116, "116 data" }, { bits, 148, "148 burst" } };
+    n++;
+    printf("  [scan] fn=%u p51=%u burst %d :", fn, fn % 51u, (int)((fn % 51u % 10 - 2) & 3));
+    for (int k = 0; k < 2; k++) {
+        int best[3] = {0,0,0}; unsigned bad[3] = {0,0,0};
+        for (unsigned a = 0x60; a + tpl[k].len < C54X_DATA_SIZE; a++) {
+            int m0 = 0, m1 = 0, m2 = 0;
+            for (int i = 0; i < tpl[k].len; i++) {
+                int16_t v = (int16_t)dsp->data[a + i];
+                int neg = v < 0, one = (v == 1), zero = (v == 0);
+                if ((v < 0) == (tpl[k].t[i] != 0)) m0++;
+                if ((v > 0) == (tpl[k].t[i] != 0)) m1++;
+                if ((one && tpl[k].t[i]) || (zero && !tpl[k].t[i])) m2++;
+            }
+            if (m0 > best[0]) { best[0] = m0; bad[0] = a; }
+            if (m1 > best[1]) { best[1] = m1; bad[1] = a; }
+            if (m2 > best[2]) { best[2] = m2; bad[2] = a; }
+        }
+        printf("  %s: neg=1 %d/%d @%04x  pos=1 %d/%d @%04x  hard %d/%d @%04x |", tpl[k].nom,
+               best[0], tpl[k].len, bad[0], best[1], tpl[k].len, bad[1], best[2], tpl[k].len, bad[2]);
+    }
+    /* the ROM's burst buffer at 0x2be2 (found by this scan: 146/148 on good
+     * bursts): mismatch map, one char per bit, '.' ok, 'x' wrong, '|' at the
+     * data/TSC boundaries */
+    { char map[160]; int k = 0, err = 0;
+      for (int i = 0; i < 148; i++) {
+          if (i == 3 || i == 61 || i == 87 || i == 145) map[k++] = '|';
+          int16_t v = (int16_t)dsp->data[0x2be2 + i];
+          int ok = ((v > 0) == (bits[i] != 0)); if (!ok) err++;
+          map[k++] = ok ? '.' : 'x';
+      }
+      map[k] = 0;
+      /* the same buffer against the two previous bursts: a demod deferred to
+       * the next frame's ISR would leave burst N-1 here at the end of frame N */
+      int e1 = -1, e2 = -1; uint8_t pb[148];
+      if (cellule_bits_attendus(fn - 1, bsic, pb) == 0) { e1 = 0; for (int i = 0; i < 148; i++) if ((((int16_t)dsp->data[0x2be2 + i]) > 0) != (pb[i] != 0)) e1++; }
+      if (cellule_bits_attendus(fn - 2, bsic, pb) == 0) { e2 = 0; for (int i = 0; i < 148; i++) if ((((int16_t)dsp->data[0x2be2 + i]) > 0) != (pb[i] != 0)) e2++; }
+      printf("  [scan] fn=%u marge=%d tsc=%d dec=%.2f phase=%.1f rif=%d 2be2 erreurs=%d (vs N-1: %d, N-2: %d) insnA=%u insnB=%u %s  v[0..3]=%d %d %d %d\n", fn, cellule_marge_nb, cellule_tsc_force, cellule_dec_nb, cellule_phase_nb, calypso_rif_level(), err, e1, e2, g_insn_a, g_insn_b, map,
+             (int16_t)dsp->data[0x2be2], (int16_t)dsp->data[0x2be3], (int16_t)dsp->data[0x2be4], (int16_t)dsp->data[0x2be5]); }
+    /* where did the delivered samples land in DARAM (AAD)? offset in words at
+     * which the ROM's buffer equals our frame, and how many words match */
+    { uint16_t aad = calypso_rhea_dma_get_daram(); int best = 0, boff = 0;
+      for (int off = -8; off <= 8; off++) {
+          int m = 0;
+          for (int i = 0; i < g_dernier_n_iq; i++) {
+              int a = (int)aad + off + i; if (a < 0 || a >= C54X_DATA_SIZE) continue;
+              if ((int16_t)dsp->data[a] == g_dernier_iq[i]) m++;
+          }
+          if (m > best) { best = m; boff = off; }
+      }
+      int p0 = -1; for (int i = 0; i < 40; i++) if ((int16_t)dsp->data[aad + i] != 0) { p0 = i; break; }
+      { /* runs of words that differ from what was delivered, at offset 0 */
+        char runs[256]; int k = 0, i = 0;
+        while (i < g_dernier_n_iq && k < 200) {
+            if ((int16_t)dsp->data[aad + i] != g_dernier_iq[i]) {
+                int j = i; while (j < g_dernier_n_iq && (int16_t)dsp->data[aad + j] != g_dernier_iq[j]) j++;
+                k += snprintf(runs + k, sizeof runs - k, " %d+%d(%d)", i, j - i, (int16_t)dsp->data[aad + i]); i = j;
+            } else i++;
+        }
+        runs[k] = 0;
+        int d_dma = 0; for (int q = 0; q < g_dernier_n_iq && q < 384; q++) if ((int16_t)g_daram_apres_dma[q] != g_dernier_iq[q]) d_dma++;
+        printf("  [daram] fn=%u differences apres la trame (mot+longueur(valeur)):%s | juste apres le DMA, avant la ROM : %d mots differents (aad=%04x)\n", fn, runs, d_dma, g_daram_aad); }
+      printf("  [daram] fn=%u aad=%04x livres=%d mots, identiques=%d a l'offset %d, premier mot non nul a +%d, mots 0..7: %d %d %d %d %d %d %d %d\n",
+             fn, aad, g_dernier_n_iq, best, boff, p0,
+             (int16_t)dsp->data[aad], (int16_t)dsp->data[aad+1], (int16_t)dsp->data[aad+2], (int16_t)dsp->data[aad+3],
+             (int16_t)dsp->data[aad+4], (int16_t)dsp->data[aad+5], (int16_t)dsp->data[aad+6], (int16_t)dsp->data[aad+7]); }
+    printf("\n");
+}
+
 static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool verbeux,
                    const char *iq_mode, int amp)
 {
@@ -776,6 +940,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
         case PONT_TICK: {
             g_c54x_exe_fn = m.a;
             g_tick_irq_trame = (m.b & CALYPSO_PONT_TICK_IRQ_TRAME) != 0;
+            bool deux_phases = (m.b & CALYPSO_PONT_TICK_DEUX_PHASES) != 0;
             m.b &= 1u;
             calypso_bsp_set_tpu_offset((int)m.c);   /* firmware RX window */
             /* AFC relay, closing the loop. The ARM writes d_afc (word 15 of the W
@@ -839,8 +1004,36 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             g_inj.amp = amp; g_inj.fn = m.a; g_inj.injectes = &injectes; g_inj.udp = (rx_mode == 0 && init_done);
             uint32_t ninsn = 0;
             bool init_avant = init_done;
-            uint32_t drapeaux = jouer_trame(dsp, insns, &init_done, &ninsn);
+            uint32_t drapeaux = jouer_trame(dsp, insns, &init_done, &ninsn, deux_phases ? 1 : 0);
+            if (deux_phases) {
+                /* [2026-09-21] Phase A done: the ROM's frame ISR has written the
+                 * R page (previous burst) and armed the window. Tell QEMU, which
+                 * raises the ARM frame IRQ, waits for the end of l1_sync() and
+                 * sends PONT_GO; only then is the burst of this frame delivered.
+                 * That is the silicon order, and what keeps "BURST ID n!=m" and
+                 * "EMPTY" (prim_rx_nb.c) away. */
+                sonde_pages("A", m.a, dsp, api_ram);
+                envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
+                bool go = false;
+                while (!g_stop && !go) {
+                    struct pollfd pg = { .fd = fd, .events = POLLIN };
+                    if (poll(&pg, 1, 2000) <= 0) { static unsigned nt; if (nt++ < 3) printf("pont : PONT_GO attendu (fn=%u)\n", m.a); continue; }
+                    CalypsoPontMsg g;
+                    ssize_t ng = recv(fd, &g, sizeof(g), 0);
+                    if (ng != (ssize_t)sizeof(g)) { printf("pont : ARM deconnecte en attente de GO (%zd)\n", ng); g_stop = 1; break; }
+                    if (g.type == PONT_GO) go = true;
+                    else { static unsigned nx; if (nx++ < 3) printf("pont : message %u recu en attente de GO, ignore\n", g.type); }
+                }
+                if (!go) break;
+                sonde_pages("G", m.a, dsp, api_ram);
+                uint32_t n2 = 0;
+                g_insn_a = ninsn;
+                drapeaux = jouer_trame(dsp, insns, &init_done, &n2, 2);
+                ninsn += n2; g_insn_b = n2;
+            }
             g_inj.actif = false;
+            sonde_pages("B", m.a, dsp, api_ram);
+            if (g_inj.dernier_type == 'B' && (api_ram[API_R_PAGE(0) / 2] == 24 || api_ram[API_R_PAGE(1) / 2] == 24)) sonde_bits(m.a, dsp, 42);
             /* Reference probe (CALYPSO_BSP_VERIF=1): compare DARAM against the
              * burst the BSP was handed, AFTER the DSP has run — the samples
              * only reach DARAM through the DSP's own DMA draining the RIF, so
@@ -886,6 +1079,39 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             }
             drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
+            /* [2026-09-20] NB probe (PONT_NB_DEBUG=1): what the ROM leaves in the
+             * R pages for a normal-burst task (ALLC/BCCH), per burst: d_task_d,
+             * d_burst_d, a_serv_demod (TOA, PM, ANGLE, SNR) and, on burst 3,
+             * the a_cd header of the NDB (Fire/CRC word, bit errors) plus the
+             * first decoded octets. Read alongside mobile's "Dropping frame
+             * with N bit errors". */
+            {
+                static int nbdbg = -1; static unsigned nbn;
+                if (nbdbg < 0) nbdbg = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
+                if (nbdbg && nbn < 400) {
+                    static uint16_t prev[2][4];
+                    for (int pg = 0; pg < 2; pg++) {
+                        const uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
+                        uint16_t cur[4] = { r[RP_D_TASK_D/2], r[RP_D_BURST_D/2], r[RP_A_SERV_DEMOD/2 + D_TOA], r[RP_A_SERV_DEMOD/2 + D_PM] };
+                        if (r[RP_D_TASK_D/2] && memcmp(cur, prev[pg], sizeof cur)) {
+                            const uint16_t *w0 = &api_ram[API_W_PAGE(0) / 2], *w1 = &api_ram[API_W_PAGE(1) / 2];
+                            printf("  [nb] fn=%u p51=%u R%d task_d=%u burst_d=%u TOA=%d PM=%d ANGLE=%d SNR=%u | W0 task_d=%u burst=%u W1 task_d=%u burst=%u | livre=%c n_iq=%d one_shot=%d len=%u mots",
+                                   m.a, m.a % 51u, pg, r[RP_D_TASK_D/2], r[RP_D_BURST_D/2],
+                                   (int16_t)r[RP_A_SERV_DEMOD/2 + D_TOA], (int16_t)r[RP_A_SERV_DEMOD/2 + D_PM],
+                                   (int16_t)r[RP_A_SERV_DEMOD/2 + D_ANGLE], r[RP_A_SERV_DEMOD/2 + D_SNR],
+                                   w0[0], w0[1], w1[0], w1[1], g_inj.dernier_type, g_inj.dernier_n_iq,
+                                   calypso_rhea_dma_one_shot(), calypso_rhea_dma_get_len_words());
+                            if (r[RP_D_BURST_D/2] == 3) {
+                                const uint16_t *cd = &api_ram[(API_NDB + NDB_A_CD) / 2];
+                                printf(" | a_cd=%04x %04x %04x :", cd[0], cd[1], cd[2]);
+                                for (int k = 3; k < 15; k++) printf(" %04x", cd[k]);
+                            }
+                            printf("\n"); nbn++;
+                        }
+                        memcpy(prev[pg], cur, sizeof cur);
+                    }
+                }
+            }
             /* Canned results: scaffolding to prove the pipeline through to the
              * LU, not an end state. PONT_CAN_TOA=23 forces the reported TOA
              * (a_sync_demod[D_TOA]) to the on-time value the firmware expects
