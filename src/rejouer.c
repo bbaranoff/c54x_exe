@@ -626,6 +626,12 @@ static void arm_dsp_init(void)
     memset(&api[W_PAGE(1)], 0, W_SIZE * sizeof(uint16_t));
     memset(&api[R_PAGE(0)], 0, R_SIZE * sizeof(uint16_t));
     memset(&api[R_PAGE(1)], 0, R_SIZE * sizeof(uint16_t));
+    /* [2026-09-20] REJEU_DUMP_PARAM=1: the first eight parameter words after
+     * the DSP has started, to compare with the live bench's shared API RAM
+     * (od on /dev/shm/calypso_api_ram at word 0x431). */
+    if (drapeau_env("REJEU_DUMP_PARAM"))
+        printf("  PARAM apres demarrage : %04x %04x %04x %04x %04x %04x %04x %04x  (attendu 6666 000f 000c 0005 0004 7002 0001 000e)\n",
+               api[PARAM], api[PARAM+1], api[PARAM+2], api[PARAM+3], api[PARAM+4], api[PARAM+5], api[PARAM+6], api[PARAM+7]);
 }
 
 /* ---- one frame: l1_sync() then the DSP --------------------------------- */
