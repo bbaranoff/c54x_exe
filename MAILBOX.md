@@ -299,3 +299,16 @@ Pour aller au-dela il faut le BTS via pont.py (`PONT=1`) ou des bursts BCCH
 extraits du PDF (ex. `LD *AR4+, A` attend un AR5 qui n'intervient pas), le
 reste sont de vrais ecarts (RETF, RPTB, SUBC, MVDP/MVPD, NEG/RND/SFTA sur les
 drapeaux). Aucun n'empeche le decodage SB observe ci-dessus.
+
+## Romload fige a 38-55 % en pas-a-pas [2026-09-20]
+
+Symptome : osmocon reste sur `Progress: 38%` (ou 55 %), QEMU dit pourtant que
+le firmware charge par `-kernel` a deja lance son TDMA. Cause : c'est
+`tdma_tick` (calypso_trx.c) qui pompe le pty serie vers l'UART emulee
+(`calypso_uart_poll_backend`). Sous `CALYPSO_PONT_LOCKSTEP=1`, quand le DSP
+n'a pas fini la trame precedente, le tick sortait AVANT ce pompage et se
+rearmait : la serie n'avancait qu'au rythme du DSP (~7 ms par trame) et le
+romload, qui a un delai par bloc, decrochait. Les runs precedents passaient
+de justesse. Correctif (qosmo 77f61dd) : l'UART est pompee aussi sur le
+chemin d'attente du DSP. Mesure : 71 blocs, « your code is running now »,
+puis FBSB_REQ dans la foulee.
