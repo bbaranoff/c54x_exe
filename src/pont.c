@@ -414,15 +414,19 @@ phase_b:
              * scorecard (isa_test). Single-stepped: prog_fetch() before each. */
             static const char *hist_dir = NULL; static int hist_init = 0; static unsigned hist_n;
             if (!hist_init) { hist_init = 1; hist_dir = calypso_getenv("PONT_NB_HIST"); }
-            if (hist_dir && hist_n < 12 && g_inj.dernier_type == 'B' && !dsp->idle && dsp->api_ram &&
-                (dsp->api_ram[API_R_PAGE(0) / 2] == 24 || dsp->api_ram[API_R_PAGE(1) / 2] == 24)) {
+            /* PONT_NB_HIST_SB=1 : trace the SCH bursts (SB task, d_task_md = 6) instead */
+            static int hist_sb = -1; if (hist_sb < 0) hist_sb = calypso_getenv("PONT_NB_HIST_SB") ? 1 : 0;
+            bool tache_nb = dsp->api_ram && (dsp->api_ram[API_R_PAGE(0) / 2] == 24 || dsp->api_ram[API_R_PAGE(1) / 2] == 24);
+            bool tache_sb = dsp->api_ram && ((dsp->api_ram[API_W_PAGE(0) / 2 + 4] & 0xff) == 6 || (dsp->api_ram[API_W_PAGE(1) / 2 + 4] & 0xff) == 6);
+            if (hist_dir && hist_n < 12 && !dsp->idle && dsp->api_ram &&
+                ((!hist_sb && g_inj.dernier_type == 'B' && tache_nb) || (hist_sb && g_inj.dernier_type == 'S' && tache_sb))) {
                 static unsigned hist[65536]; memset(hist, 0, sizeof hist);
                 int reste = (int)budget - fait, k = 0;
                 /* data watch: every write into the demod's working cells, with
                  * the PC of the instruction (taps 0x2cbb.., tracker 0x5aaa..,
                  * result cells 0x3fa4.., reference 0x2b28..) */
-                static const struct { uint16_t lo, hi; } W[] = { {0x2cbb, 0x2d04}, {0x5aaa, 0x5ac8}, {0x3fa4, 0x3fa8}, {0x2b28, 0x2b58}, {0x2f00, 0x2f2c}, {0x2a00, 0x2bc8} };
-                #define NW 6
+                static const struct { uint16_t lo, hi; } W[] = { {0x2cbb, 0x2d04}, {0x5aaa, 0x5ac8}, {0x3fa4, 0x3fa8}, {0x2b28, 0x2b58}, {0x2f00, 0x2f2c}, {0x2a00, 0x2bc8}, {0x2be0, 0x2c80} };
+                #define NW 7
                 static uint16_t prev[0x600]; int nw = 0;
                 for (unsigned r = 0; r < NW; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++) prev[nw++] = dsp->data[a];
                 char nomw[256]; snprintf(nomw, sizeof nomw, "%s/watch_%u.txt", hist_dir, g_inj.fn);

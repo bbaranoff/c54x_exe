@@ -319,6 +319,20 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         if (mode == 1) decalage = d; else if (mode == 2) decalage = 0.25 * (double)((fn / 51u) % 4u);
         cellule_dec_nb = decalage;
     }
+    /* CELLULE_NB_SHIFT=<n> (experiment): transmit the normal burst with its
+     * bits shifted n positions earlier (bit i+n at position i, zeros at the
+     * end). Why: the ROM reads the training sequence of its equaliser output
+     * at index 58 of the decision buffer (bit 61 with 3 tail bits skipped),
+     * but the emulated equaliser puts bit i at index i-2, so the 26 TSC
+     * decisions agree with TSC2 at 12/26 as read and 26/26 shifted by one:
+     * the residual estimate then sees no signal, the soft-bit scale collapses
+     * to 2 and every quantised soft bit is +1. Shifting the bits by one is the
+     * test of that reading; it is not a fix. */
+    if (type == 'B' || type == 'C') {
+        static int nsh = -2; if (nsh == -2) nsh = env_int("CELLULE_NB_SHIFT", 0);
+        if (nsh > 0) { for (int i = 0; i < 148; i++) bits[i] = (i + nsh < 148) ? bits[i + nsh] : 0; }
+        else if (nsh < 0) { for (int i = 147; i >= 0; i--) bits[i] = (i + nsh >= 0) ? bits[i + nsh] : 0; }
+    }
     /* CELLULE_NB_PHASE=<deg>|auto : carrier phase of the normal bursts (auto:
      * 0, 22.5, 45, 67.5 degrees by multiframe). Samples exactly on the I/Q
      * axes (decalage 0, phase 0) or exactly on the diagonals (decalage 0.5)
