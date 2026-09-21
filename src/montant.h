@@ -12,6 +12,9 @@
  * bit 0 de d_dsp_page, celui que QEMU transporte deja dans PONT_TICK.m.b. */
 void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page);
 
+/* Le canal dedie est libere : oublier le dernier bloc SDCCH publie. */
+void montant_canal_libere(void);
+
 /* Une ligne de bilan en fin de session. */
 void montant_bilan(void);
 

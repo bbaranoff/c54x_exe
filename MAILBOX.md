@@ -722,3 +722,217 @@ Au passage, deux corrections sur le montant lui-meme :
 - `calypso_bsp.c` imprimait une ligne `[ts0] tick=... NB fenetre=151` par
   trame livree : la condition `nwin > 0` est vraie pour tout burst normal
   depuis la DMA one-shot. Repliee derriere `CALYPSO_BSP_TS0_DEBUG=1`.
+
+## Le mobile passe en mode dedie, sur un intervalle que le DSP ne recoit pas [2026-09-21, nuit, suite]
+
+Avec la reference de requete corrigee, la suite se deroule : le mobile accepte
+l'assignation, passe en mode dedie et emet sa demande. Le bloc montant capture
+dans `/dev/shm/calypso_sdcch_ul` est exactement celui qu'on cherchait :
+
+    01 3f 49 | 05 08 70 00 f1 10 ff fe 30 08 09 10 10 00 10 00 00 10
+    │  │  └── L = 18
+    │  └───── SABM, P=1
+    └──────── SAPI 0
+              05 08 = MM / LOCATION UPDATING REQUEST, LAI 001-01
+              LAC=0xfffe (efface), classmark 30, IMSI 001010001000001
+
+Deux choses l'empechaient d'arriver a la BTS, toutes deux du meme genre que le
+reste : un point de branchement que `calypso_l1_disable()` avait neutralise.
+
+**1. Le canal dedie n'etait annonce a personne.** `pont.py` ne lit pas les
+IMM ASS : sa classe `Dedicated` (`pont/state.py`) attend le canal dans
+`/dev/shm/calypso_dcch_cfg`, et tant qu'il manque, `uplink.py:_poll_sdcch()`
+jette tout le montant. Ce fichier etait ecrit par le tap L1CTL de la couche 1
+gr-gsm (`l1-grgsm/calypso_l1ctl_tap.c`), branche par la vtable. Nouveau
+`hw/arm/calypso/calypso_dcch_tap.c`, qui ne depend d'aucune couche 1 : il
+renifle le flux sercomm du firmware, retient le `chan_nr` des
+`L1CTL_DATA_CONF`/`DATA_IND` et publie. `calypso_l1_do_uart_tx_byte()`
+l'appelle quand aucune L1 n'est enregistree ; `d_dsp_page = 0` libere.
+Verifie sur le banc : `[dcch] canal dedie arme : chan_nr=0x51 SDCCH/8 SS=2 TN=1`.
+
+**2. Le DSP ne recevait que TS0.** Le BSC alloue le SDCCH/8 sur **TS1** ; sous
+`CALYPSO_BSP_STREAM=1`, `calypso_bsp.c` arretait TS1..TS7 a la reception et
+`bsp_ts0_livrer()` completait la trame avec du bourrage a zero. Le mobile
+n'entendait donc ni le UA ni le LU ACCEPT, d'ou le
+`[dcch] canal dedie libere` immediat et le retour en `C1 normal cell
+selection`. `g_bsp_tpu_offset`, la position de la fenetre RX relayee par QEMU,
+etait stockee et jamais lue - et de toute facon TPU_OFFSET est le decalage de
+synchro global, pas l'intervalle.
+
+Correctif : QEMU sait desormais quel canal le mobile utilise (point 1), donc il
+l'annonce au DSP par un nouveau message du pont, `PONT_DCCH` (a = TN,
+b = genre, c = sous-voie), emis juste avant un TICK - jamais pendant l'attente
+d'un `PONT_GO`, que le DSP ignorerait. Le BSP garde alors les bursts de CET
+intervalle par numero de trame BTS (`bsp_dedie_stocker`, anneau de 2^16 trames
+parce que le DSP en pas-a-pas derive de plusieurs secondes) et
+`bsp_ts0_livrer()` les joue **a la place** de TS0. Un seul burst par tick,
+donc le cadencement en 1250 symboles par trame n'est pas touche.
+
+**Au passage, l'appariement RA -> trame.** Premiere version : relever
+`last_rach.fn` une fois par trame et l'attribuer a la derniere RA ecrite.
+Mesure : trois `IMM ASS ra=0x0c : aucune trame memorisee` de suite. En rafale,
+le firmware ecrit le `d_rach` suivant avant que `last_rach` n'ait bouge pour le
+precedent. Deuxieme version, exacte : les RA sont mises en file a l'ecriture de
+`d_rach` et chaque `L1CTL_RACH_CONF` (lu par le meme tap sercomm) en depile
+une - c'est l'appariement que fait le mobile lui-meme dans `cr_hist`.
+
+**Et une mesure qui commande le reste.** L'ecart entre la reference de la BTS
+et celle du mobile n'est pas constant, il grandit :
+
+    ra=0x08  BTS 7/14/45 = fn 9582   mobile fn 8074   1508 trames  ~7,0 s
+    ra=0x0e  BTS  8/5/33 = fn 10743  mobile fn 9464   1279 trames  ~5,9 s
+    ra=0x0e  BTS  8/0/14 = fn 11336  mobile fn 9464   1872 trames  ~8,6 s
+
+C'est la derive du pas-a-pas : le C54x emule coute ~6,7 ms par trame contre
+4,615 ms de temps reel, donc l'horloge du mobile prend du retard sur celle du
+reseau en continu. Toute comparaison de numero de trame entre les deux cotes
+doit donc passer par la valeur du mobile, jamais par celle du reseau.
+
+## Le LU va jusqu'a l'authentification, et meurt d'un SABM de trop [2026-09-21, nuit, fin]
+
+Avec l'intervalle dedie livre au DSP, la procedure se deroule enfin :
+
+    IMMEDIATE ASSIGNMENT: (ta 0/0m ra 0x0b chan_nr 0x41 ARFCN 514 TS 1 SS 0 TSC 5)
+    request 0b matches (fn=4,6,23)            <- la reference de requete colle
+    new state connection pending -> dedicated
+    New SYSTEM INFORMATION 6 / 5 (SACCH descendante decodee)
+    RR_EST_CNF -> location updating initiated
+    MT_MM_ID_REQ  -> IDENTITY RESPONSE
+    MT_MM_AUTH_REQ -> AUTHENTICATION RESPONSE
+    MT_MM_LOC_UPD_REJECT                      <- et la, non
+
+Le rejet n'est pas une affaire d'authentification (la Ki du `test-sim` et celle
+de `auc_2g` sont la meme, comp128v1) : c'est une consequence. Le BSC dit
+pourquoi, a la seconde pres :
+
+    22:30:54 lchan(0-0-1-SDCCH8-0){ESTABLISHED}: ERROR INDICATION
+             cause=SABM frame with information not allowed in this state
+
+Un deuxieme SABM sur un lien deja etabli. La LAPDm du BTS casse le canal, le
+MSC se retrouve en `MSC_A_ST_RELEASING` et repond LOCATION UPDATING REJECT au
+milieu de la procedure (`/var/log/osmocom/osmo-msc.log`, gsm_04_08.c:112).
+
+Coupable : l'anti-doublon repris de la couche 1 gr-gsm, qui republie un bloc
+identique passe 60 trames (`SDCCH_UL_DEDUP_TICKS`). Le firmware laisse son
+bloc dans `a_cu` ; nous le republiions, le pont le reemettait. Desormais un
+bloc n'est publie que si son CONTENU change, et la memoire de l'anti-doublon
+repart a zero a la liberation du canal (`montant_canal_libere()`, appele sur
+PONT_DCCH genre 0xFF) -- sinon le SABM de la connexion suivante, octet pour
+octet identique, serait pris pour un doublon et ne partirait jamais.
+`MONTANT_SDCCH_REPETE=N` retablit une republication au bout de N trames.
+Compromis assume : une retransmission LAPDm du mobile porte les memes octets
+et sera avalee ; l'inverse casse le lien a coup sur.
+
+A surveiller au prochain run : les « Dropping frame with 110 bit errors » de la
+descente dediee. 110 erreurs sur 456 bits, c'est la signature d'UN burst sur
+quatre manquant ou faux dans le bloc. Elles sont nombreuses au moment de
+l'etablissement (le canal n'est arme qu'au premier DATA_CONF/IND, donc les
+premiers blocs partent sans intervalle dedie), puis rares pendant la
+transaction (SI5, SI6, ID REQUEST, AUTH REQUEST passent tous), puis
+permanentes apres le rejet (le BTS n'emet plus rien sur TS1).
+
+## Le SABM ne partait plus du tout : la liberation lue au mauvais endroit [2026-09-21, nuit, suite]
+
+Apres avoir mis « un seul SABM par connexion », le BSC ne dit plus
+`ERROR INDICATION` mais `WAIT_RLL_RTP_ESTABLISH: Timeout` : plus de doublon, et
+plus de SABM du tout. La trace QEMU montre le defaut en deux lignes :
+
+    [dcch] canal dedie arme   : chan_nr=0x41 SDCCH/8 SS=0 TN=1
+    [dcch] canal dedie libere : chan_nr=0x00 SDCCH/4 SS=0 TN=0
+
+Armé puis libéré dans la seconde. Le tap publiait « libere » sur
+`d_dsp_page == 0`, condition reprise du `l1_reset()` de la couche 1 gr-gsm.
+Faux ici : le firmware fait justement un `l1s_dsp_abort()` (sync.c:308) au
+moment ou il bascule VERS le canal dedie -- c'est le « resetting scheduler »
+du journal du mobile, juste apres l'IMMEDIATE ASSIGNMENT. `pont.py` voyait
+donc un canal libere et jetait le SABM.
+
+Tant que le SABM etait republie toutes les secondes, le defaut etait masque :
+une republication finissait toujours par tomber dans une fenetre ou le canal
+etait arme. C'est ce qui explique que la session de 22:30 ait pu aller jusqu'a
+l'AUTHENTICATION RESPONSE malgre les doublons.
+
+Deux corrections :
+
+- **La liberation se lit sur le retour aux voies communes**, pas sur
+  `d_dsp_page`. Un `L1CTL_DATA_IND`/`DATA_CONF` portant un `chan_nr` non dedie
+  (BCCH, CCCH) veut dire que le mobile est revenu sur les voies communes ; en
+  mode dedie il n'en lit aucun, donc ca ne peut pas arriver au milieu d'une
+  connexion. `calypso_l1_do_page_written()` ne libere plus rien.
+- **Le bloc montant attend son canal** (`pont/uplink.py:_poll_sdcch`). La
+  couche 1 publie le SABM a l'instant ou elle l'emet, et `Dedicated.read()` ne
+  relit `/dev/shm/calypso_dcch_cfg` qu'une fois par `DCCH_TTL` (100 ms) : le
+  premier bloc d'une connexion tombait regulierement dans cette fenetre et
+  disparaissait. On force desormais une relecture des qu'un bloc arrive, et on
+  garde le bloc jusqu'a une seconde si le canal n'est pas encore connu, au
+  lieu de le jeter (`SDCCH_ATTENTE`).
+
+## Le canal dedie battait : arme/libere des dizaines de fois par seconde [2026-09-21, nuit, suite]
+
+Deuxieme version de la liberation (« un bloc sur une voie commune veut dire que
+le mobile est revenu ») : pire que la premiere. Trace QEMU pendant une
+connexion :
+
+    [dcch] canal dedie arme   : chan_nr=0x41 SDCCH/8 SS=0 TN=1
+    [dcch] canal dedie libere : chan_nr=0x00 SDCCH/4 SS=0 TN=0
+    [dcch] canal dedie arme   : chan_nr=0x41 SDCCH/8 SS=0 TN=1
+    [dcch] canal dedie libere : chan_nr=0x00 ...        (x N, en boucle)
+
+Le BSP basculait donc entre TS0 et TS1 a chaque bloc. Cote mobile : tous les
+blocs descendants a 110/98/87 erreurs, aucun UA, `MDL-ERROR-IND cause 1`
+(T200/N200) et liberation -- alors que l'IMMEDIATE ASSIGNMENT avait ete
+acceptee (`request 07 matches (fn=2,13,26)`).
+
+Deux criteres ajoutes, tous deux necessaires pour liberer :
+
+- **Un vrai canal commun.** 44.004 8.3 : 0x80 BCCH, 0x88 RACH, 0x90 PCH/AGCH,
+  donc `(chan_nr & 0xE0) == 0x80`. Ce qui declenchait la liberation portait
+  `chan_nr = 0x00`, qui n'est pas un canal.
+- **Un ecart de trames.** Le bloc commun doit etre au moins
+  DCCH_LIBERE_APRES_TRAMES (100) trames apres le dernier bloc du canal dedie,
+  d'apres le numero de trame que porte l'en-tete L1CTL. Un bloc CCCH en retard,
+  delivre juste apres la bascule, porte un numero proche et ne libere donc
+  rien.
+
+Rappel de l'historique de ce seul point, parce qu'il resume la difficulte : la
+liberation a d'abord ete lue sur `d_dsp_page == 0` (tire a l'entree en mode
+dedie, pas a la sortie), puis sur le premier bloc commun venu (tire en boucle
+pendant la connexion). Le bon signal est le retour durable sur les voies
+communes.
+
+## a_cu porte un drapeau : il n'y avait rien a deviner [2026-09-21, nuit, fin de l'histoire]
+
+Trois versions successives de l'anti-doublon SDCCH montant, trois echecs :
+
+1. Fenetre heuristique + republication apres 60 trames (repris de la couche 1
+   gr-gsm) : le meme SABM repartait sur un lien etabli, le BTS repondait
+   « SABM frame with information not allowed in this state » et cassait le
+   canal en pleine procedure.
+2. Comparaison du contenu sur 23 octets : la friture apres la charge utile
+   bouge d'une lecture a l'autre, 32 blocs « neufs » publies pour un seul
+   SABM.
+3. Verrou « un seul SABM par connexion » : plus aucun SABM des que le verrou
+   restait arme, et il ne retombait que sur un RACH publie ou une liberation
+   annoncee -- deux evenements qui peuvent ne jamais venir. Un verrou qui
+   coince le banc definitivement.
+
+Le firmware annonce pourtant chaque bloc, explicitement
+(`layer1/prim_tx_nb.c:80-101`) :
+
+    uint16_t *info_ptr = dsp_api.ndb->a_cu;
+    info_ptr[0] = (1 << B_BLUD);                   /* bloc present */
+    info_ptr[1] = 0; info_ptr[2] = 0;
+    dsp_memcpy_to_api(&info_ptr[3], data, 23, 0);  /* les 23 octets L2 */
+
+C'est exactement la disposition que `prendre_ul()` lit deja pour le TCH, et le
+drapeau est a usage unique. Donc : on le teste, on prend les 23 octets du mot
+3, on l'efface. Un bloc pose = une publication, sans fenetre, sans
+comparaison, sans temporisation, sans verrou.
+
+`MONTANT_SDCCH_FENETRE=1` force l'ancienne voie, et elle prend le relais toute
+seule si B_BLUD ne se leve jamais alors que le firmware pose des taches
+montantes (cas ou la ROM consommerait le drapeau avant la scrutation) : 400
+taches sans drapeau, un message, et bascule.
+
+Lecon : chercher le signal que le firmware pose deja, avant d'inventer une
+heuristique pour le reconstituer.

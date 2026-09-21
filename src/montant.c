@@ -58,6 +58,7 @@
 #include <fcntl.h>
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_debug.h"
+#include "calypso_bsp.h"
 #include "montant.h"
 
 #define SHM_RACH        "/dev/shm/calypso_rach"
@@ -74,10 +75,31 @@
 #define TCH_UL_FR_OFS   16      /* TCH_UL_FR_OFS     */
 #define FR_BYTES        33
 
-/* Fenetre de recherche de l'en-tete L2 dans a_cu, et anti-doublon SDCCH :
- * memes valeurs que calypso_l1_grgsm.c (SDCCH_UL_WINDOW_OFS, SDCCH_UL_DEDUP_TICKS). */
+/* Fenetre de recherche de l'en-tete L2 dans a_cu (SDCCH_UL_WINDOW_OFS de
+ * calypso_l1_grgsm.c). */
 #define SDCCH_UL_WINDOW_OFS  6
-#define SDCCH_UL_DEDUP_TRAMES 60
+
+/* Anti-doublon SDCCH montant.
+ *
+ * [2026-09-21, mesure] La couche 1 gr-gsm republiait un bloc identique passe
+ * 60 trames (SDCCH_UL_DEDUP_TICKS). Repris tel quel ici, ca tuait la
+ * connexion : le firmware laisse son bloc dans a_cu, on le republiait, le
+ * pont le reemettait, et le BSC repondait
+ *
+ *   lchan(0-0-1-SDCCH8-0){ESTABLISHED}: ERROR INDICATION
+ *     cause=SABM frame with information not allowed in this state
+ *
+ * -- un deuxieme SABM sur un lien deja etabli. Le canal tombait, le MSC
+ * passait en MSC_A_ST_RELEASING et repondait LOCATION UPDATING REJECT au
+ * milieu de la procedure, apres avoir pourtant mene l'IDENTITY REQUEST et
+ * l'AUTHENTICATION REQUEST a bien.
+ *
+ * Donc : un bloc n'est publie QUE si son contenu change. MONTANT_SDCCH_REPETE
+ * = N retablit une republication du meme bloc au bout de N trames (0 = jamais,
+ * le defaut). Une retransmission LAPDm du mobile porte les memes octets et
+ * serait donc avalee ; c'est le compromis assume, l'inverse casse le lien a
+ * coup sur. */
+#define SDCCH_UL_REPETE_DEFAUT 0
 
 /* Nombre de trames minimum entre deux RACH publies : une tentative du mobile
  * dure plusieurs trames et le meme d_rach reste lisible entre-temps. */
@@ -89,6 +111,13 @@ static struct {
     uint32_t fn_rach;
     bool     rach_vu;      /* au moins un RACH publie              */
     bool     base_rach;    /* la valeur de reference a ete prise   */
+    /* Dernier bloc SDCCH montant publie, pour l'anti-doublon. */
+    uint8_t  sdcch_dernier[23];
+    uint32_t sdcch_trame;
+    bool     sdcch_a_dernier;
+    bool     blud_vu;          /* a_cu a deja annonce un bloc par B_BLUD   */
+    unsigned sans_blud;        /* taches montantes vues sans B_BLUD        */
+    bool     dedie_arme;
 } g;
 
 static int journal(void)
@@ -213,18 +242,79 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
     }
 }
 
-/* SDCCH montant : le firmware laisse le bloc L2 dans a_cu, a un decalage qui
- * depend de la version de l'API. On cherche l'en-tete LAPDm plausible dans une
- * fenetre de 7 octets, comme la couche 1 gr-gsm, puis on deduplique : la meme
- * tache d_task_u reste lisible tant que le firmware ne la reecrit pas. */
-static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
+/* SDCCH / SACCH montant.
+ *
+ * [2026-09-21] Le firmware ANNONCE son bloc, il n'y a rien a deviner :
+ * prim_tx_nb.c:80-101 ecrit dans a_cu l'en-tete `(1 << B_BLUD)`, deux mots a
+ * zero, puis les 23 octets L2 a partir du mot 3 -- la disposition exacte que
+ * prendre_ul() sait lire. Le drapeau est a usage unique : on le consomme, et
+ * un bloc = une publication.
+ *
+ * Avant d'avoir lu ce code, cette fonction reprenait la fenetre heuristique de
+ * la couche 1 gr-gsm (balayage d'en-tete LAPDm dans a_cu+6) avec un anti-
+ * doublon sur le contenu. Trois echecs de suite en sont sortis : republication
+ * du meme SABM toutes les 60 trames -> « SABM frame with information not
+ * allowed in this state » et canal casse en pleine procedure ; puis
+ * comparaison sur 23 octets dont la friture de fin bouge -> 32 blocs
+ * « neufs » ; puis verrou « un seul SABM par connexion » -> plus aucun SABM
+ * des que le verrou restait arme. Le drapeau du firmware rend tout ca inutile.
+ *
+ * MONTANT_SDCCH_FENETRE=1 force l'ancienne voie heuristique, et elle prend le
+ * relais toute seule si B_BLUD ne se leve jamais alors que le firmware pose
+ * des taches montantes (le cas ou la ROM consommerait le drapeau avant nous).
+ */
+/* PEREMPTION DE L'ANTI-DOUBLON (voie heuristique seulement).
+ *
+ * [2026-09-21] La couche 1 gr-gsm republie un bloc identique passe 60 ticks
+ * (calypso_l1_grgsm.c:673). Ce n'est PAS un moteur de renvoi : dans ce
+ * montage-la, QEMU efface d_task_u a chaque tick (calypso_trx.c, branche non
+ * pont), donc la couche 1 ne voit une tache montante que sur les trames ou le
+ * firmware vient de la poser. Les 60 ticks ne font qu'empecher de publier
+ * quatre fois le meme bloc (un par burst) tout en laissant passer une VRAIE
+ * retransmission du mobile, quand son T200 le fait re-poster.
+ *
+ * Sur la voie B_BLUD ce probleme n'existe pas : le drapeau est a usage unique,
+ * une pose = une publication, et une retransmission du mobile repose le
+ * drapeau. Rien a temporiser.
+ *
+ * Avoir lu ces 60 ticks comme un renvoi a coute un banc : le SABM repartait
+ * apres l'etablissement du lien, et le BTS repondait « SABM frame with
+ * information not allowed in this state » -- 4 ERROR INDICATION pour 4
+ * ESTABLISHED. */
+#define SDCCH_TTL_DEFAUT      60   /* trames, comme SDCCH_UL_DEDUP_TICKS */
+
+static int sabm_ttl(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = calypso_getenv("MONTANT_SDCCH_TTL");
+        if (!e || !*e) {
+            e = calypso_getenv("MONTANT_SDCCH_REPETE");   /* ancien nom */
+        }
+        v = (e && *e) ? atoi(e) : SDCCH_TTL_DEFAUT;
+    }
+    return v;
+}
+
+static void publier_sdcch(uint16_t task_u, uint32_t fn, const uint8_t *l2)
 {
     static int fd = -2;
     static uint32_t seq;
-    static uint8_t dernier[23];
-    static uint32_t derniere_trame;
-    static bool a_dernier;
+    if (l2[1] == 0x03) {      /* trame vide (UI sans donnee) */
+        return;
+    }
+    publier_l2(&fd, SHM_SDCCH_UL, &seq, l2, task_u, fn);
+    if (g.sdcch++ < (unsigned long)journal()) {
+        printf("  [montant] SDCCH UL fn=%u task=0x%04x L2=", fn, task_u);
+        for (int k = 0; k < 23; k++) printf("%02x%s", l2[k], k == 22 ? "" : " ");
+        printf("\n");
+    }
+}
 
+/* L'ancienne voie : balayage de la fenetre, anti-doublon sur le contenu
+ * utile, republication apres MONTANT_SDCCH_REPETE trames (0 = jamais). */
+static void capture_sdcch_fenetre(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
+{
     uint8_t fen[30];
     const uint8_t *src = (const uint8_t *)api_ram + API_NDB + NDB_A_CU + SDCCH_UL_WINDOW_OFS;
     memcpy(fen, src, sizeof(fen));
@@ -242,20 +332,100 @@ static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
         }
     }
     const uint8_t *l2 = fen + kk;
-    if (a_dernier && !memcmp(dernier, l2, 23) &&
-        (uint32_t)(fn - derniere_trame) < SDCCH_UL_DEDUP_TRAMES) {
+    int repete = sabm_ttl();
+    unsigned utile = 3u + (unsigned)(l2[2] >> 2);
+    if (utile > 23u) {
+        utile = 23u;
+    }
+    if (g.sdcch_a_dernier && !memcmp(g.sdcch_dernier, l2, utile) &&
+        (repete <= 0 || (uint32_t)(fn - g.sdcch_trame) < (uint32_t)repete)) {
         return;
     }
-    memcpy(dernier, l2, 23);
-    derniere_trame = fn;
-    a_dernier = true;
-    if (l2[1] == 0x03) {      /* trame vide (UI sans donnee) */
+    memcpy(g.sdcch_dernier, l2, 23);
+    g.sdcch_trame = fn;
+    g.sdcch_a_dernier = true;
+    publier_sdcch(task_u, fn, l2);
+}
+
+static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
+{
+    static int fenetre = -1;
+    if (fenetre < 0) {
+        const char *e = calypso_getenv("MONTANT_SDCCH_FENETRE");
+        fenetre = (e && *e == '1') ? 1 : 0;
+    }
+    if (!fenetre) {
+        uint8_t l2[23];
+        if (prendre_ul(api_ram, NDB_A_CU, l2, 23)) {
+            g.blud_vu = true;
+            publier_sdcch(task_u, fn, l2);
+            return;
+        }
+        if (g.blud_vu) {
+            return;               /* le drapeau fonctionne : rien a publier */
+        }
+        /* Jamais vu B_BLUD alors que le firmware pose des taches montantes :
+         * la ROM le consomme peut-etre avant nous. On bascule sur la fenetre. */
+        if (++g.sans_blud == 400) {
+            printf("  [montant] a_cu : B_BLUD jamais vu en %u taches montantes, "
+                   "bascule sur la fenetre heuristique\n", g.sans_blud);
+        }
+        if (g.sans_blud < 400) {
+            return;
+        }
+    }
+    capture_sdcch_fenetre(api_ram, task_u, fn);
+}
+
+/* Le canal dedie, lu directement dans le side-band que le tap L1CTL de QEMU
+ * ecrit (calypso_dcch_tap.c) et que pont.py lit deja.
+ *
+ * [2026-09-21, mesure] Le canal etait annonce au DSP par un message du pont,
+ * PONT_DCCH. Trace du banc : QEMU imprime bien « [dcch] canal dedie arme :
+ * chan_nr=0x51 SDCCH/8 SS=2 TN=1 », et cote DSP, RIEN -- ni « pont : canal
+ * dedie », ni « [BSP] canal dedie arme », ni message inconnu. Le message se
+ * perd dans le pas-a-pas en deux phases (la boucle d'attente du PONT_GO jette
+ * tout ce qui n'est pas un GO). Resultat : le BSP continuait de livrer TS0
+ * pendant que l'ARM ecoutait TS1, et TOUS les blocs de la descente dediee
+ * echouaient au code de Fire.
+ *
+ * Le fichier, lui, ne depend d'aucun protocole : une lecture de 8 octets par
+ * trame, et le meme numero de sequence que pont.py utilise pour savoir s'il a
+ * change. */
+static void scruter_dcch(uint32_t fn)
+{
+    static int fd = -2;
+    static uint32_t seq;
+    static uint32_t prochain_essai;
+
+    if (fd < 0) {
+        if (fn < prochain_essai) {
+            return;
+        }
+        prochain_essai = fn + 200;          /* ~1 s entre deux tentatives */
+        fd = open("/dev/shm/calypso_dcch_cfg", O_RDONLY);
+        if (fd < 0) {
+            return;
+        }
+    }
+    uint8_t b[16];
+    if (pread(fd, b, sizeof(b), 0) != (ssize_t)sizeof(b)) {
         return;
     }
-    publier_l2(&fd, SHM_SDCCH_UL, &seq, l2, task_u, fn);
-    if (g.sdcch++ < (unsigned long)journal())
-        printf("  [montant] SDCCH UL fn=%u task=0x%04x L2=%02x %02x %02x %02x %02x %02x\n",
-               fn, task_u, l2[0], l2[1], l2[2], l2[3], l2[4], l2[5]);
+    uint32_t s2;
+    memcpy(&s2, b, 4);
+    if (!s2 || s2 == seq) {
+        return;
+    }
+    seq = s2;
+    int genre = b[4], ss = b[5], tn = b[6];
+    printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d\n",
+           seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss);
+    calypso_bsp_set_dedie(genre == 0xFF ? 0 : tn, genre, ss);
+    g.dedie_arme = (genre != 0xFF);
+    if (genre == 0xFF) {
+        montant_canal_libere();
+    }
 }
 
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
@@ -273,6 +443,10 @@ static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
     buf[5] = bsic;
     memcpy(buf + 8, &fn, 4);
     sb_ecrire(fd, buf, sizeof(buf), 0);
+    /* Une tentative d'acces, c'est une nouvelle connexion : la memoire de
+     * l'anti-doublon de la voie heuristique repart (sans effet sur la voie
+     * B_BLUD, qui n'en a pas besoin). */
+    g.sdcch_a_dernier = false;
     if (g.rach++ < (unsigned long)journal())
         printf("  [montant] RACH ra=0x%02x bsic=%u fn=%u -> %s\n", ra, bsic, fn, SHM_RACH);
 }
@@ -296,6 +470,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     uint16_t v_page = api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2];
     bool taches = (v_page & B_GSM_TASK) != 0;
     unsigned pg = taches ? ((v_page & B_GSM_PAGE) ? 1u : 0u) : (page & 1u);
+
+    scruter_dcch(fn);
 
     uint16_t *wp = &api_ram[API_W_PAGE(pg) / 2];
     uint16_t task_u  = taches ? wp[WP_D_TASK_U / 2] : 0;
@@ -368,6 +544,15 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     if (task_u != 0 && !capture_tch_ul(api_ram, task_u, fn)) {
         capture_sdcch_ul(api_ram, task_u, fn);
     }
+}
+
+/* Le canal dedie vient d'etre libere (PONT_DCCH, genre 0xFF) : la memoire de
+ * l'anti-doublon doit repartir a zero, sinon le SABM de la connexion SUIVANTE,
+ * octet pour octet identique au precedent, serait pris pour un doublon et ne
+ * partirait jamais. */
+void montant_canal_libere(void)
+{
+    g.sdcch_a_dernier = false;
 }
 
 void montant_bilan(void)

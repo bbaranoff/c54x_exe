@@ -1466,6 +1466,19 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             fflush(stdout);
             break;
         }
+        case PONT_DCCH:
+            /* [2026-09-21] QEMU a lu le canal dedie dans le flux L1CTL du
+             * firmware (calypso_dcch_tap.c) : a = TN, b = genre, c = sous-voie.
+             * Le BSP en a besoin pour savoir quel intervalle de temps livrer :
+             * le pont lui envoie les huit, il n'en joue qu'un par tick, et sans
+             * ca c'est toujours TS0 - donc rien du SDCCH du mobile. */
+            printf("pont : canal dedie %s : TS%u SDCCH/%s SS=%u\n",
+                   m.b == 0xFF ? "libere" : "arme", m.a, m.b ? "8" : "4", m.c);
+            calypso_bsp_set_dedie((int)m.a, (int)m.b, (int)m.c);
+            if (m.b == 0xFF || (int)m.a <= 0) {
+                montant_canal_libere();
+            }
+            break;
         case PONT_BYE:
             printf("pont : BYE\n");
             return;
