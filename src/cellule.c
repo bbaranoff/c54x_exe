@@ -329,6 +329,9 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         if (pm == -2) { const char *e = calypso_getenv("CELLULE_NB_PHASE"); pm = 0;
                         if (e && !strcmp(e, "auto")) pm = 2; else if (e && *e) { pm = 1; pd = atof(e); } }
         if (pm == 1) phase0 = pd * M_PI / 180.0; else if (pm == 2) phase0 = 22.5 * (double)((fn / 51u) % 4u) * M_PI / 180.0;
+        /* CELLULE_NB_PHASE=quad : 0, 90, 180, 270 degrees by multiframe */
+        { static int q = -1; if (q < 0) { const char *e = calypso_getenv("CELLULE_NB_PHASE"); q = (e && !strcmp(e, "quad")) ? 1 : 0; }
+          if (q) phase0 = 90.0 * (double)((fn / 51u) % 4u) * M_PI / 180.0; }
         cellule_phase_nb = phase0 * 180.0 / M_PI;
     }
     /* CELLULE_NB_MSK=1 (experiment): pure MSK for the normal bursts, no
@@ -355,6 +358,8 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         } else *n_iq = 2 * 148;
         return type;
     }
+    /* CELLULE_SB_PHASE=<deg> : carrier phase of the SCH burst */
+    if (type == 'S') { static int sp = -2; if (sp == -2) sp = env_int("CELLULE_SB_PHASE", 0); phase0 = sp * M_PI / 180.0; }
     int16_t *burst_iq = iq;
     if (m_tete >= 0) {
         memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));

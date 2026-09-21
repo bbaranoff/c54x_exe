@@ -310,6 +310,8 @@ static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned 
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn, unsigned long *injectes);
 
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
+static unsigned g_flags_entree; static uint16_t g_data_avant_b[C54X_DATA_SIZE];
+#define s_or_dsp_st0(d) ((d)->st0)
 static int16_t g_dernier_iq[2 * 256]; static int g_dernier_n_iq;
 static uint16_t g_daram_apres_dma[384]; static uint16_t g_daram_aad;
 /* phase : 0 = whole frame ; 1 = frame ISR only, up to the arming of the RX
@@ -391,6 +393,12 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
             }
 phase_b:
             fait = fait_a;
+            /* PONT_NB_DEBUG: flags at the burst's entry, and a snapshot of the
+             * data memory to list what the demod writes (regions), see
+             * sonde_bits(). */
+            { static int on = -1; if (on < 0) on = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
+              if (on) { g_flags_entree = ((s_or_dsp_st0(dsp) & ST0_OVA) ? 1 : 0) | ((dsp->st0 & ST0_OVB) ? 2 : 0) | ((dsp->st0 & ST0_C) ? 4 : 0) | ((dsp->st0 & ST0_TC) ? 8 : 0) | ((dsp->st1 & ST1_OVM) ? 16 : 0) | ((dsp->st1 & ST1_FRCT) ? 32 : 0) | ((dsp->st1 & ST1_SXM) ? 64 : 0);
+                        memcpy(g_data_avant_b, dsp->data, sizeof g_data_avant_b); } }
             if (g_inj.udp) calypso_bsp_service(g_inj.fn);
             if (g_inj.iq_mode) injecter_burst(dsp, g_inj.iq_mode, g_inj.amp, g_inj.fn, g_inj.injectes);
             { uint16_t aad = calypso_rhea_dma_get_daram();
@@ -408,11 +416,30 @@ phase_b:
                 (dsp->api_ram[API_R_PAGE(0) / 2] == 24 || dsp->api_ram[API_R_PAGE(1) / 2] == 24)) {
                 static unsigned hist[65536]; memset(hist, 0, sizeof hist);
                 int reste = (int)budget - fait, k = 0;
+                /* data watch: every write into the demod's working cells, with
+                 * the PC of the instruction (taps 0x2cbb.., tracker 0x5aaa..,
+                 * result cells 0x3fa4.., reference 0x2b28..) */
+                static const struct { uint16_t lo, hi; } W[] = { {0x2cbb, 0x2d04}, {0x5aaa, 0x5ac8}, {0x3fa4, 0x3fa8}, {0x2b28, 0x2b58}, {0x2f00, 0x2f2c} };
+                static uint16_t prev[0x300]; int nw = 0;
+                for (unsigned r = 0; r < 5; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++) prev[nw++] = dsp->data[a];
+                char nomw[256]; snprintf(nomw, sizeof nomw, "%s/watch_%u.txt", hist_dir, g_inj.fn);
+                FILE *fw = fopen(nomw, "w");
+                char nomt[256]; snprintf(nomt, sizeof nomt, "%s/trace_%u.txt", hist_dir, g_inj.fn);
+                FILE *ft = fopen(nomt, "w");
                 while (!dsp->idle && k < reste) {
                     uint16_t w = prog_fetch(dsp, (uint16_t)dsp->pc);
+                    uint16_t pc0 = (uint16_t)dsp->pc; uint16_t ar2 = dsp->ar[2], ar3 = dsp->ar[3];
                     hist[w]++;
+                    if (ft) fprintf(ft, "%04x %04x %010llx %010llx %04x %04x %04x %04x %04x %04x\n", pc0, w,
+                                    (unsigned long long)(dsp->a & 0xFFFFFFFFFFULL), (unsigned long long)(dsp->b & 0xFFFFFFFFFFULL),
+                                    dsp->t, dsp->st0, dsp->st1, dsp->ar[1], ar2, ar3);
                     c54x_run(dsp, 1); k++;
+                    if (fw) { int i = 0;
+                        for (unsigned r = 0; r < 5; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++, i++)
+                            if (dsp->data[a] != prev[i]) { fprintf(fw, "%d pc=%04x op=%04x %04x: %04x -> %04x (%d) AR2=%04x AR3=%04x\n", k, pc0, w, a, prev[i], dsp->data[a], (int16_t)dsp->data[a], ar2, ar3); prev[i] = dsp->data[a]; } }
                 }
+                if (fw) fclose(fw);
+                if (ft) fclose(ft);
                 char nom[256]; snprintf(nom, sizeof nom, "%s/hist_%u.txt", hist_dir, g_inj.fn);
                 FILE *f = fopen(nom, "w");
                 if (f) { for (unsigned w = 0; w < 65536; w++) if (hist[w]) fprintf(f, "%04x %u\n", w, hist[w]); fclose(f); }
@@ -851,6 +878,20 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
       int e1 = -1, e2 = -1; uint8_t pb[148];
       if (cellule_bits_attendus(fn - 1, bsic, pb) == 0) { e1 = 0; for (int i = 0; i < 148; i++) if ((((int16_t)dsp->data[0x2be2 + i]) > 0) != (pb[i] != 0)) e1++; }
       if (cellule_bits_attendus(fn - 2, bsic, pb) == 0) { e2 = 0; for (int i = 0; i < 148; i++) if ((((int16_t)dsp->data[0x2be2 + i]) > 0) != (pb[i] != 0)) e2++; }
+      /* regions of the data memory the demod wrote during phase B (beyond the
+       * DARAM burst buffer and the API pages), with a few values each */
+      { char z[900]; int k = 0; unsigned a = 0x60;
+        while (a < C54X_DATA_SIZE && k < 800) {
+            if (dsp->data[a] != g_data_avant_b[a]) {
+                unsigned b = a; while (b < C54X_DATA_SIZE && b - a < 4096 && (dsp->data[b] != g_data_avant_b[b] || (b + 1 < C54X_DATA_SIZE && dsp->data[b+1] != g_data_avant_b[b+1]))) b++;
+                k += snprintf(z + k, sizeof z - k, " %04x+%u", a, b - a); a = b;
+            } else a++;
+        }
+        { const char *d = calypso_getenv("PONT_NB_HIST"); static unsigned nz;
+          if (d && nz < 12) { char nom[256]; snprintf(nom, sizeof nom, "%s/zones_%u.txt", d, fn); FILE *f = fopen(nom, "w");
+              if (f) { for (unsigned q = 0x60; q < C54X_DATA_SIZE; q++) if (dsp->data[q] != g_data_avant_b[q]) fprintf(f, "%04x %04x %04x\n", q, g_data_avant_b[q], dsp->data[q]); fclose(f); nz++; } } }
+        printf("  [zones] fn=%u flags(OVA=%d OVB=%d C=%d TC=%d OVM=%d FRCT=%d SXM=%d) ecrites:%s\n", fn,
+               g_flags_entree & 1, !!(g_flags_entree & 2), !!(g_flags_entree & 4), !!(g_flags_entree & 8), !!(g_flags_entree & 16), !!(g_flags_entree & 32), !!(g_flags_entree & 64), z); }
       printf("  [scan] fn=%u marge=%d tsc=%d dec=%.2f phase=%.1f rif=%d 2be2 erreurs=%d (vs N-1: %d, N-2: %d) insnA=%u insnB=%u %s  v[0..3]=%d %d %d %d\n", fn, cellule_marge_nb, cellule_tsc_force, cellule_dec_nb, cellule_phase_nb, calypso_rif_level(), err, e1, e2, g_insn_a, g_insn_b, map,
              (int16_t)dsp->data[0x2be2], (int16_t)dsp->data[0x2be3], (int16_t)dsp->data[0x2be4], (int16_t)dsp->data[0x2be5]); }
     /* where did the delivered samples land in DARAM (AAD)? offset in words at

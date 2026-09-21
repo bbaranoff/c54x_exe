@@ -466,3 +466,36 @@ Rejouer : `IQ=cell PONT_NB_DEBUG=1 ./run.sh` puis `grep -a '\[scan\]\|\[nb\]\|\[
 /tmp/c54x-pont/dsp.log` ; balayages CELLULE_NB_DEC=auto|x, CELLULE_NB_PHASE,
 CELLULE_TSC=auto, PONT_NB_MARGE=auto, CELLULE_NB_FINE=1, CELLULE_NB_REPEAT=k,
 CELLULE_NB_AMP, CELLULE_NB_ZERO_DC, CELLULE_NB_MSK ; PONT_NB_HIST=<dir>.
+
+## Phase porteuse = temps, et le TOA 24 de la SB [2026-09-21, suite]
+
+- Kill-switch OVM (CALYPSO_C54X_OVM=0) : partage bon/mauvais identique, drapeaux
+  OVA/OVB/C/TC tous a zero a l'entree de chaque burst (sonde [zones]). L'ajout
+  OVM n'est ni la cause ni un remede. Pas de fuite de drapeaux entre bursts.
+- Pas d'inversion I/Q demandee par le firmware en reception (trf6151_iq_swapped
+  rend 0 hors TX 850) : d_task_d = 24, sans le bit 0x8000.
+- Balayage de la phase porteuse par quadrants (CELLULE_NB_PHASE=quad) : 0 deg
+  = le partage habituel ; 90 et 270 = tout mauvais ; 180 = le burst bon ressort
+  INVERSE (143/148). Marge 2 + 270 deg reproduit exactement marge 3 + 0 deg, et
+  marge 2 + 90 deg rend le bloc SI2 parfait mais inverse. Pour la ROM un
+  echantillon de decalage vaut 90 deg (rotation j^n du MSK) : sa demodulation
+  est COHERENTE sur une reference de phase fixe, l'estimation de canal sur le
+  TSC ne resout ni le quadrant ni le signe.
+- Pourquoi la SB converge a 24 et non 23 : notre burst S est place a 21
+  echantillons dans la fenetre, un de trop pour la geometrie que la ROM attend.
+  IQ=cell:42:0.5:20 avec CELLULE_SB_PHASE=270 : TOA=23, qbits=0, 8/8 SB. Le
+  NB n'en profite pas (marge 2 + 270 = marge 3 + 0).
+- Traces d'execution (PONT_NB_HIST : trace_<fn>.txt, watch_<fn>.txt) : deux
+  bursts 0 (bon 359, mauvais 410) suivent le MEME chemin jusqu'au pas 1698,
+  une boucle argmax en 0x8551-0x8557 (MAX B, XC 1,NC, valeurs A ~0x3dc685d
+  contre 0x3a0e498 : un profil PLAT a 6 % pres, pas un pic de correlation) ;
+  c'est la que la position est choisie et qu'elle part a 5 au lieu de 3. Les
+  « taps » ecrits en 0x2cd1.. (7 groupes) sont ensuite decales d'un mot dans
+  le groupe pour les mauvais bursts. La reference 0x2b28+48 est lue depuis le
+  tampon de burst a AR2 = 0x0d9f.. (mot 209, echantillon 104, un echantillon
+  sur deux) — a comprendre en desassemblant 0x7ef4-0x8557 (PROM0).
+
+Prochaine etape : desassembler la routine NB de la ROM autour de 0x8551
+(argmax) et 0x81cd (lecture du tampon a un echantillon sur deux) pour savoir
+quel profil elle attend a cet endroit ; les traces de 8 bursts sont dans le
+repertoire donne a PONT_NB_HIST.
