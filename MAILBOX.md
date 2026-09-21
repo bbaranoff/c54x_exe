@@ -541,3 +541,51 @@ sur ces valeurs, ou le residu 0x7638 qui fixe count et somme) est lue de
 travers par le coeur ou par moi. Prochaine etape : rejouer cette chaine
 (entree 0x2be2 -> sortie 0x2a00) sur les valeurs des traces avec les
 semantiques du manuel, instruction par instruction, jusqu'au premier ecart.
+
+## Le BCCH decode : SI1-4, lai=001-01-1, le mobile campe [2026-09-21, apres-midi]
+
+Le quantifieur n'etait pas en cause : quatre semantiques du coeur, toutes en
+aval de l'egaliseur, lues de travers. Trouvees en rejouant chaque etage en
+Python sur les traces (PONT_NB_HIST) jusqu'au premier ecart :
+
+1. `add Xmem,Ymem,B` (0xA1xx) etait execute comme SQDST (qui est 0xE2xx) :
+   A <- Ymem<<16, B += (AH-Xmem)^2. Site 0x8251 (fin du filtre 3 coefficients
+   de l'egaliseur, 206 fois par burst) : la somme construite dans A etait
+   remplacee par l'echantillon Q derotate. D'ou les "soft bits" propres mais
+   inverses et decales d'un symbole (out[n] = -bit[n+2] au lieu de
+   +bit[n+3]), la correlation TSC du residu nulle (count 6), l'echelle T=2 et
+   les +1 partout. Aussi 0x8565, 0x81fa, 0x7f03, 0x7fab-0x80ec.
+   (c54x_exec.c, bloc `hi8 == 0xA1` desactive.)
+2. `*+ARx(lk)%` (mode 14) utilisait encore la grille "base = AR - AR % BK" :
+   au 4e passage du desentrelaceur (0x9a15/0x9a34/0x9a59, BK=456,
+   `mar *+AR4(57)%`), AR4 = 0x2aab+57 donnait 0x291c au lieu de 0x2ae4 et la
+   moitie impaire du bloc partait sous le tampon. (c54x_decode.c ->
+   c54x_circ_ref, comme les modes 8-11.)
+3. `sfta A,1` posait C = bit 31 (regle SFTL) ; la LFSR du code de Fire
+   (0xa168-0xa175, registre 40 bits dans A, generateur 0x04820009 via
+   `xc C -> xor #0x0482,16,A ; xor @60(=9),A`) veut le bit 39 : syndrome nul
+   sur un bloc juste seulement avec C = src(40-SHIFT). Le manuel dit
+   src(39-SHIFT) et son exemple (80AA001234<<5 -> C=1) ne colle a aucune des
+   deux ; isa_test 188 echoue desormais, la ROM a raison. Avant : FIRE1
+   (a_cd[0]=0x8040) sur chaque bloc, "Dropping frame with N bit errors".
+4. `and/or/xor src,SHIFT,dst` avec src=B (0xF2xx/0xF3xx) : operandes
+   inverses (dst = src OP (dst<<SHIFT)) ; corrige en dst OP (src<<SHIFT)
+   (audit qosmo-dsp vs l1-dsp). Sites 0x8ec7-0x8eca (repliement du CRC).
+
+Verifications intermediaires (scratchpad repro.py / vit.py) : egaliseur
+Python avec les coefficients de la ROM = +bit[n+3] 142/142 et = la sortie
+ROM apres (1) ; nibbles 0x4200 = 456/456 via tools/cch_ref ; bloc 0x2a00 =
+456/456 apres (2) ; mots TRN du treillis identiques au modele (228/228),
+traceback -> 0 erreur sur u224 ; mots 0x2c3c.. exacts.
+
+Attention, la reference u228 de cellule_u228_attendu() etait fausse : les
+octets L2 se deplient LSB en premier (osmo_pbit2ubit_ext lsb_mode=1) avant
+le Fire et le convolutif ; en MSB d'abord la sonde [u228] annoncait "78
+faux" sur un bloc juste. Corrige ; la sonde [u228]/[bloc] reste a revoir
+(elle lit 0x2d66, qui n'est pas la sortie).
+
+Resultat (IQ=cell CELLULE_NB_SYM=0.3) : a_cd = 8000 06f9 0026 : 0631 001c
+10f1 0100 4040 00e5 2b00 ... = SI4 LAI 001-01-1 ; mobile.log : New SYSTEM
+INFORMATION 1/2/3/4, lai=001-01-1, 0 "Dropping frame", "We are camping
+normally". Reste : a_cd[2] (0x26/0x35 "erreurs de bits") non nul sur un bloc
+parfait, sans effet (fire_crc=0) ; isa_test 147 ok / 61 FAIL.

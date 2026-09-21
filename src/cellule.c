@@ -586,7 +586,12 @@ int cellule_bloc_attendu(uint32_t fn, uint8_t bsic, uint8_t code456[456], uint8_
     }
     uint32_t tc = (fn0 / 51) % 8;
     const uint8_t *l2 = (p51 <= 5) ? cellule_l2((int)tc) : cellule_l2(-1);
-    for (int i = 0; i < 184; i++) info184[i] = (l2[i / 8] >> (7 - (i % 8))) & 1;
+    /* [2026-09-21] LSB first within each octet: that is how gsm0503_xcch_encode
+     * unpacks the L2 frame before the Fire parity and the convolutional code
+     * (osmo_pbit2ubit_ext(..., lsb_mode=1)), so it is the bit order the ROM's
+     * Viterbi has to reproduce. MSB first gave a false "78 faux" on a correct
+     * block. */
+    for (int i = 0; i < 184; i++) info184[i] = (l2[i / 8] >> (i % 8)) & 1;
     return 0;
 }
 
