@@ -424,18 +424,9 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
      * the +-1 taps near 55 % and the +-2 taps near 10 %, both far from the
      * threshold, whatever the data. */
     if (type == 'B' || type == 'C') {
-        static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_NB_SYM"); a = (e && *e) ? atof(e) : 0.0; }
-        if (a != 0.0) {
-            double xi[148], xq[148];
-            for (int k = 0; k < 148; k++) { xi[k] = burst_iq[2*k]; xq[k] = burst_iq[2*k+1]; }
-            for (int k = 0; k < 148; k++) {
-                double yi = xi[k], yq = xq[k];
-                if (k > 0)   { yi += a * xi[k-1]; yq += a * xq[k-1]; }
-                if (k < 147) { yi += a * xi[k+1]; yq += a * xq[k+1]; }
-                yi /= (1 + 2 * a); yq /= (1 + 2 * a);   /* keep the peak amplitude */
-                burst_iq[2*k] = (int16_t)lrint(yi); burst_iq[2*k+1] = (int16_t)lrint(yq);
-            }
-        }
+        /* default 0.3 since 2026-09-21 (the value that decodes SI1-4); 0 disables */
+        static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_NB_SYM"); a = (e && *e) ? atof(e) : 0.3; }
+        gmsk_elargir(burst_iq, 148, a);
     }
     /* [2026-09-21] CELLULE_NB_NOISE=<sigma> : Gaussian noise on the normal
      * bursts (deterministic seed per frame). Why: the ROM scales its soft bits

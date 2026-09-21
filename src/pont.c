@@ -1333,6 +1333,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;
               int has5 = (md0 == 5 || md1 == 5), has6 = (md0 == 6 || md1 == 6);
               if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache FB postee par l'ARM\n", m.a); ncmd++; }
+              { static int ncmd6; if (has6 && prev6 != 1 && ncmd6 < 60) { printf("  [cmd] fn=%u tache SB postee par l'ARM (W0 md=%d W1 md=%d)\n", m.a, md0, md1); ncmd6++; } }
               if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
               prev5 = has5; prev6 = has6; }
             { static int fb_prev = 0; if (*d_fb_det && !fb_prev) printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs()); fb_prev = *d_fb_det != 0; }
