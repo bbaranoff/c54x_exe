@@ -789,6 +789,36 @@ static uint32_t pont_encode_sb(uint8_t bsic, uint16_t t1, uint8_t t2, uint8_t t3
     return sb;
 }
 
+/* [2026-09-21] CADENCEMENT, PAS BEQUILLE.
+ *
+ * STREAM et LOCKSTEP figuraient parmi les bequilles ; ils n'y ont pas leur
+ * place. Aucun des deux ne falsifie une mesure : ils font cohabiter un DSP
+ * emule, qui coute ~6,7 ms par trame, avec une BTS en temps reel dont la trame
+ * dure 4,615 ms.
+ *   - sans LOCKSTEP, QEMU avance a l'horloge murale et saute les trames que le
+ *     DSP n'a pas finies : releve du 2026-09-21, « 2170 sauts, 3440 trames
+ *     jouees », soit 39 % de perte ;
+ *   - sans STREAM, chaque burst part vers le RIF des son arrivee : 217 bursts
+ *     par seconde pour ~89 ticks, la ROM compte ~1526 symboles par trame au
+ *     lieu de 1250, son TOA ne se stabilise jamais (2967, 3735, 4215, 48,
+ *     13536 sur un meme run) et le pipeline se desaligne (« BURST ID 3!=2 »,
+ *     « EMPTY »).
+ * La vraie bequille etait ailleurs : le mode cadence ne livrait que TS0 et
+ * bourrait les sept autres intervalles a zero. C'est corrige (calypso_bsp.c,
+ * bsp_autres_stocker/bsp_autres_bits) : la trame remise au DSP porte
+ * maintenant ce que la BTS a reellement emis sur les huit intervalles.
+ *
+ * Ils restent affiches, mais sur leur propre ligne. */
+static const char *cadencement_actif(void)
+{
+    static char buf[128]; buf[0] = 0;
+    const char *s1 = calypso_getenv("CALYPSO_BSP_STREAM");
+    const char *s2 = calypso_getenv("CALYPSO_PONT_LOCKSTEP");
+    if (s1 && *s1 == '1') strcat(buf, "STREAM ");
+    if (s2 && *s2 == '1') strcat(buf, "LOCKSTEP ");
+    return buf[0] ? buf : "aucun (le DSP ne suivra pas le temps reel)";
+}
+
 static const char *hacks_actifs(void)
 {
     static char buf[512]; buf[0] = 0;
@@ -798,8 +828,8 @@ static const char *hacks_actifs(void)
         {"CALYPSO_TWL3025_AFC_SIGN_OLD","AFC_SIGN_OLD",0},
         {"CALYPSO_BSP_VEC30","VEC30",1},
         {"CALYPSO_BSP_RX_LEAD","RX_LEAD",3}, {"CALYPSO_BSP_TPU_TRACK","TPU_TRACK",1},
-        {"CALYPSO_BSP_TOA_LOCK","TOA_LOCK",1}, {"CALYPSO_BSP_STREAM","STREAM",1},
-        {"CALYPSO_PONT_LOCKSTEP","LOCKSTEP",1}, {"CALYPSO_BSP_IQ_PASSTHROUGH","IQ_SYNTH",2},
+        {"CALYPSO_BSP_TOA_LOCK","TOA_LOCK",1},
+        {"CALYPSO_BSP_IQ_PASSTHROUGH","IQ_SYNTH",2},
         {"CALYPSO_RHEA_DMA_XFER","RHEA_DMA",1}, {"CALYPSO_BSP_RX_VEC","RX_VEC",0},
         {"CELLULE_SCH_ONLY","SCH_ONLY",1}, {"CELLULE_SCH_AMPDIV","SCH_AMPDIV",3},
         {"CALYPSO_FIXES","FIXES",0},
@@ -1461,7 +1491,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                        (drapeaux & PONT_DONE_INIT) ? "" : "boot ",
                        *d_fb_det, a_sch0[0], a_sch0[1], a_sch0[2], a_sch0[3],
                        a_sync[0], a_sync[1], a_sync[2], trames, irqs, injectes);
-                if ((trames % (217*8)) == 0) printf("  hacks actifs : %s ; stimulus : %s\n", hacks_actifs(), iq_mode ? iq_mode : "none");
+                if ((trames % (217*8)) == 0) printf("  hacks actifs : %s ; cadencement : %s ; stimulus : %s\n",
+                                                     hacks_actifs(), cadencement_actif(), iq_mode ? iq_mode : "none");
             }
             fflush(stdout);
             break;

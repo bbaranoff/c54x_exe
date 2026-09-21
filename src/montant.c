@@ -473,6 +473,63 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
 
     scruter_dcch(fn);
 
+    /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
+     * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;
+     * mesure : /dev/shm/calypso_bsp_dedie a garde « tn=1 ss=0 » bien apres la
+     * fin de la communication. Le BSP continuait donc de remplacer TS0 sur les
+     * trames du canal -- et pour SS=0 ce sont fn%%51 = 0..3, or fn%%51=0 porte
+     * la FCCH et fn%%51=1 la SCH. Le mobile perdait sa synchro pour de bon :
+     * « FBSB RESP: result=255 » en boucle, d_fb_det=0, DSP parque.
+     *
+     * Une tache FB (5) ou SB (6) postee par l'ARM veut dire qu'il cherche la
+     * synchro sur TS0 : il n'est plus en mode dedie, quoi qu'en dise le tap.
+     * Ce signal-la vient du firmware lui-meme. */
+    {
+        uint16_t md0 = api_ram[(API_W_PAGE(0) + WP_D_TASK_MD) / 2] & 0xff;
+        uint16_t md1 = api_ram[(API_W_PAGE(1) + WP_D_TASK_MD) / 2] & 0xff;
+        bool cherche_synchro = (md0 == FB_DSP_TASK || md0 == SB_DSP_TASK ||
+                                md1 == FB_DSP_TASK || md1 == SB_DSP_TASK);
+        if (g.dedie_arme && cherche_synchro) {
+            printf("  [montant] tache %s postee : le mobile cherche la synchro, "
+                   "canal dedie libere (TS0 rendu au FCCH/SCH)\n",
+                   (md0 == FB_DSP_TASK || md1 == FB_DSP_TASK) ? "FB" : "SB");
+            g.dedie_arme = false;
+            calypso_bsp_set_dedie(0, 0xFF, 0);
+            montant_canal_libere();
+        }
+    }
+
+    /* [2026-09-21] QUI RATE, ET QUAND. La descente dediee perd environ un bloc
+     * sur deux (« Dropping frame with 110 bit errors », fire_crc >= 2 cote
+     * layer23) alors que pont decode les MEMES blocs sans une seule erreur
+     * (TS1/0:38/0 TS1/32:14/0) et que le BSP livre tous les bursts
+     * (manques=0). C'est donc la demodulation dans la ROM qui flanche, pas la
+     * plomberie. Cette sonde donne le verdict bloc par bloc : le mot d'etat de
+     * a_cd (bit 15 = bloc present, bit 6 = erreur de Fire) avec la trame et sa
+     * position dans la multitrame, de quoi voir si l'echec suit le SDCCH, la
+     * SACCH, ou une position particuliere. MONTANT_ACD=0 la coupe. */
+    {
+        static int sonde = -1;
+        if (sonde < 0) { const char *e = calypso_getenv("MONTANT_ACD"); sonde = (e && *e == '0') ? 0 : 1; }
+        if (sonde && g.dedie_arme) {
+            static uint16_t prec;
+            static unsigned long ok, ko;
+            uint16_t etat = api_ram[(API_NDB + NDB_A_CD) / 2];
+            if ((etat & B_BLUD) && etat != prec) {
+                const uint8_t *d = (const uint8_t *)api_ram + API_NDB + NDB_A_CD + 6;
+                bool fire = (etat & 0x0040) != 0;
+                if (fire) ko++; else ok++;
+                if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
+                    printf("  [a_cd] fn=%u p51=%u p102=%u etat=%04x %s "
+                           "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
+                           fn, fn % 51u, fn % 102u, etat, fire ? "FIRE KO" : "ok",
+                           d[0], d[1], d[2], d[3], ok, ko);
+                }
+            }
+            prec = etat;
+        }
+    }
+
     uint16_t *wp = &api_ram[API_W_PAGE(pg) / 2];
     uint16_t task_u  = taches ? wp[WP_D_TASK_U / 2] : 0;
     uint16_t task_ra = wp[WP_D_TASK_RA / 2];
