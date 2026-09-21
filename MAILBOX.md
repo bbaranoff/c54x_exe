@@ -589,3 +589,136 @@ Resultat (IQ=cell CELLULE_NB_SYM=0.3) : a_cd = 8000 06f9 0026 : 0631 001c
 INFORMATION 1/2/3/4, lai=001-01-1, 0 "Dropping frame", "We are camping
 normally". Reste : a_cd[2] (0x26/0x35 "erreurs de bits") non nul sur un bloc
 parfait, sans effet (fire_crc=0) ; isa_test 147 ok / 61 FAIL.
+
+## Pas de LU ACCEPT : en montage DSP, le lien montant n'existait pas [2026-09-21, soir]
+
+Symptome : le mobile campe (SI 1-4, `lai=001-01-1`, `CGI=001-01-1-6001`, cote
+pont `DL bursts=2268 blocs=567 crc=0`), demande sa mise a jour de position,
+puis tourne en rond :
+
+    mobile.log  : CHANNEL REQUEST: 00 (Location Update with NECI)
+                  RANDOM ACCESS (requests left 8..4), T3211 qui refire
+    osmocon.log : L1CTL_RACH_REQ (ra=0x01, offset=9, combined=1, uic=0xff) x5
+    pont.log    : UL bursts=0 tard=0 rach=0            <- rien ne remonte
+    dsp.log     : aucune occurrence de RACH ni de UL
+    /dev/shm/   : calypso_api_ram seul, pas de calypso_rach
+
+Sans RACH, pas d'IMM ASS, donc pas de SDCCH, donc jamais de LU ACCEPT. La
+descente n'etait pas en cause.
+
+Cause, en trois ruptures sur le meme chemin :
+
+1. `calypso_trx.c:325` voit bien l'ecriture de `d_rach` et appelle
+   `calypso_l1_do_rach_written()`, qui relaie a `l1->rach_written`
+   (`calypso_l1_dispatch.c:102`). Mais sous `CALYPSO_DSP_EXTERN=1`,
+   `calypso_l1_do_init()` appelle `calypso_l1_disable()` (qemu.log :
+   « couche 1 « grgsm » desactivee (DSP externe) ») : `l1 == NULL`, le hook
+   est un no-op. Idem pour `_page_written` (d_task_u).
+2. Cote `c54x_exe`, le BSP contient tout le necessaire —
+   `calypso_bsp_tx_rach_burst()` (calypso_bsp.c:2487), `send_rach_ra()`
+   (:2541), `send_ul()` (:2344), `tx_burst()` (:2397) — mais **personne ne
+   les appelle** : code mort. Dans les arbres precedents les appels etaient
+   cote QEMU (`qosmo-dsp/hw/arm/calypso/calypso_trx.c:1200` sur ecriture de
+   d_rach, `:1945-1959` poll de d_task_ra/d_task_u par trame) ; le refactor
+   « couche 1 enregistree » les a perdus et ils n'ont pas ete reportes dans le
+   processus DSP.
+3. `pont.py` n'a qu'une entree montante : les side-bands `/dev/shm`
+   (`pont/uplink.py:13,134`), ecrits uniquement par la couche 1 gr-gsm
+   (`qosmo-grgsm/.../calypso_l1_grgsm.c:738`) — justement celle qui est
+   desactivee. `--dsp-port 6702` est unidirectionnel (`pont/trx.py:83-89`).
+
+Correctif : `src/montant.c`, appele une fois par trame depuis le PONT_TICK de
+`src/pont.c`. Il scrute l'API RAM partagee et alimente les memes side-bands
+qu'en montage grgsm (RACH, SDCCH UL, FACCH, SACCH, parole), avec les captures
+reprises telles quelles de la couche 1 gr-gsm (fenetre a_cu + 6 et son
+heuristique d'en-tete LAPDm, `take_ul` sur B_BLUD, anneau TCH). La page W est
+choisie sur le `d_dsp_page` frais du NDB (dsp_end_scenario ecrit
+`B_GSM_TASK | w_page` avant de basculer), pas sur celui echantillonne au TICK :
+`l1_sync()` tourne entre le TICK et le GO en mode deux phases.
+
+Seul point ou la scrutation n'est pas equivalente au callback : le RACH. Le
+firmware ecrit `d_rach` (prim_rach.c:72) puis `d_task_ra`, et rien ne les
+efface (sync.c:307 ne le fait que sur ABORT). On declenche donc sur front de
+`d_rach`, avec une garde de 4 trames. Angle mort : deux tentatives de suite
+avec la meme RA (tiree au hasard par gsm48_rr, ~1/256) ;
+`MONTANT_CONSOMME_RACH=1` remet `d_rach` a zero apres publication et rend le
+declenchement exact. `MONTANT=0` coupe tout, `MONTANT_DEBUG=N` regle le nombre
+d'evenements imprimes (20 par defaut).
+
+Pourquoi les side-bands et pas TRXD : `calypso_bsp_send_ul()` emet vers
+127.0.0.1:5702, c'est-a-dire la socket **descendante** de pont.py, dont
+`run_data()` fait `self.bts_data = addr` sur tout paquet recu — le burst
+montant serait relu comme une descente et l'adresse de la BTS ecrasee. Une
+voie TRXD native demanderait d'abord un port montant dedie cote pont.
+
+A cote, meme session : une SB annoncant `BSIC=7` alors que le BSC est a 21
+signifie que le QEMU lance n'a **pas** `CALYPSO_DSP_EXTERN=1` (il ecoute alors
+sur udp/4730-4731). La SB est alors fabriquee par le shunt gr-gsm a partir du
+paquet `SCH2` de `pont/downlink.py:30`, avec `cfg.bsic` = 7 par defaut
+(`pont/config.py:45`) : `PONT_BSIC=21`, ou le montage DSP.
+
+## Le RACH passe, l'IMM ASS revient, le mobile la jette : la reference de requete [2026-09-21, nuit]
+
+Avec `src/montant.c` en place, la boucle complete se mesure sur le banc reel
+(sonde a 3 ms sur `/dev/shm/calypso_api_ram` et `/dev/shm/calypso_rach`) :
+
+    22:07:26 RACH publie seq=2 ra=0x0d bsic=21
+    22:07:29 >>> IMM ASS ra=0x0d  ref T1'=3 T2=9 T3=35
+             brut = 2d 06 3f 03 41 a2 02 0d 1c 69 00 00 2b...
+    22:07:30 >>> IMM ASS ra=0x04  ref T1'=3 T2=17 T3=23
+    22:07:32 >>> IMM ASS ra=0x06  ref T1'=3 T2=2 T3=14
+
+Donc : le RACH part, la BTS l'entend, le BSC ouvre un SDCCH, l'IMMEDIATE
+ASSIGNMENT redescend sur l'AGCH, le DSP la decode et le bloc arrive dans
+`a_cd` avec la BONNE RA. Et pourtant le mobile reste en `connection pending`,
+`/dev/shm/calypso_sdcch_ul` n'est jamais cree (aucune tache `d_task_u`), et le
+BSC compte douze `lchan allocation failed ... WAIT_RLL_RTP_ESTABLISH Timeout`
+en quatre minutes.
+
+Cause : `gsm48_match_ra()` (osmocom-bb `gsm48_rr.c:3359`) n'accepte une
+assignation que si la RA **et** T1'/T2/T3 correspondent a ce que sa propre
+couche 1 lui a confirme, et journalise sinon « request %02x matches but not
+frame number ». Or le banc n'emet pas l'access-burst a la trame ou le firmware
+a cru l'emettre : `pont.py` le programme sur SON horloge
+(`pont/uplink.py:_poll_rach` -> `_next_fn(4, ...)`), plusieurs trames plus
+tard, et la BTS horodate la reference avec cette trame-la.
+
+Ce n'est pas une decouverte : la couche 1 gr-gsm contient deja le contournement
+(`qosmo-grgsm/.../calypso_l1_grgsm.c:836-845`, `feed_agch()` reecrit les octets
+8-9 de tout IMM ASS avec le `last_rach` du firmware, lu par symbole ELF). Sous
+`CALYPSO_DSP_EXTERN=1` cette couche 1 est desactivee, donc plus personne ne le
+faisait.
+
+Correctif, cote QEMU cette fois (`hw/arm/calypso/calypso_trx.c`) :
+
+- `calypso_l1_dispatch.c` retient le chemin de l'ELF passe a
+  `calypso_l1_do_init()` et expose `calypso_firmware_symbol()` (table des
+  symboles ELF32, reprise de la couche 1 gr-gsm). `last_rach` est GLOBAL a
+  0x00837624 dans `layer1.highram.elf`.
+- `api_write` retient la RA a chaque ecriture de `d_rach`, et
+  `pont_rach_suivi()` releve `last_rach.fn` une fois par trame (sur l'ecriture
+  de `d_dsp_page`, que `dsp_end_scenario()` fait exactement une fois par
+  trame) pour tenir un historique **par RA**. C'est necessaire : les
+  assignations reviennent dans le desordre (mesure ci-dessus : 0x0d, puis
+  0x04, puis 0x06 alors que la derniere RA ecrite etait 0x0e).
+- `api_read` intercepte la lecture ARM du seul mot concerne,
+  `API_NDB + NDB_A_CD + 14` (octets 8-9 du bloc L2, la reference de requete),
+  quand le bloc est bien `06 3f`, et rend la reference recalculee depuis la
+  trame memorisee pour CETTE RA. Si aucune trame n'est connue pour elle, on ne
+  corrige pas : fabriquer une correspondance serait pire que l'echec.
+  `MONTANT_REQREF=0` coupe la correction.
+
+Au passage, deux corrections sur le montant lui-meme :
+
+- Le declencheur du RACH etait la valeur de `d_rach`. Faux : ce mot du NDB est
+  aussi de la memoire du C54x (`data[0x0A3A]`) et la ROM y laisse du residu.
+  Echantillonnage a 4 ms pendant 90 s : `d_rach = 0xfe00` avec `d_task_ra = 0`
+  sur les deux pages W dans 3219 relevés, contre trois vraies tentatives
+  (0x0d54, 0x0954, 0x0c54) portant toutes `d_task_ra = 0x000a`. Or
+  `RACH_DSP_TASK = 10` (firmware `include/calypso/l1_environment.h:49`). Le
+  declencheur est donc `d_task_ra`, et un access-burst bidon (ra=0xfe, bsic=0)
+  partait vers la BTS a chaque demarrage. `MONTANT_RACH_SUR_DRACH=1` retablit
+  l'ancien comportement.
+- `calypso_bsp.c` imprimait une ligne `[ts0] tick=... NB fenetre=151` par
+  trame livree : la condition `nwin > 0` est vraie pour tout burst normal
+  depuis la DMA one-shot. Repliee derriere `CALYPSO_BSP_TS0_DEBUG=1`.

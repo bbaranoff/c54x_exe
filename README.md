@@ -47,6 +47,34 @@ Journaux et pid dans `/tmp/c54x-pont/`. Sockets et fichiers propres a ce
 montage, pour ne pas croiser le banc : `/tmp/osmocom_l2_pont`, VTY mobile
 4347, moniteur QEMU `/tmp/qemu-monitor-pont.sock`.
 
+### Le lien montant (RACH, SDCCH, SACCH, parole)
+
+En montage `dsp`, la couche 1 gr-gsm de QEMU est desactivee
+(`CALYPSO_DSP_EXTERN=1`), donc les hooks qui publiaient le montant cote QEMU ne
+tirent plus. C'est `src/montant.c` qui s'en charge : une scrutation de l'API RAM
+partagee a chaque trame, qui alimente les memes side-bands que consomme
+`pont.py` (`pont/uplink.py`) :
+
+    /dev/shm/calypso_rach          RACH (ra, bsic) lu dans NDB d_rach
+    /dev/shm/calypso_sdcch_ul      bloc L2 montant (a_cu)
+    /dev/shm/calypso_tch_facch_ul  FACCH montante
+    /dev/shm/calypso_tch_sacch_ul  SACCH montante
+    /dev/shm/calypso_tch_ul        anneau de trames de parole
+
+Sans lui : `pont.log` affiche `UL bursts=0 rach=0`, la BTS ne voit aucun
+acces aleatoire, le mobile epuise ses huit tentatives et il n'y a jamais de
+LOCATION UPDATING ACCEPT. Reglages : `MONTANT=0` coupe la publication,
+`MONTANT_DEBUG=N` regle le nombre d'evenements imprimes (20 par defaut),
+`MONTANT_RACH_SUR_DRACH=1` revient a l'ancien declencheur (transition de
+`d_rach` au lieu de `d_task_ra`).
+
+Cote QEMU, `MONTANT_REQREF=0` coupe la correction de la reference de requete
+des IMMEDIATE ASSIGNMENT (`calypso_trx.c`) : sans elle le mobile jette
+l'assignation, parce que pont.py emet l'access-burst sur sa propre horloge et
+que `gsm48_match_ra()` exige une correspondance exacte du numero de trame.
+Causes et mesures : `MAILBOX.md`, sections « Pas de LU ACCEPT » et « Le RACH
+passe, l'IMM ASS revient ».
+
 ### 1. Le DSP : `c54x_exe --arm`
 
 ```bash

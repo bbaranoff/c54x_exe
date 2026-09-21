@@ -34,6 +34,13 @@ c54x_exe --trames 50          # mode autonome, sans ARM : la mask-ROM seule
 - **Vérifier** : `ls -la /dev/shm/calypso_api_ram /tmp/calypso_dsp.sock`.
 - **Options** : `--insns N` budget par trame (32000), `--iq fcch|cell|tone:x|noise`,
   `--amp N`, `-v` à `-vvvvvv` pour les traces du cœur.
+- **Lien montant** : publie `/dev/shm/calypso_rach`, `calypso_sdcch_ul`,
+  `calypso_tch_facch_ul`, `calypso_tch_sacch_ul`, `calypso_tch_ul` en scrutant
+  l'API RAM (`src/montant.c`) — c'est par là que le RACH du mobile atteint
+  pont.py puis la BTS. `MONTANT=0` coupe, `MONTANT_DEBUG=N` règle les traces,
+  `MONTANT_CONSOMME_RACH=1` rend le déclenchement exact.
+  **Vérifier** : `./c54x_exe` imprime `[montant] RACH ra=0x.. bsic=..` et
+  `pont.log` passe de `rach=0` à `rach=N`.
 
 ## 2. `qosmo` — l'ARM et la layer1 osmocom-bb
 

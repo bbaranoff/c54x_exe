@@ -43,6 +43,8 @@ echo "== SB decodees (osmocon) : $(sed 's/\x1b\[[0-9;]*m//g' "$O" | grep -ac '=>
 echo "== blocs BCCH jetes (fire) : $(sed 's/\x1b\[[0-9;]*m//g' "$M" | grep -ac 'Dropping frame')"
 echo "== System Information vus :"
 sed 's/\x1b\[[0-9;]*m//g' "$M" | grep -aoE "New SYSTEM INFORMATION [0-9a-z]+" | sort | uniq -c || echo "  (aucun)"
+echo "== montant : RACH publies par le DSP : $(sed 's/\x1b\[[0-9;]*m//g' "$RUNDIR/dsp.log" | grep -ac '\[montant\] RACH')   compteurs du pont : $(grep -ao 'UL bursts=[0-9]* tard=[0-9]* rach=[0-9]*' "$RUNDIR/pont.log" | tail -1)"
+echo "== IMM ASS : $(sed 's/\x1b\[[0-9;]*m//g' "$M" | grep -ac 'IMMEDIATE ASSIGNMENT')   LU ACCEPT : $(sed 's/\x1b\[[0-9;]*m//g' "$M" | grep -ac 'LOCATION UPDATING ACCEPT')"
 LAI="$(sed 's/\x1b\[[0-9;]*m//g' "$M" | grep -aoE "lai=[0-9]+-[0-9]+-[0-9]+" | tail -1)"
 echo "== VERDICT :"
 if [ -z "$LAI" ]; then echo "  ECHEC : aucun SI lu"; else

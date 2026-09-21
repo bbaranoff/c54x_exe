@@ -140,6 +140,11 @@ arreter() {
     done
     sleep 1
     rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty"
+    # Side-bands du lien montant (src/montant.c) : sinon pont.py relit le
+    # dernier enregistrement d'une session precedente au demarrage.
+    rm -f /dev/shm/calypso_rach /dev/shm/calypso_sdcch_ul \
+          /dev/shm/calypso_tch_facch_ul /dev/shm/calypso_tch_sacch_ul \
+          /dev/shm/calypso_tch_ul
 }
 
 statut() {

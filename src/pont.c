@@ -35,6 +35,7 @@
 #include "pont.h"
 #include "calypso_gmsk.h"
 #include "cellule.h"
+#include "montant.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
 extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c : provenance du TOA */
@@ -1321,6 +1322,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 }
             }
             if (*d_fb_det) calypso_bsp_toa_feedback((int)(int16_t)a_sync[0]);  /* native TOA tracking loop */
+            /* [2026-09-21] LIEN MONTANT. Sous CALYPSO_DSP_EXTERN=1 la couche 1
+             * gr-gsm est desactivee, donc les hooks qui publiaient le montant
+             * (calypso_l1_do_rach_written / _page_written) sont des no-op et le
+             * RACH du mobile ne quittait jamais l'API RAM : pont.py comptait
+             * « UL bursts=0 rach=0 », aucune IMM ASS, aucun LU ACCEPT. On
+             * scrute ici la page W que l'ARM vient de remplir (m.b = d_dsp_page)
+             * et on alimente les memes side-bands /dev/shm qu'en montage grgsm. */
+            montant_scruter(api_ram, m.a, m.b & 1u);
             trames++;
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
@@ -1467,6 +1476,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     }
     printf("pont : bilan de la session : %lu trames, %lu IRQ API, %lu reset, %llu insn\n",
            trames, irqs, resets, (unsigned long long)insns_total);
+    montant_bilan();
 }
 
 int pont_serveur(C54xState *dsp, uint16_t *api_ram, const char *socket_path,
