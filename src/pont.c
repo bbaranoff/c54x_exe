@@ -311,6 +311,8 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
 
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
 static unsigned g_flags_entree; static uint16_t g_data_avant_b[C54X_DATA_SIZE];
+static uint16_t g_snap_2be2[148]; static int g_snap_ok;
+static uint16_t g_snap_2a00[456]; static int g_snap_2a00_ok;
 #define s_or_dsp_st0(d) ((d)->st0)
 static int16_t g_dernier_iq[2 * 256]; static int g_dernier_n_iq;
 static uint16_t g_daram_apres_dma[384]; static uint16_t g_daram_aad;
@@ -419,9 +421,10 @@ phase_b:
                 /* data watch: every write into the demod's working cells, with
                  * the PC of the instruction (taps 0x2cbb.., tracker 0x5aaa..,
                  * result cells 0x3fa4.., reference 0x2b28..) */
-                static const struct { uint16_t lo, hi; } W[] = { {0x2cbb, 0x2d04}, {0x5aaa, 0x5ac8}, {0x3fa4, 0x3fa8}, {0x2b28, 0x2b58}, {0x2f00, 0x2f2c} };
-                static uint16_t prev[0x300]; int nw = 0;
-                for (unsigned r = 0; r < 5; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++) prev[nw++] = dsp->data[a];
+                static const struct { uint16_t lo, hi; } W[] = { {0x2cbb, 0x2d04}, {0x5aaa, 0x5ac8}, {0x3fa4, 0x3fa8}, {0x2b28, 0x2b58}, {0x2f00, 0x2f2c}, {0x2a00, 0x2bc8} };
+                #define NW 6
+                static uint16_t prev[0x600]; int nw = 0;
+                for (unsigned r = 0; r < NW; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++) prev[nw++] = dsp->data[a];
                 char nomw[256]; snprintf(nomw, sizeof nomw, "%s/watch_%u.txt", hist_dir, g_inj.fn);
                 FILE *fw = fopen(nomw, "w");
                 char nomt[256]; snprintf(nomt, sizeof nomt, "%s/trace_%u.txt", hist_dir, g_inj.fn);
@@ -430,16 +433,21 @@ phase_b:
                     uint16_t w = prog_fetch(dsp, (uint16_t)dsp->pc);
                     uint16_t pc0 = (uint16_t)dsp->pc; uint16_t ar2 = dsp->ar[2], ar3 = dsp->ar[3];
                     hist[w]++;
-                    if (ft) fprintf(ft, "%04x %04x %010llx %010llx %04x %04x %04x %04x %04x %04x\n", pc0, w,
+                    if (k == 12800) { memcpy(g_snap_2be2, &dsp->data[0x2be2], sizeof g_snap_2be2); g_snap_ok = 1; }
+                    if (pc0 == 0x9a78 && !g_snap_2a00_ok) { memcpy(g_snap_2a00, &dsp->data[0x2a00], sizeof g_snap_2a00); g_snap_2a00_ok = 1;
+                        char nm[256]; snprintf(nm, sizeof nm, "%s/mem_%u_9a78.bin", hist_dir, g_inj.fn); FILE *fm = fopen(nm, "wb"); if (fm) { fwrite(dsp->data, 2, C54X_DATA_SIZE, fm); fclose(fm); } }
+                    if (ft) fprintf(ft, "%04x %04x %010llx %010llx %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x\n", pc0, w,
                                     (unsigned long long)(dsp->a & 0xFFFFFFFFFFULL), (unsigned long long)(dsp->b & 0xFFFFFFFFFFULL),
-                                    dsp->t, dsp->st0, dsp->st1, dsp->ar[1], ar2, ar3);
+                                    dsp->t, dsp->st0, dsp->st1, dsp->ar[1], ar2, ar3, dsp->ar[4], dsp->ar[5], dsp->ar[0],
+                                    dsp->data[ar2], dsp->data[ar3], dsp->data[dsp->ar[4]], dsp->data[dsp->ar[5]], dsp->ar[6]);
                     c54x_run(dsp, 1); k++;
                     if (fw) { int i = 0;
-                        for (unsigned r = 0; r < 5; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++, i++)
+                        for (unsigned r = 0; r < NW; r++) for (unsigned a = W[r].lo; a < W[r].hi; a++, i++)
                             if (dsp->data[a] != prev[i]) { fprintf(fw, "%d pc=%04x op=%04x %04x: %04x -> %04x (%d) AR2=%04x AR3=%04x\n", k, pc0, w, a, prev[i], dsp->data[a], (int16_t)dsp->data[a], ar2, ar3); prev[i] = dsp->data[a]; } }
                 }
                 if (fw) fclose(fw);
                 if (ft) fclose(ft);
+                { char nm[256]; snprintf(nm, sizeof nm, "%s/mem_%u_fin.bin", hist_dir, g_inj.fn); FILE *fm = fopen(nm, "wb"); if (fm) { fwrite(dsp->data, 2, C54X_DATA_SIZE, fm); fclose(fm); } }
                 char nom[256]; snprintf(nom, sizeof nom, "%s/hist_%u.txt", hist_dir, g_inj.fn);
                 FILE *f = fopen(nom, "w");
                 if (f) { for (unsigned w = 0; w < 65536; w++) if (hist[w]) fprintf(f, "%04x %u\n", w, hist[w]); fclose(f); }
@@ -892,8 +900,82 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
               if (f) { for (unsigned q = 0x60; q < C54X_DATA_SIZE; q++) if (dsp->data[q] != g_data_avant_b[q]) fprintf(f, "%04x %04x %04x\n", q, g_data_avant_b[q], dsp->data[q]); fclose(f); nz++; } } }
         printf("  [zones] fn=%u flags(OVA=%d OVB=%d C=%d TC=%d OVM=%d FRCT=%d SXM=%d) ecrites:%s\n", fn,
                g_flags_entree & 1, !!(g_flags_entree & 2), !!(g_flags_entree & 4), !!(g_flags_entree & 8), !!(g_flags_entree & 16), !!(g_flags_entree & 32), !!(g_flags_entree & 64), z); }
+      if (g_snap_ok) { int es = 0; for (int i = 0; i < 148; i++) if ((((int16_t)g_snap_2be2[i]) > 0) != (bits[i] != 0)) es++;
+                       printf("  [scan] fn=%u 2be2 au pas 12800 (avant le decodeur) : erreurs=%d\n", fn, es); g_snap_ok = 0; }
       printf("  [scan] fn=%u marge=%d tsc=%d dec=%.2f phase=%.1f rif=%d 2be2 erreurs=%d (vs N-1: %d, N-2: %d) insnA=%u insnB=%u %s  v[0..3]=%d %d %d %d\n", fn, cellule_marge_nb, cellule_tsc_force, cellule_dec_nb, cellule_phase_nb, calypso_rif_level(), err, e1, e2, g_insn_a, g_insn_b, map,
              (int16_t)dsp->data[0x2be2], (int16_t)dsp->data[0x2be3], (int16_t)dsp->data[0x2be4], (int16_t)dsp->data[0x2be5]); }
+    /* after burst 3: the decoder's vectors. Search the whole data memory for
+     * the 456 coded bits in deinterleaved order and for the 184 information
+     * bits, as signs of int16 words and as hard 0/1 words. */
+    { uint8_t code[456], info[184];
+      if (((fn % 51u) % 10u - 2) % 4 == 3 && cellule_bloc_attendu(fn, bsic, code, info) == 0) {
+          const struct { const uint8_t *t; int len; const char *nom; } tp[2] = { { code, 456, "456 codes" }, { info, 184, "184 info" } };
+          printf("  [bloc] fn=%u :", fn);
+          for (int k = 0; k < 2; k++) {
+              int best[3] = {0,0,0}; unsigned bad[3] = {0,0,0};
+              for (unsigned a = 0x60; a + tp[k].len < C54X_DATA_SIZE; a++) {
+                  int m0 = 0, m1 = 0, m2 = 0;
+                  for (int i = 0; i < tp[k].len; i++) {
+                      int16_t v = (int16_t)dsp->data[a + i];
+                      if ((v < 0) == (tp[k].t[i] != 0)) m0++;
+                      if ((v > 0) == (tp[k].t[i] != 0)) m1++;
+                      if ((v == 1 && tp[k].t[i]) || (v == 0 && !tp[k].t[i])) m2++;
+                  }
+                  if (m0 > best[0]) { best[0] = m0; bad[0] = a; }
+                  if (m1 > best[1]) { best[1] = m1; bad[1] = a; }
+                  if (m2 > best[2]) { best[2] = m2; bad[2] = a; }
+              }
+              printf("  %s: neg=1 %d/%d @%04x  pos=1 %d/%d @%04x  hard %d/%d @%04x |", tp[k].nom,
+                     best[0], tp[k].len, bad[0], best[1], tp[k].len, bad[1], best[2], tp[k].len, bad[2]);
+          }
+          /* also the coded bits packed 16 per word (MSB first) */
+          { int bestp = 0; unsigned badp = 0;
+            for (unsigned a = 0x60; a + 29 < C54X_DATA_SIZE; a++) {
+                int m = 0;
+                for (int i = 0; i < 456; i++) { int bit = (dsp->data[a + i / 16] >> (15 - i % 16)) & 1; if (bit == code[i]) m++; }
+                if (m > bestp) { bestp = m; badp = a; } }
+            printf("  packed %d/456 @%04x", bestp, badp);
+            int pb[4] = {0,0,0,0};
+            for (int i = 0; i < 456; i++) { int bit = (dsp->data[badp + i / 16] >> (15 - i % 16)) & 1; if (bit == code[i]) pb[i & 3]++; }
+            printf(" par burst %d %d %d %d /114", pb[0], pb[1], pb[2], pb[3]); }
+          printf("\n");
+          /* the decoder input at 0x2a00 (the trellis loop reads pairs from AR1 = 0x2a00) */
+          if (g_snap_2a00_ok) { const char *d = calypso_getenv("PONT_NB_HIST"); if (d) { char nom[256]; snprintf(nom, sizeof nom, "%s/entree_%u.txt", d, fn); FILE *f = fopen(nom, "w"); if (f) { for (int i = 0; i < 456; i++) fprintf(f, "%d\n", (int16_t)g_snap_2a00[i]); fclose(f); } } }
+          if (g_snap_2a00_ok) { int mp = 0, mn = 0, m1 = 0, nz = 0; g_snap_2a00_ok = 0;
+            for (int i = 0; i < 456; i++) { int16_t v = (int16_t)g_snap_2a00[i]; if (v) nz++;
+                if ((v > 0) == (code[i] != 0)) mp++; if ((v < 0) == (code[i] != 0)) mn++; if ((v == 1) == (code[i] != 0)) m1++; }
+            printf("  [entree] fn=%u 0x2a00..+456 : nonzero=%d  pos=1 %d/456  neg=1 %d/456  one=1 %d/456 | premiers:", fn, nz, mp, mn, m1);
+            for (int i = 0; i < 48; i++) printf(" %d", (int16_t)g_snap_2a00[i]);
+            printf("\n  [entree] attendu :"); for (int i = 0; i < 48; i++) printf(" %d", code[i]); printf("\n");
+            /* per-burst view: bits k with k%4==b */
+            for (int b = 0; b < 4; b++) { int m = 0, n = 0; for (int i = b; i < 456; i += 4) { int16_t v = (int16_t)g_snap_2a00[i]; if (v) { n++; if ((v < 0) == (code[i] != 0)) m++; } }
+                printf("  [entree] burst %d : neg=1 %d/%d\n", b, m, n); } }
+          /* the 228 decoder output bits: best match over memory, hard words and LSB */
+          { uint8_t u[228];
+            if (cellule_u228_attendu(fn, bsic, u) == 0) {
+                int best[2] = {0,0}; unsigned bad[2] = {0,0};
+                for (unsigned a = 0x60; a + 228 < C54X_DATA_SIZE; a++) {
+                    int m0 = 0, m1 = 0;
+                    for (int i = 0; i < 228; i++) { uint16_t v = dsp->data[a + i];
+                        if ((v == 1 && u[i]) || (v == 0 && !u[i])) m0++; if ((v & 1) == u[i]) m1++; }
+                    if (m0 > best[0]) { best[0] = m0; bad[0] = a; } if (m1 > best[1]) { best[1] = m1; bad[1] = a; } }
+                printf("  [u228] fn=%u hard %d/228 @%04x  lsb %d/228 @%04x | ", fn, best[0], bad[0], best[1], bad[1]);
+                /* mismatch map at 0x2d66 (hard) */
+                unsigned a = 0x2d66; int e = 0; char map[240]; int k = 0;
+                for (int i = 0; i < 228; i++) { uint16_t v = dsp->data[a + i]; int ok = (v == u[i]); if (!ok) e++; if (i == 184 || i == 224) map[k++] = '|'; map[k++] = ok ? '.' : (v > 1 ? '?' : 'x'); }
+                map[k] = 0; printf("2d66: %d faux %s\n", e, map);
+                /* packed forms of the 228 bits anywhere in memory: 16 per word MSB
+                 * first, LSB first, and the same with each word bit-reversed */
+                { const char *nm[4] = { "msb", "lsb", "msb-rev", "lsb-rev" }; printf("  [u228] fn=%u packed:", fn);
+                  for (int f = 0; f < 4; f++) { int best = 0; unsigned bad = 0;
+                    for (unsigned a = 0x60; a + 15 < C54X_DATA_SIZE; a++) { int m = 0;
+                        for (int i = 0; i < 228; i++) { uint16_t w = dsp->data[a + i / 16]; int bi = i % 16;
+                            int bit = (f == 0) ? (w >> (15 - bi)) & 1 : (f == 1) ? (w >> bi) & 1 : (f == 2) ? (w >> bi) & 1 : (w >> (15 - bi)) & 1;
+                            if (bit == u[i]) m++; }
+                        if (m > best) { best = m; bad = a; } }
+                    printf(" %s %d/228 @%04x", nm[f], best, bad); }
+                  printf(" | 2c3c:"); for (int i = 0; i < 16; i++) printf(" %04x", dsp->data[0x2c3c + i]); printf("\n"); } } }
+          } }
     /* where did the delivered samples land in DARAM (AAD)? offset in words at
      * which the ROM's buffer equals our frame, and how many words match */
     { uint16_t aad = calypso_rhea_dma_get_daram(); int best = 0, boff = 0;
@@ -1067,6 +1149,32 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 }
                 if (!go) break;
                 sonde_pages("G", m.a, dsp, api_ram);
+                if (calypso_getenv("PONT_NB_DEBUG") && ((m.a % 51u) % 10u - 2) % 4 == 3 && m.a % 51u <= 5 &&
+                    (api_ram[API_R_PAGE(0) / 2] == 24 || api_ram[API_R_PAGE(1) / 2] == 24)) {
+                    static unsigned nq;
+                    if (nq++ < 8) {
+                        printf("  [garde] fn=%u avant le burst 3, bursts precedents en memoire :", m.a);
+                        for (int b = 1; b <= 3; b++) {
+                            uint8_t bits[148]; if (cellule_bits_attendus(m.a - b, 42, bits) < 0) continue;
+                            uint8_t t116[116]; memcpy(t116, bits + 3, 58); memcpy(t116 + 58, bits + 87, 58);
+                            int best[3] = {0,0,0}; unsigned bad[3] = {0,0,0};
+                            for (unsigned a = 0x60; a + 116 < C54X_DATA_SIZE; a++) {
+                                int m0 = 0, m1 = 0, m2 = 0;
+                                for (int i = 0; i < 116; i++) { int16_t v = (int16_t)dsp->data[a + i];
+                                    if ((v < 0) == (t116[i] != 0)) m0++; if ((v > 0) == (t116[i] != 0)) m1++;
+                                    if ((v == 1 && t116[i]) || (v == 0 && !t116[i])) m2++; }
+                                if (m0 > best[0]) { best[0] = m0; bad[0] = a; } if (m1 > best[1]) { best[1] = m1; bad[1] = a; } if (m2 > best[2]) { best[2] = m2; bad[2] = a; }
+                            }
+                            /* packed 16 per word too */
+                            int bestp = 0; unsigned badp = 0;
+                            for (unsigned a = 0x60; a + 8 < C54X_DATA_SIZE; a++) { int mm = 0;
+                                for (int i = 0; i < 116; i++) { int bit = (dsp->data[a + i / 16] >> (15 - i % 16)) & 1; if (bit == t116[i]) mm++; }
+                                if (mm > bestp) { bestp = mm; badp = a; } }
+                            printf(" b%d(fn %u): neg %d@%04x pos %d@%04x hard %d@%04x packed %d@%04x |", 3 - b, m.a - b, best[0], bad[0], best[1], bad[1], best[2], bad[2], bestp, badp);
+                        }
+                        printf("\n");
+                    }
+                }
                 uint32_t n2 = 0;
                 g_insn_a = ninsn;
                 drapeaux = jouer_trame(dsp, insns, &init_done, &n2, 2);

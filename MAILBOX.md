@@ -499,3 +499,45 @@ Prochaine etape : desassembler la routine NB de la ROM autour de 0x8551
 (argmax) et 0x81cd (lecture du tampon a un echantillon sur deux) pour savoir
 quel profil elle attend a cet endroit ; les traces de 8 bursts sont dans le
 repertoire donne a PONT_NB_HIST.
+
+## Le BCCH ne decode pas : le quantifieur des soft bits sort +1 partout [2026-09-21, soir]
+
+Etat : les 4 bursts d'un bloc BCCH sont demodules sans erreur (147/148 en
+0x2be2, le dernier bit hors fenetre) une fois le burst elargi
+(CELLULE_NB_SYM=0.3, cf. supra). Le bloc reste faux (Fire KO, a_cd = bruit).
+La chaine apres l'egaliseur, lue dans les traces (PONT_NB_HIST) :
+
+    0x75c9-0x75e2  division SUBC : ratio = (count << 15) / somme, count et
+                   somme = statistiques du residu sur le TSC (0x7638-0x7697),
+                   ex. 6 / 1523 -> 0x81 (129)
+    0x8154-0x815e  echelle T = ((ratio << 10) >> 16) * 0x4eb8 << 2 >> 16 = 2
+                   (ou 0 quand count = 0)
+    0x8166-0x8177  soft_scaled = (rnd(T * soft) << 4 >> 1) >> 16, soft = +-3000..6800
+                   -> 0..3, signe perdu
+    0x82bd-0x82cd  table de 129 mots lue en PROM (reada 0x7b9e..) en 0x2a8e
+    0x82d0-0x82dd  index = soft_scaled >> 8, dest = table[0x2ace + index]
+                   -> index 0 partout -> +1 partout
+    0x9a07/0x9a0a  stockage 4 bits par soft bit, 29 mots par burst en
+                   0x4200 + 29 x burst : mesure 0x1111 sur tous les mots
+    0x9a6a-0x9a76  desentrelacement par table + LUT (0x2c08) vers 0x2a00
+    0x9a78-0x9aad  treillis 16 etats (dadst/dsadt/cmps), st TRN
+    0x9ab8-0x9ad1  traceback (bitt/roltc), puis compaction 0x9ac5.., a_cd
+
+Le treillis recoit donc des metriques (c0+c1, c0-c1) sans information et
+sort un chemin d'egalites, juste sur les suites de zeros et faux ailleurs
+(36 a 78 des 228 bits) : ce n'est PAS un defaut du desentrelaceur (test A
+du dossier tools/cch_ref impossible tant que le bloc ne porte pas de signe :
+aucun des trois candidats ne matche, 65-70 %).
+
+Corriges au passage (isa_test 148 ok) : MPYR / MACR / MASR effacent les 16
+bits bas apres l'arrondi (isa_test 132). Sans effet sur le bloc.
+
+Bequille de diagnostic CALYPSO_HACK_SOFT_SCALE=k (c54x_exec.c, MPYR aux
+trois sites de l'echelle) : x256 fait apparaitre quelques -4 dans le bloc et
+change a_cd, sans decoder. Le facteur manquant est de l'ordre de 2^12 a
+2^20 d'apres l'arithmetique ci-dessus, ce qui n'est pas plausible pour une
+seule instruction : une des semantiques de la chaine (sfta/sth ASM/norm/exp
+sur ces valeurs, ou le residu 0x7638 qui fixe count et somme) est lue de
+travers par le coeur ou par moi. Prochaine etape : rejouer cette chaine
+(entree 0x2be2 -> sortie 0x2a00) sur les valeurs des traces avec les
+semantiques du manuel, instruction par instruction, jusqu'au premier ecart.

@@ -371,6 +371,81 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         gmsk_moduler(bits, 148, amp, phase0, decalage, iq);
         *n_iq = 2 * 148;
     }
+    /* [2026-09-21] CELLULE_NB_ISI=<h1>[,<h2>[,<h3>]] : causal tail on the normal
+     * bursts, y[n] = x[n] + h1 x[n-1] + h2 x[n-2] + h3 x[n-3]. Why: the ROM
+     * correlates the 16 central TSC bits over 10 lags, then picks the 7-lag
+     * window of maximum energy (0x8551, sliding sum) and cuts its 5-tap
+     * channel estimate from it. Our GMSK at 1 sample/symbol has energy on 3
+     * lags only (main + the +-1 ISI), so three of the four windows tie to 0.1 %
+     * and the choice is decided by e[lag 8] against e[lag 1] = the GMSK +-2
+     * tap (912) against the data leakage: measured over 9 bursts, the window
+     * was right (s=2) exactly when e[8] > e[1]. A receiver's analogue filter
+     * spreads energy over the following lags and settles it; this tail does
+     * the same for the synthetic cell. */
+    if (type == 'B' || type == 'C') {
+        static int isi_n = -2; static double h[4];
+        if (isi_n == -2) { isi_n = 0; const char *e = calypso_getenv("CELLULE_NB_ISI");
+            if (e && *e) { char tmp[64]; strncpy(tmp, e, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
+                for (char *t = strtok(tmp, ","); t && isi_n < 3; t = strtok(NULL, ",")) h[++isi_n] = atof(t); } }
+        if (isi_n > 0) {
+            double xi[148], xq[148];
+            for (int k = 0; k < 148; k++) { xi[k] = burst_iq[2*k]; xq[k] = burst_iq[2*k+1]; }
+            for (int k = 0; k < 148; k++) {
+                double yi = xi[k], yq = xq[k];
+                for (int d = 1; d <= isi_n; d++) if (k - d >= 0) { yi += h[d] * xi[k-d]; yq += h[d] * xq[k-d]; }
+                if (yi > 32767) yi = 32767; if (yi < -32768) yi = -32768; if (yq > 32767) yq = 32767; if (yq < -32768) yq = -32768;
+                burst_iq[2*k] = (int16_t)lrint(yi); burst_iq[2*k+1] = (int16_t)lrint(yq);
+            }
+        }
+    }
+    /* [2026-09-21] CELLULE_NB_SYM=<a> : symmetric spread y[n] = x[n] + a (x[n-1]
+     * + x[n+1]) on the normal bursts, timing unchanged. Why: the ROM zeroes
+     * every channel tap whose energy is below 1/16 of the window energy
+     * (0x7f0c-0x7f1c, threshold = total >> 4, i.e. 25 % in amplitude). The
+     * +-1 taps of our GMSK at 1 sample/symbol are 25 % (6467..7189 against a
+     * main tap of 27000): measured, the pre-cursor tap was kept (e = 4.70e7 >
+     * 4.50e7) on the bursts that decoded and zeroed (4.18e7 < 4.25e7) on the
+     * ones that did not, and a 5-tap model without its 25 % pre-cursor gives
+     * 45 % errors. A receiver's channel filter widens the pulse; a = 0.3 puts
+     * the +-1 taps near 55 % and the +-2 taps near 10 %, both far from the
+     * threshold, whatever the data. */
+    if (type == 'B' || type == 'C') {
+        static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_NB_SYM"); a = (e && *e) ? atof(e) : 0.0; }
+        if (a != 0.0) {
+            double xi[148], xq[148];
+            for (int k = 0; k < 148; k++) { xi[k] = burst_iq[2*k]; xq[k] = burst_iq[2*k+1]; }
+            for (int k = 0; k < 148; k++) {
+                double yi = xi[k], yq = xq[k];
+                if (k > 0)   { yi += a * xi[k-1]; yq += a * xq[k-1]; }
+                if (k < 147) { yi += a * xi[k+1]; yq += a * xq[k+1]; }
+                yi /= (1 + 2 * a); yq /= (1 + 2 * a);   /* keep the peak amplitude */
+                burst_iq[2*k] = (int16_t)lrint(yi); burst_iq[2*k+1] = (int16_t)lrint(yq);
+            }
+        }
+    }
+    /* [2026-09-21] CELLULE_NB_NOISE=<sigma> : Gaussian noise on the normal
+     * bursts (deterministic seed per frame). Why: the ROM scales its soft bits
+     * by a noise estimate before the 4-bit quantiser (0x8168 -> 0x82d0, a
+     * 129-entry table indexed by soft >> 8); with a noiseless burst the scaled
+     * values are 2..5 instead of thousands, every index is 0 and all 116
+     * quantised soft bits come out +1 (measured in the storage at 0x4200 +
+     * 29 x burst): the sign is lost before the deinterleaver. A radio always
+     * carries noise; the cell now does too. */
+    if (type == 'B' || type == 'C') {
+        static double sigma = -2; if (sigma == -2) { const char *e = calypso_getenv("CELLULE_NB_NOISE"); sigma = (e && *e) ? atof(e) : 0.0; }
+        if (sigma > 0) {
+            uint32_t seed = fn * 2654435761u + 12345u;
+            for (int k = 0; k < 296; k++) {
+                /* Box-Muller on a small LCG */
+                seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
+                seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
+                double g = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+                double v = burst_iq[k] + sigma * g;
+                if (v > 32767) v = 32767; if (v < -32768) v = -32768;
+                burst_iq[k] = (int16_t)lrint(v);
+            }
+        }
+    }
     /* [2026-09-21] CELLULE_NB_ZERO_DC=1 (experiment): remove the mean of the
      * 148 samples of a normal burst. Measured: the ROM demodulates a normal
      * burst perfectly when the data-induced mean of its samples is below ~7 %
@@ -473,4 +548,44 @@ int cellule_bits_attendus(uint32_t fn, uint8_t bsic, uint8_t bits[148])
     uint32_t p51 = fn % 51;
     if (cellule_sans_bcch || p51 < 2 || p51 > 49 || p51 % 10 < 2) return -1;
     return cellule_nb(fn - ((p51 % 10 - 2) & 3), (int)((p51 % 10 - 2) & 3), bsic, bits);
+}
+
+/* Expected decoder-side vectors for the block that ends at frame fn (burst 3):
+ * the 456 convolutionally coded bits in deinterleaved order (45.003 4.1.4:
+ * bit k of the coded block sits in burst k mod 4 at position 2*((49k) mod 57)
+ * + ((k mod 8) div 4) of the 114 data bits) and the 184 information bits +
+ * 40 parity + 4 tail (the 23 octets as sent, MSB first, then the Fire parity
+ * as gsm0503 computes it: we only need the 184 here). */
+int cellule_bloc_attendu(uint32_t fn, uint8_t bsic, uint8_t code456[456], uint8_t info184[184])
+{
+    uint32_t p51 = fn % 51;
+    if (cellule_sans_bcch || p51 < 2 || p51 > 49 || p51 % 10 < 2) return -1;
+    uint32_t fn0 = fn - ((p51 % 10 - 2) & 3);
+    uint8_t bits[148]; uint8_t data[4][114];
+    for (int b = 0; b < 4; b++) {
+        if (cellule_nb(fn0, b, bsic, bits) < 0) return -1;
+        memcpy(data[b], bits + 3, 57); memcpy(data[b] + 57, bits + 88, 57);
+    }
+    for (int k = 0; k < 456; k++) {
+        int b = k & 3, j = 2 * ((49 * k) % 57) + ((k % 8) / 4);
+        code456[k] = data[b][j];
+    }
+    uint32_t tc = (fn0 / 51) % 8;
+    const uint8_t *l2 = (p51 <= 5) ? cellule_l2((int)tc) : cellule_l2(-1);
+    for (int i = 0; i < 184; i++) info184[i] = (l2[i / 8] >> (7 - (i % 8))) & 1;
+    return 0;
+}
+
+/* The 228 bits the Viterbi decoder must output: 184 information bits, 40 Fire
+ * parity bits, 4 tail bits (45.003 4.1.1-4.1.2). */
+#include <osmocom/core/crc64gen.h>
+#include <osmocom/coding/gsm0503_parity.h>
+int cellule_u228_attendu(uint32_t fn, uint8_t bsic, uint8_t u228[228])
+{
+    uint8_t code[456], info[184];
+    if (cellule_bloc_attendu(fn, bsic, code, info) < 0) return -1;
+    memcpy(u228, info, 184);
+    osmo_crc64gen_set_bits(&gsm0503_fire_crc40, info, 184, u228 + 184);
+    memset(u228 + 224, 0, 4);
+    return 0;
 }
