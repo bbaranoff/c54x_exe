@@ -14,6 +14,19 @@ attendant la précédente sur un critère observable. `--status`, `--logs`, `--s
 sont conservés en `qosmo-dsp-launch` / `qosmo-grgsm-launch` (ils visaient un rootfs ISO
 disparu) et reçoivent les appels avec options QEMU (`-k`, `-dsp`, …).
 
+> **[2026-09-22]** Le tri des deux enveloppes (`/usr/local/bin/qosmo-dsp`,
+> `/usr/local/bin/qosmo-grgsm`, hors dépôt) oubliait `--qemu`, `--cpu` et
+> `--monitor`, et ne regardait que le **premier** argument. Or
+> `qosmo-grgsm/run_modules/40-qemu.sh` appelle
+> `qosmo-grgsm --qemu <bin> -k <elf> --bin <bin> --cpu arm946 --gdb N --rundir <dir> --monitor <dir>/qemu-monitor.sock`
+> — `--qemu` en tête. Le motif ne matchait pas, l'appel partait donc sur
+> `c54x_exe/run.sh`, qui sortait aussitôt sur `option inconnue : --qemu`. QEMU ne
+> démarrait jamais et le module échouait trente secondes plus tard sur
+> « socket du moniteur QEMU : toujours pas prêt » — un message qui désigne le
+> moniteur alors que rien n'avait été lancé. Les deux enveloppes balaient
+> maintenant **tous** les arguments et connaissent les six options du lanceur C.
+> Elles ne sont dans aucun dépôt : une réinstallation les écrasera.
+
 Chaque processus se lance aussi seul, par son nom, dans cet ordre.
 
 ---

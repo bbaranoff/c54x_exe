@@ -1272,7 +1272,10 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             {
                 static int nbdbg = -1; static unsigned nbn;
                 if (nbdbg < 0) nbdbg = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
-                if (nbdbg && nbn < 400) {
+                /* [2026-09-22] Plafond porte de 400 a 20000 : les 400 etaient
+                 * consommees par le campement avant toute connexion dediee,
+                 * et la sonde etait donc muette quand on en avait besoin. */
+                if (nbdbg && nbn < 20000) {
                     static uint16_t prev[2][4];
                     for (int pg = 0; pg < 2; pg++) {
                         const uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];

@@ -66,6 +66,7 @@
 #define SHM_FACCH_UL    "/dev/shm/calypso_tch_facch_ul"
 #define SHM_SACCH_UL    "/dev/shm/calypso_tch_sacch_ul"
 #define SHM_TCH_UL      "/dev/shm/calypso_tch_ul"
+#define SHM_KC          "/dev/shm/calypso_kc_l1"
 
 /* Tailles et dispositions : pont/uplink.py. */
 #define REC_RACH        16      /* lu 12 : seq(4) ra(1) bsic(1) ..(2) fn(4)   */
@@ -451,6 +452,154 @@ static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
         printf("  [montant] RACH ra=0x%02x bsic=%u fn=%u -> %s\n", ra, bsic, fn, SHM_RACH);
 }
 
+/* ── LE Kc : LE PONT NE PEUT NI CHIFFRER NI DECHIFFRER SANS LUI ────────────
+ *
+ * [2026-09-22] Meme cause que tout ce fichier : sous CALYPSO_DSP_EXTERN=1 la
+ * couche 1 gr-gsm est desactivee, et c'etait ELLE qui publiait
+ * /dev/shm/calypso_kc_l1 (calypso_l1_grgsm.c, publish_kc). En montage DSP le
+ * fichier n'existait donc pas, `Cipher.current()` de pont.py rendait None, et
+ * `cipher.apply()` rendait le burst INCHANGE dans les deux sens -- releve sur
+ * le banc : « A5 dl=0 ul=0 » a chaque STATS.
+ *
+ * Ce que ca coutait, mesure du 2026-09-22 avec ENCRYPTION="a5 1" : la
+ * transaction allait jusqu'au bout de l'authentification en clair, puis
+ *
+ *     11:26:51  CIPHERING MODE COMMAND (sc=1, algo=A5/1 cr=1)
+ *     11:26:51  CIPHERING MODE COMPLETE (cr 1)
+ *     11:26:53  Dropping frame with 96 bit errors   (et sans fin ensuite)
+ *
+ * -- la descente chiffree par la BTS que personne ne dechiffre, et la montee
+ * que personne ne chiffre. En « a5 0 » la meme transaction va au bout. Il n'y
+ * a pas non plus d'A5 dans le modele Calypso (`d_a5mode` n'existe que dans
+ * l1-grgsm/, rien dans l1-dsp/) : c'est bien au pont de le faire, comme il
+ * fait deja le codage de canal.
+ *
+ * Disposition reprise telle quelle de publish_kc() pour que pont/cipher.py
+ * (KC_RECLEN=32) la lise sans changement : seq(4) algo(1) longueur(1)
+ * Kc[8] 0xFF. Les quatre mots de a_kc sortent en gros-boutiste ET a l'envers,
+ * comme dans l'original -- on ne "corrige" pas une disposition que le lecteur
+ * attend.
+ *
+ * MONTANT_KC=0 coupe la publication. */
+#define KC_RECLEN        32
+#define KC_PUBLIER_TOUTES 22   /* trames entre deux scrutations, comme grgsm */
+#define KC_GRACE_CLAIR    5    /* cf. publish_kc : le firmware efface d_a5mode
+                                * a chaque DM_REL_REQ, y compris quand le Kc
+                                * revient juste apres (Assignment Command),
+                                * alors que la BTS, elle, chiffre toujours. */
+
+/* Leve par montant_canal_libere() : la prochaine scrutation doit publier le
+ * retour en clair SANS attendre la grace. Voir publier_kc(). */
+static bool g_kc_liberer;
+
+static void publier_kc(uint16_t *api_ram)
+{
+    static int actif = -1, fd = -1, tick, clair_en_attente;
+    static uint32_t seq;
+    static uint8_t dernier[KC_RECLEN];
+    static bool a_dernier;
+
+    if (actif < 0) {
+        const char *e = calypso_getenv("MONTANT_KC");
+        actif = (e && *e == '0') ? 0 : 1;
+    }
+    if (!actif) {
+        return;
+    }
+    /* [2026-09-22] LE CHANGEMENT DE MODE NE PEUT PAS ATTENDRE LA SCRUTATION.
+     * Version precedente : on ne lisait d_a5mode qu'une trame sur 22 (~128 ms).
+     * Or le mobile bascule des qu'il traite le CIPHERING MODE COMMAND et emet
+     * son CIPHERING MODE COMPLETE dans la foulee ; un bloc SDCCH montant tombe
+     * toutes les 51 trames. Ce bloc-la -- le PREMIER message chiffre du montant
+     * -- pouvait donc partir en clair alors que la BTS le dechiffrait deja.
+     * Releve du 2026-09-22, run de 11:49 :
+     *     fn=2438  01 64 35  06 32 17 ...   CIPHERING MODE COMPLETE
+     *     fn=2591  01 74 35  06 32 17 ...   LE MEME, retransmis (bit P)
+     * la BTS ne l'acquittait pas, LAPDm (fenetre de 1) restait bloque dessus,
+     * le TMSI REALLOCATION COMPLETE n'etait jamais emis et le MSC repondait
+     * LOCATION UPDATING REJECT alors que le mobile se croyait a jour.
+     * On lit donc d_a5mode a CHAQUE trame -- deux acces memoire -- et la
+     * scrutation complete n'est differee que tant que le mode ne change pas. */
+    uint16_t mode = api_ram[(API_NDB + NDB_D_A5MODE) / 2];
+    uint8_t mode_algo = (mode >= 1 && mode <= 3) ? (uint8_t)mode : 0;
+    bool bascule = (a_dernier && mode_algo != dernier[4]) || g_kc_liberer;
+    if (!bascule && ++tick < KC_PUBLIER_TOUTES) {
+        return;
+    }
+    tick = 0;
+    const uint16_t *kw = &api_ram[(API_NDB + NDB_A_KC) / 2];
+    uint8_t rec[KC_RECLEN] = {0};
+    bool nul = true;
+    for (int i = 0; i < 4; i++) {
+        rec[6 + 6 - 2 * i] = (uint8_t)(kw[i] >> 8);
+        rec[6 + 7 - 2 * i] = (uint8_t)(kw[i] & 0xFF);
+    }
+    for (int i = 6; i < 14; i++) {
+        if (rec[i]) {
+            nul = false;
+        }
+    }
+    uint8_t algo = (mode >= 1 && mode <= 3 && !nul) ? (uint8_t)mode : 0;
+    if (!algo) {
+        memset(rec + 6, 0, 8);
+    }
+    rec[4] = algo;
+    rec[5] = algo ? 8 : 0;
+    rec[14] = 0xFF;
+
+    if (a_dernier && !memcmp(dernier + 4, rec + 4, KC_RECLEN - 4)) {
+        clair_en_attente = 0;
+        /* [2026-09-22] Ce retour anticipe doit CONSOMMER g_kc_liberer, sinon la
+         * liberation reste armee indefiniment : chaque scrutation suivante
+         * calcule bascule=vrai, republie le meme enregistrement et incremente
+         * `seq`. Cote pont.py, un `seq` qui bouge veut dire « nouvelle cle » :
+         * il rechargeait sans fin une cle inchangee. */
+        g_kc_liberer = false;
+        return;
+    }
+    /* [2026-09-22] LA GRACE NE DOIT PAS SURVIVRE A LA LIBERATION DU CANAL.
+     * Elle vient de publish_kc() et sert au cas INTRA-connexion : le firmware
+     * efface d_a5mode a chaque DM_REL_REQ, y compris pendant un Assignment
+     * Command ou le Kc revient juste apres, alors que la BTS chiffre toujours.
+     * Mais entre DEUX connexions elle est nuisible : l'enregistrement algo=1
+     * restait lisible cinq scrutations de plus, et pont.py -- qui relache
+     * pourtant sa cle a chaque IMMEDIATE ASSIGNMENT (downlink.py) -- la
+     * relisait aussitot dans le fichier et la restaurait. Il chiffrait alors
+     * le montant de la connexion SUIVANTE des son premier bloc, pendant que le
+     * mobile emettait encore en clair.
+     * Mesure du 2026-09-22, run de 11:53 : « A5 dl=0 ul=200 » -- tout le
+     * montant chiffre, rien de descendant dechiffre -- et l'AUTHENTICATION
+     * RESPONSE (fn=2525, `05 14`) retransmise a fn=2729 faute d'acquittement.
+     * La liberation du canal est le bon signal, et il existe deja :
+     * montant_canal_libere(), appele sur PONT_DCCH genre 0xFF. */
+    if (!algo && a_dernier && dernier[4] && !g_kc_liberer &&
+        ++clair_en_attente < KC_GRACE_CLAIR) {
+        return;   /* chiffre -> clair : on attend, le Kc revient peut-etre */
+    }
+    clair_en_attente = 0;
+    g_kc_liberer = false;
+
+    if (fd < 0 && (fd = open(SHM_KC, O_WRONLY | O_CREAT, 0644)) < 0) {
+        actif = 0;
+        return;
+    }
+    seq++;
+    memcpy(rec, &seq, 4);
+    if (pwrite(fd, rec, sizeof rec, 0) != (ssize_t)sizeof rec) {
+        close(fd); fd = -1; seq--;
+        return;
+    }
+    memcpy(dernier, rec, sizeof rec);
+    a_dernier = true;
+    if (algo) {
+        printf("  [montant] chiffrement A5/%u : Kc publie vers %s (seq=%u)\n",
+               algo, SHM_KC, seq);
+    } else {
+        printf("  [montant] retour en clair (seq=%u)\n", seq);
+    }
+    fflush(stdout);
+}
+
 void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
 {
     static int coupe = -1;
@@ -601,6 +750,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     if (task_u != 0 && !capture_tch_ul(api_ram, task_u, fn)) {
         capture_sdcch_ul(api_ram, task_u, fn);
     }
+
+    publier_kc(api_ram);
 }
 
 /* Le canal dedie vient d'etre libere (PONT_DCCH, genre 0xFF) : la memoire de
@@ -610,6 +761,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
 void montant_canal_libere(void)
 {
     g.sdcch_a_dernier = false;
+    g_kc_liberer = true;   /* le Kc de CETTE connexion ne vaut plus rien */
 }
 
 void montant_bilan(void)

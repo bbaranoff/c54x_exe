@@ -32,7 +32,7 @@ MOBILE="${MOBILE:-$(command -v mobile || echo /usr/local/bin/mobile)}"
 MOBILE_CFG="${MOBILE_CFG:-$HERE/mobile_pont.cfg}"
 PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont.py}"
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
-L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2_pont}"
+L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
 INSNS="${INSNS:-200000}"
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
@@ -140,6 +140,12 @@ arreter() {
     done
     sleep 1
     rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty"
+    # [2026-09-22] Sockets du mobile : elles ne disparaissent pas avec lui. Le
+    # « sap » etait deja oublie, et « ms_data » (tch-data, mobile_pont.cfg)
+    # arrive avec la meme faiblesse : un fichier reste fait echouer le bind du
+    # run suivant sur EADDRINUSE, et le mobile demarre sans sa voie donnees
+    # sans le dire.
+    rm -f /tmp/osmocom_sap /tmp/ms_data
     # [2026-09-22] Horloge du banc (calypso_bsp.c -> pont/trx.py) : laissee en
     # place, pont.py asservirait sa premiere seconde sur la trame d'une session
     # morte et la BTS resterait figee en attendant un DSP qui n'existe plus.
