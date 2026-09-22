@@ -140,6 +140,10 @@ arreter() {
     done
     sleep 1
     rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty"
+    # [2026-09-22] Horloge du banc (calypso_bsp.c -> pont/trx.py) : laissee en
+    # place, pont.py asservirait sa premiere seconde sur la trame d'une session
+    # morte et la BTS resterait figee en attendant un DSP qui n'existe plus.
+    rm -f /dev/shm/calypso_horloge
     # Side-bands du lien montant (src/montant.c) : sinon pont.py relit le
     # dernier enregistrement d'une session precedente au demarrage.
     rm -f /dev/shm/calypso_rach /dev/shm/calypso_sdcch_ul \

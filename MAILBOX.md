@@ -936,3 +936,68 @@ taches sans drapeau, un message, et bascule.
 
 Lecon : chercher le signal que le firmware pose deja, avant d'inventer une
 heuristique pour le reconstituer.
+
+## L'horloge du banc etait celle du mur, pas celle du DSP [2026-09-22]
+
+Le run de 10:01 campait, lisait SI1-4 et faisait sa mise a jour de
+localisation... pendant dix secondes. Apres, plus rien : a 10:04 l'appel
+partait en `T3126`, a 10:06 le SMS n'obtenait meme plus d'IMMEDIATE
+ASSIGNMENT, et le canal dedie sortait des « Dropping frame with 110 bit
+errors » en continu.
+
+La mesure qui tranche, deux compteurs lus au meme instant a 10:09 :
+
+    pont.py   STATS fn=99674
+    [ts0]     tick=81089 fn=80410        (offset ARM-tick fige a -679)
+
+19 000 trames, **87 secondes** d'ecart, et l'ecart grandissait. Le C54x emule
+coute ~5,8 ms par trame contre 4,615 ms de temps reel ; `bsp_ts0_service()`
+joue la trame BTS `tick + g_ts0_offset`, l'offset est fixe une fois pour toutes
+sur la premiere SB, et rien ne rattrapait le reste. La BTS remplissait l'anneau
+1,25 fois plus vite que le DSP ne le vidait : le mobile vivait une minute et
+demie dans le passe. Tout le reste en decoule --
+
+- `T3126`, `T3101`, `T200` sont des temporisations en secondes de MUR : une
+  reponse qui met 87 s a revenir les a toutes epuisees ;
+- le canal dedie encore plus vite : `g_dedie` ne commence a se remplir qu'a
+  l'armement du canal, or le DSP lisait des trames d'AVANT cet instant. Releve
+  dans `/dev/shm/calypso_bsp_dedie` : `stockes=3202 joues=244 manques=150`.
+  38 % des trames du canal partaient sans burst -- un burst sur quatre absent
+  d'un bloc, c'est exactement 110 erreurs sur 456.
+
+Le DSP ne peut pas rattraper, il tourne deja a fond. C'est donc la BTS qui
+ralentit : `calypso_bsp.c` publie la trame que le BSP reclame
+(`/dev/shm/calypso_horloge`, 16 octets : seq, cale, fn_bts, tick) et
+`pont/trx.py` y asservit l'horloge qu'il envoie a osmo-bts-trx en IND CLOCK.
+
+**Asservir en FREQUENCE, pas par recalage.** Premiere version : repousser `t0`
+des qu'on devance le DSP de plus de 12 trames. Mesure immediate,
+`UL bursts=11 tard=232` : `Transmitter.run()` jette tout burst dont la trame
+s'ecarte de plus de `window_tol` (1 trame) de l'horloge au moment de l'envoi,
+et une horloge qui avance par a-coups en sort a chaque fois. Plus un SABM
+n'arrivait a la BTS -> pas de UA -> `MDL-ERROR-IND cause 1`, plus aucune mise a
+jour. La version qui tient ne change que la VITESSE (`self.dur`, la duree
+effective d'une trame) : cadence du DSP mesuree toutes les 250 ms, correction
+proportionnelle de la phase sur ~400 trames, et `t0` rebase a chaque
+changement pour que `fn()` reste continue.
+
+Apres (run de 10:20, MSC) :
+
+    10:20:04  VLR: update ... TMSInew-0x46FB2C10
+    10:20:06  VLR: update ... TMSI-0x46FB2C10
+
+`TMSInew-` devenu `TMSI-`, donc le TMSI REALLOCATION COMPLETE est revenu et le
+VLR l'a confirme : le LU va au bout, sans `LOCATION UPDATING REJECT`, sans
+`ERROR INDICATION cause=SABM frame with information not allowed in this state`
+(le double SABM de 10:01 etait une retransmission T200 du mobile, pas un
+doublon du pont : le UA mettait plus de 700 ms a revenir). Cote pont,
+`fn=26609` contre `fn_bts=27045` : verrouille.
+
+`PONT_HORLOGE=0` revient a l'horloge murale, `PONT_HORLOGE_AVANCE` regle
+l'avance visee (12 trames), `CALYPSO_BSP_HORLOGE=0` coupe la publication.
+
+Reste ouvert : l'etablissement DESCENDANT. Le MSC tente un MT SMS, reste
+10 s en `MM_CONN_PENDING` puis `MMSMS-REL-IND` -- le paging ou la reponse du
+mobile ne passe pas. A regarder avec le filtre des pagings vides de
+`pont/downlink.py` (`is_empty_paging`, qui ne sert qu'au montage gr-gsm) et le
+groupe de paging que le firmware ecoute.
