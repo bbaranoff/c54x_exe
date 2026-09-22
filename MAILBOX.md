@@ -2034,3 +2034,132 @@ C'est elle qui programme ALGTH. Soit elle ne le fait pas, soit le modele RHEA
 ne le lui rend pas. C'est mesurable : tracer les ecritures de ALGTH par la ROM
 dans `calypso_rhea_dma.c`, et comparer a ce que `calypso_rhea_dma_get_len_words()`
 rend au moment de la SB.
+
+## 2026-09-22 18:35 — Le recalage TS0 : mesure A/B, et refutation de mon predicteur
+
+Hypothese : le DSP court devant le BTS (ecart toujours positif, +1 a +40) parce
+que l'offset tick->trame BTS est pose une seule fois et jamais revu ; quand le
+BTS s'arrete pour resynchroniser, le DSP reclame des trames inexistantes et le
+flux se troue. Or un bloc LAPDm, ce sont QUATRE bursts consecutifs. Correctif
+pose : reculer l'offset pour repartir de la trame la plus recente, en
+s'appuyant sur le contrat du mode STREAM (« only the ORDER matters »).
+
+**A/B, 2 x 6 min, meme banc, meme protocole :**
+
+|                      | temoin | recalage |
+|----------------------|--------|----------|
+| perdues / joues      | 20/132 |   0/161  |
+| recalages (recul)    |   0    | 433 (433)|
+| MDL-ERROR            |   18   |     4    |
+| LU ACCEPT / REQUEST  |  1/3   |    1/2   |
+| **trames jetees**    |  686   | **1409** |
+| bits faux (mediane)  |   95   |    96    |
+
+**Ca ne marche pas.** `perdues` tombe a zero et MDL-ERROR est divise par
+quatre, mais les trames jetees DOUBLENT et la mediane de bits faux ne bouge
+pas. Le LU reste a 1 dans les deux bras.
+
+Explication qui colle : en remplacant une trame absente par la plus recente
+disponible, on ne livre pas un trou mais **le mauvais burst a la bonne place**.
+Pour le desentrelaceur, une donnee fausse mais plausible est pire qu'une
+absence -- il ne peut plus la traiter comme un effacement. J'ai converti des
+effacements en erreurs.
+
+**Corollaire, et c'est le point important : « perdues » n'est PAS un
+predicteur du succes.** La correlation que j'avais tiree de trois runs
+(7 % -> LU accepte, 0 % -> accepte, 42 % -> rejete) ne survit pas au test
+controle. Trois points suffisaient a la suggerer, pas a l'etablir.
+
+**Defaut remis a OFF** (`CALYPSO_BSP_RECALE=1` pour le reessayer). Comme pour
+le quantum de re-essai et `CPU_KICK_NS` : on ne livre pas un changement de
+comportement que la mesure ne justifie pas.
+
+Deux pistes si on y revient : ne recaler que HORS du canal dedie, ou marquer
+le burst rejoue comme peu fiable pour que le desentrelaceur l'efface au lieu
+de le croire.
+
+**Defaut de mesure a signaler** : le chemin de recalage sort avant `manques++`,
+donc il aveugle ce compteur. Les deux bras n'etaient pas comparables sur cette
+metrique. C'est moi qui ai casse l'instrument en posant le correctif -- exactement
+le genre de piege que `g_dedie_perdues` avait ete ajoute pour eviter ce matin.
+
+### Ce que la journee laisse debout
+
+* LU : aboutit, chiffre A5/1, TMSI committe cote VLR. Repete de nombreuses fois.
+  Quand le canal est propre, la transaction complete prend 4 secondes
+  (assignation -> RR_EST_CNF -> IDENTITY -> LOC_UPD_ACCEPT -> TMSI REALLOC).
+* `SYNC_RETRIES_CONN 8` (gsm322.c) : 0 `LOS during RACH` sur toutes les
+  tentatives depuis qu'il est pose, contre 4 sur 8 avant. Le seul correctif du
+  jour qui tienne.
+* Le SMS atteint desormais `MMSMS-EST-CNF` puis `WAIT_CP_ACK`, et `SAPI 3
+  established` a ete vu. Avant il mourait en `MM_CONN_PENDING`.
+* Une transaction Call Control a ete allouee pour la premiere fois
+  (callref 0x138c), finie en `Timeout of T308`.
+* Defaut restant : le descendant dedie se corrompt (69 a 99 bits faux sur 184).
+  Observation non expliquee, relevee a 18:23 : le BER monte MONOTONEMENT de 43
+  a 95 en 17 s a `lev >= -47` constant. Une rampe, pas des creneaux -- ce qui
+  ne ressemble pas a une perte de bursts par paquets et suggere un
+  desalignement cumulatif. A creuser.
+
+## 2026-09-22 19:00 — Deux correctifs de plus, et le SMS montant passe
+
+### 1. Effacement au lieu de la page perimee (calypso_bsp.c)
+
+Trouve par l'arbitrage du workflow `wahnj19z5`, qui a au passage REFUTE 3/3 ses
+propres trois voies (cout du pas-a-pas, filtre de derive du BTS, perte
+uniforme). Mecanisme verifie a la main, quatre points :
+
+* `calypso_bsp_rx_burst()` est le seul ecrivain de la DARAM des bursts, et
+  n'est appelee que depuis `bsp_ts0_livrer()` -- que le chemin de manque saute ;
+* `calypso_rif_drain()` rend 0 sur FIFO vide ;
+* le transfert sort alors par `if (got <= 0) break` SANS rien ecrire : **la
+  page API garde le burst du tick precedent** ;
+* sur le chemin DRR, le source dit lui-meme : « On an empty FIFO, DRR keeps its
+  last value [...] returning 0 would fabricate a sample ».
+
+Donc une trame manquante n'est pas un trou : **c'est la trame precedente
+rejouee**, et le decodeur tourne dessus. Signature mesuree : les blocs rejetes
+ont un nombre d'erreurs IDENTIQUE, 17 rejets = 96 neuf fois, 105 cinq fois. Un
+canal bruite ne rend pas neuf fois le meme compte.
+
+C'est aussi pourquoi mon A/B du recalage etait aveugle : ses deux bras
+substituaient un burst FAUX (le plus recent d'un cote, le precedent de
+l'autre), **jamais un effacement**.
+
+Resultat, 2 min : MDL-ERROR 18 -> **0**, LU accepte au PREMIER essai,
+trames jetees 114/min -> 66/min, perdues/joues 13 % -> 0,6 %.
+Reserve : l'histogramme des comptes d'erreurs reste concentre, donc la
+signature n'a pas disparu. Non explique.
+
+### 2. Ne plus jeter la premiere FACCH montante (pont/uplink.py)
+
+`_poll_facch()` faisait, au changement d'epoque TCH :
+`skip_pending()` + `return`. Or `tch.seq` est incremente par `tch.arm()`,
+appele quand le pont decode l'ASSIGNMENT COMMAND descendante -- et
+l'ASSIGNMENT COMPLETE est LA PREMIERE chose que le mobile emet sur le nouveau
+TCH. Elle tombait dans cette fenetre et etait marquee « deja vue ».
+
+Mesure, appel vers 600 a 18:55 : le mobile emet bien « ASSIGNMENT COMPLETE
+(cause #0) » ; le pont journalise « FACCH montante » SANS le suffixe
+« , ASSIGNMENT COMPLETE » ; le BSC conclut « Assignment failed in state
+WAIT_RR_ASS_COMPLETE, cause EQUIPMENT FAILURE: Timeout ».
+
+La SACCH garde le saut (un rapport de mesure perime ne sert a rien), la FACCH
+est desormais traitee. `PONT_FACCH_SKIP=1` retablit l'ancien comportement.
+
+### Ce que le banc fait maintenant
+
+* LU accepte au premier essai, chiffre, TMSI committe cote VLR.
+* **SMS MONTANT ARRIVE AU RESEAU** : `db.c:695 Stored SMS id=33 in DB`.
+* **SETUP d'appel recu par le MSC** : `gsm_04_08_cc.c:704 SETUP to 600`.
+* Restent : la livraison MT du SMS (pas de CP-ACK) et l'aboutissement de
+  l'appel.
+
+### Deux erreurs de lecture a noter, meme cause qu'au matin
+
+J'ai affirme (a) qu'aucun `L1CTL_RACH_REQ` n'existait, (b) que le pont ne
+suivait pas le mobile sur le TCH. **Les deux etaient faux**, demolis par le
+journal complet deux commandes plus tard : dans les deux cas un `head -10` ou
+un `tail -6` avait tronque la sortie. C'est exactement la faute du matin avec
+`manques=0` : conclure d'une absence sans verifier que l'instrument regardait
+au bon endroit. A surveiller.
