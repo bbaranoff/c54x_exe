@@ -978,7 +978,9 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
           if (g_snap_2a00_ok) { const char *d = calypso_getenv("PONT_NB_HIST"); if (d) { char nom[256]; snprintf(nom, sizeof nom, "%s/entree_%u.txt", d, fn); FILE *f = fopen(nom, "w"); if (f) { for (int i = 0; i < 456; i++) fprintf(f, "%d\n", (int16_t)g_snap_2a00[i]); fclose(f); } } }
           if (g_snap_2a00_ok) { int mp = 0, mn = 0, m1 = 0, nz = 0; g_snap_2a00_ok = 0;
             for (int i = 0; i < 456; i++) { int16_t v = (int16_t)g_snap_2a00[i]; if (v) nz++;
-                if ((v > 0) == (code[i] != 0)) mp++; if ((v < 0) == (code[i] != 0)) mn++; if ((v == 1) == (code[i] != 0)) m1++; }
+                if ((v > 0) == (code[i] != 0)) mp++;
+                if ((v < 0) == (code[i] != 0)) mn++;
+                if ((v == 1) == (code[i] != 0)) m1++; }
             printf("  [entree] fn=%u 0x2a00..+456 : nonzero=%d  pos=1 %d/456  neg=1 %d/456  one=1 %d/456 | premiers:", fn, nz, mp, mn, m1);
             for (int i = 0; i < 48; i++) printf(" %d", (int16_t)g_snap_2a00[i]);
             printf("\n  [entree] attendu :"); for (int i = 0; i < 48; i++) printf(" %d", code[i]); printf("\n");
@@ -992,7 +994,8 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
                 for (unsigned a = 0x60; a + 228 < C54X_DATA_SIZE; a++) {
                     int m0 = 0, m1 = 0;
                     for (int i = 0; i < 228; i++) { uint16_t v = dsp->data[a + i];
-                        if ((v == 1 && u[i]) || (v == 0 && !u[i])) m0++; if ((v & 1) == u[i]) m1++; }
+                        if ((v == 1 && u[i]) || (v == 0 && !u[i])) m0++;
+                        if ((v & 1) == u[i]) m1++; }
                     if (m0 > best[0]) { best[0] = m0; bad[0] = a; } if (m1 > best[1]) { best[1] = m1; bad[1] = a; } }
                 printf("  [u228] fn=%u hard %d/228 @%04x  lsb %d/228 @%04x | ", fn, best[0], bad[0], best[1], bad[1]);
                 /* mismatch map at 0x2d66 (hard) */
@@ -1196,7 +1199,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                             for (unsigned a = 0x60; a + 116 < C54X_DATA_SIZE; a++) {
                                 int m0 = 0, m1 = 0, m2 = 0;
                                 for (int i = 0; i < 116; i++) { int16_t v = (int16_t)dsp->data[a + i];
-                                    if ((v < 0) == (t116[i] != 0)) m0++; if ((v > 0) == (t116[i] != 0)) m1++;
+                                    if ((v < 0) == (t116[i] != 0)) m0++;
+                                    if ((v > 0) == (t116[i] != 0)) m1++;
                                     if ((v == 1 && t116[i]) || (v == 0 && !t116[i])) m2++; }
                                 if (m0 > best[0]) { best[0] = m0; bad[0] = a; } if (m1 > best[1]) { best[1] = m1; bad[1] = a; } if (m2 > best[2]) { best[2] = m2; bad[2] = a; }
                             }

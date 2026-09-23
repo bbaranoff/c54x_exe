@@ -2163,3 +2163,247 @@ journal complet deux commandes plus tard : dans les deux cas un `head -10` ou
 un `tail -6` avait tronque la sortie. C'est exactement la faute du matin avec
 `manques=0` : conclure d'une absence sans verifier que l'instrument regardait
 au bon endroit. A surveiller.
+
+## 2026-09-22 19:47 — L'APPEL PASSE L'ASSIGNATION : le chainon manquant du TCH
+
+### Le defaut
+
+`pont.py` publiait DEJA l'intervalle du canal de trafic dans
+`/dev/shm/calypso_tch_cfg` (`pont/state.py`, `Tch._write_cfg` : seq, tn, tsc,
+arfcn) des qu'il decodait l'ASSIGNMENT COMMAND descendante -- verifie, le
+fichier contenait bien `seq=1 tn=2 tsc=7 arfcn=514`. Mais **personne ne le
+lisait cote DSP** : `calypso_bsp_set_dedie()` n'etait appelee que depuis la
+bande laterale SDCCH (`montant.c:425`). Le BSP continuait donc de substituer
+l'intervalle SDCCH (TS1) pendant que le mobile ecoutait le TCH (TS2).
+
+### La preuve, en croisant les deux journaux
+
+Cote mobile :
+```
+19:42:05  MON: ... TS=2   ber=161        <- il EST sur le TCH
+19:42:06  MON: no cell info  rxlev-full=-110   <- le plancher : du SILENCE
+19:42:07  MON: no cell info  rxlev-full=-110
+19:42:08  Channel type 64, subch 0, ts 1       <- il revient sur TS1
+19:42:08  ASSIGNMENT FAILURE (cause #1)
+```
+Cote DSP, sur toute la session : `arme TS1 SDCCH/8`, **jamais TS2**.
+Cote BSC : `Assignment failed in state WAIT_RR_ASS_COMPLETE, cause EQUIPMENT
+FAILURE: Timeout`.
+
+Ce n'etait donc pas un defaut de qualite du lien -- c'etait un chainon absent.
+Et ca invalide au passage ma lecture precedente : j'avais accuse la premiere
+FACCH montante jetee (correctif `uplink.py`), qui etait un vrai bug mais PAS
+celui-la.
+
+### Le correctif
+
+* `calypso_bsp.c` : genre `BSP_DEDIE_TCH` (=2). `bsp_dedie_trame()` retourne
+  vrai pour TOUTES les trames de l'intervalle -- sur un TCH/F la multitrame de
+  26 est entierement a la connexion (24 trafic + 1 SACCH + 1 libre),
+  contrairement a un sous-canal SDCCH ou seuls 4 blocs sur 51 comptent.
+* `montant.c` : `scruter_tch()`, pose a cote de `scruter_dcch()`, lit
+  `/dev/shm/calypso_tch_cfg` et arme le BSP sur le bon intervalle.
+  `MONTANT_TCH=0` coupe.
+
+### Le resultat
+
+```
+19:47:16  Sending 'SETUP'
+19:47:17  ASSIGNMENT COMMAND
+19:47:17  ASSIGNMENT COMPLETE (cause #0)      <- recue par le BSC cette fois
+19:47:20  received CALL PROCEEDING
+19:47:20  INITIATED -> MO_CALL_PROC
+```
+```
+[montant] TCH (seq=1) : arme TS2 TSC=7 - toutes ses trames
+[ts0] canal dedie arme : TCH TS2 (toutes les trames)
+/dev/shm/calypso_bsp_dedie : tn=2 joues=1486 manques=0 perdues=0
+```
+
+Plus aucun `Assignment failed` cote BSC. L'appel atteint `MO_CALL_PROC`.
+
+### Bilan des quatre correctifs de la journee
+
+| # | Fichier | Defaut |
+|---|---------|--------|
+| 1 | `gsm322.c` | sortie d'idle : `ccch_state` gele + un seul re-essai FBSB -> aucun burst RACH emis |
+| 2 | `calypso_bsp.c` | trame manquante = trame precedente REJOUEE (page API jamais reecrite) |
+| 3 | `pont/uplink.py` | premiere FACCH montante apres armement TCH jetee par `skip_pending()` |
+| 4 | `calypso_bsp.c` + `montant.c` | l'intervalle du TCH publie par le pont n'etait lu par personne |
+
+Mesures : LU accepte (contre 1 sur 3), `LOS during RACH` 4/8 -> 0,
+MDL-ERROR 18 -> 0 sur 31 min, SMS montant arrive au reseau, appel jusqu'a
+CALL PROCEEDING.
+
+## 2026-09-22 19:55 — LE VERROU RESTANT, mesure : la ROM n'arme presque jamais sa fenetre SB
+
+Question posee par un contraste : le pont livre une BCCH **parfaite** (741
+blocs, 0 echec de CRC) et le DSP, nourri par le meme chemin au meme instant,
+ne decode la SB qu'une fois sur cinq. Ce n'est donc ni le lien, ni le pont, ni
+la qualite des echantillons.
+
+Sonde posee dans `bsp_ts0_livrer()`, sur les bursts que `bsp_ts0_est_sb()`
+reconnait comme des SCH :
+
+```
+[sbwin] SB #500 : one_shot=0 nwin=0 marge=0 -> cadree comme un burst normal
+        (dans une vraie fenetre SB : 12/500)
+```
+
+**12 bursts SCH sur 500 tombent dans une vraie fenetre SB : 2,4 %.** Les 97,6 %
+restants arrivent avec `one_shot=0`, `nwin=0`, donc `marge=0` : le burst est
+pose a l'offset ZERO, sans les 21 echantillons silencieux que le correlateur
+SB de la ROM attend (c'est eux qui donnent le TOA de 23).
+
+Dans la meme fenetre de mesure : **1 CRC bon sur 16 jobs SB**. Les deux taux
+sont du meme ordre. C'est la premiere explication de la journee qui a le BON
+ORDRE DE GRANDEUR.
+
+### Ce que ca corrige dans mes conclusions precedentes
+
+J'avais accuse le TOA (7 au lieu de 23) puis conclu, mesure a l'appui, que le
+TOA ne discriminait pas -- meme `toa=8743` donnant `CRC_OK` et `crc_ko`. Les
+deux etaient vrais et je n'en tirais rien : **le TOA n'est qu'une consequence
+du cadrage**. Comme le cadrage est presque toujours le meme (mauvais), le TOA
+est presque toujours le meme aussi. Je cherchais la cause dans la consequence.
+
+### La question suivante, nette
+
+**Pourquoi la ROM n'arme-t-elle presque jamais une DMA one-shot pour son job
+SB ?** Elle reste en mode continu (trame de 1250 symboles, TS0 sans marge).
+C'est elle qui programme ALGTH ; soit elle ne le fait pas, soit le modele RHEA
+ne le lui rend pas. A tracer dans `calypso_rhea_dma.c` (ecritures de ALGTH et
+de CTRL_ONE_SHOT par la ROM) en regard des jobs SB.
+
+### Pourquoi je n'ai PAS pose le correctif a chaud
+
+Forcer `marge = 21` quand le burst est une SCH decalerait de 21 echantillons
+une trame dont la longueur est contrainte a 1250 en mode continu, et casserait
+le compteur de symboles de la ROM. C'est exactement le genre de correctif
+applique avant d'etre compris qui a coute quatre fausses pistes aujourd'hui.
+
+**Ce verrou commande tout le reste** : le taux de synchronisation, donc la
+re-acquisition apres chaque liberation de canal, donc la fiabilite du SMS et
+de l'appel.
+
+## 2026-09-23 10:55 — LU ACCEPT puis LU REJECT : le temporisateur X1 du MSC, pas la radio
+
+Symptome, reproduit deux fois (10:43, 10:45) : le mobile recoit LU ACCEPT,
+emet TMSI REALLOCATION COMPLETE, et deux secondes plus tard recoit LU REJECT
+(il repond MM STATUS #98). Le MSC le journalise en `{MSC_A_ST_RELEASING}`.
+Consequence : le VLR oublie l'abonne, le SMS MT est jete (« Freeing
+transaction that still contains an SMS »), le CM SERVICE suivant est rejete
+(cause 4) et tout repart par un nouveau LU.
+
+Cause : `timer geran X1` de osmo-msc (« Complete Layer 3, Authentication and
+Ciphering timeout »), **5 s** par defaut. Il court de la COMPL_L3 jusqu'a la
+fin du LU, TMSI REALLOC COMPLETE compris. Chronologie du 10:45 : COMPL_L3
+10:45:47, chiffrement 10:45:50, X1 echu 10:45:52, avant l'arrivee du TMSI
+REALLOC COMPLETE. Le banc, plus lent que le temps reel, ne tient pas 5 s.
+
+Correctif : `timer geran X1 30` sous `msc` dans /etc/osmocom/osmo-msc.cfg et
+dans le gabarit osmo-operator/configs/osmo-msc.cfg (pose aussi a chaud par la
+VTY 4254).
+
+Ce qui reste, mesure juste apres : un LU a 10:50:33 meurt sur T3260 (12 s),
+le DTAP descendant (demande d'identite ou d'authentification) n'arrive jamais
+au mobile. Sur le SDCCH on voit « Dropping frame with 96 bit errors » (x3,
+toujours la meme signature 96) et des trames a « 0 bit errors » jetees quand
+meme (fire_crc >= 2). Le descendant dedie reste le verrou, avec la fenetre SB.
+
+### Les journaux du banc DSP dans le panneau
+
+Le panneau (tmux calypso, osmo-fft-snap) suit
+/run/user/0/osmo-nitb/logs/{qemu,osmocon,mobile}.log et /dev/shm/pont.log.
+run.sh n'ecrivait que dans /tmp/c54x-pont : tous les volets restaient vides.
+Desormais le vrai fichier est pose au chemin du panneau, et $RUNDIR/<nom>.log
+est un lien vers lui. Ce sens-la est obligatoire, car un `tail -F` ouvert
+refuse un fichier remplace par un lien. pont.py n'est plus lance avec
+`--no-record` : c'est ce drapeau qui laissait /tmp/iq_fft_ms.fifo, donc la
+FFT, sans producteur. PONT_AIRREC=0 et PANNEAU_LOGS=none retablissent
+l'ancien comportement. Au passage : la trace `[trx] A_SCH` de QEMU s'arrete
+apres 40 lignes (calypso_trx.c:1076), ce qui est voulu ; ce n'est pas un gel.
+
+## 2026-09-23 10:58 — Run de 10:53 : LU accepte, SMS MT perdu sur le descendant dedie
+
+* X1 a 30 s : le LU passe, TMSI 0x26861AD4 valide par le VLR.
+* Le MSC livre aussitot un SMS MT en attente. La SAPI 3 s'etablit (10:53:42,
+  « new SAPI 3 link state idle -> established »), mais le CP-DATA n'arrive
+  jamais au mobile. Son T3240 expire a 10:53:48, il libere le canal, et le MSC
+  abandonne le SMS (« dropping pending message »).
+* Erreurs du descendant dedie sur tout le run : 80 a 114 bits faux sur 456,
+  plus 16 trames a « 0 bit errors » jetees quand meme. 114 = un burst entier,
+  donc c'est typiquement UN burst sur les quatre du bloc qui est faux.
+* Cote BSP : tn=1 joues=464 manques=0 perdues=0. Chaque trame dediee recoit
+  un burst du bon intervalle, et pourtant un burst sur quatre est faux.
+* Piste suivante, deja instrumentee mais muette par defaut : « dedie :
+  DESACCORD table=.. tpu=.. » (calypso_bsp.c, bsp_ts0_livrer). Il faut
+  CALYPSO_DEBUG=BSP sur c54x_exe. Un decalage d'une trame entre la table
+  45.002 et la fenetre TPU programmee par l'ARM donnerait exactement un burst
+  faux sur quatre.
+* Lien montant : « UL bursts=66 tard=225 » dans les 40 premieres secondes,
+  puis tard fige a 247. Les pertes se concentrent pendant le calage de
+  l'horloge, qui tombe au moment du premier LU.
+* Avertissements du build corriges : prototypes de calypso_trx_get_fn et de
+  calypso_inth_arm_ack (appels implicites en int), -Waddress, et les if
+  enchaines sur une ligne. Zero avertissement.
+
+## 2026-09-23 11:06 — PREMIER SMS MT LIVRE DE BOUT EN BOUT ; le montant jetait 69 % de ses bursts
+
+* 11:05:56 : le mobile recoit « test » (OA 777), repond CP-ACK puis RP-ACK.
+  Cote MSC : CP-ACK 11:06:00, RP-ACK 11:06:03, transaction fermee proprement.
+  Cote mobile : « % SMS from 777: 'test' ».
+  Ce qui l'a debloque : le correctif SAPI 3 de pont/uplink.py, pose par une
+  autre session le 2026-09-23. L'UA du SAPI 3 partait sur la SACCH montante,
+  la BTS n'etablissait jamais le SAPI 3.
+* Traces LAPDm du mobile (llapd debug, pose a chaud par la VTY 4347) :
+  toutes les trames I montantes sont retransmises 2 a 5 fois (TIMER_RECOV)
+  avant d'etre acquittees. Le descendant SDCCH, lui, decode une trame par
+  multitrame sans trou.
+* Cause : pont/trx.py Transmitter.run JETAIT tout burst montant reveille apres
+  sa trame (off < -window_tol). Run de 11:04 : 141 emis, 314 jetes (69 %).
+  Les runs sans enregistrement I/Q en jetaient 16 %. Le reveil du thread
+  souffre du GIL partage avec record.py, que la FFT a reactive.
+* Or osmo-bts-trx range un burst montant par son fn, compare au dernier fn
+  traite du canal logique (common/scheduler.c, trx_sched_route_burst_ind).
+  L'heure d'arrivee n'y entre pas : un vrai TRX livre toujours le montant
+  apres coup. Correctif : envoyer le burst en retard tant qu'il reste dans
+  PONT_UL_RETARD_MAX = 26 trames. Le compteur « tard » compte desormais les
+  bursts en retard, envoyes ou pas. A mesurer au prochain run : les
+  retransmissions T200 doivent disparaitre.
+
+## 2026-09-23 11:20 — Appel : CONNECT jamais recu ; pont coupe en deux points d'entree
+
+### Appel vers 600, run de 11:10
+
+SETUP (11:11:34), assignation TCH/F TS2 FR, ASSIGNMENT COMPLETE, puis CALL
+PROCEEDING recu par FACCH (11:11:38). Un SMS MT passe meme en pleine
+communication (SAPI 3 sur la SACCH). Le 600 decroche : le MSC passe en
+CONNECT_IND et envoie le CONNECT vers 11:11:37. Le mobile ne le recoit jamais,
+et T313 expire a 11:12:07.
+* Le firmware ne remonte un FACCH de TCH que si le DSP a pose B_BLUD dans
+  a_fd[0] en fin de bloc (prim_tch.c:246). Sans detection des bits de vol,
+  rien ne remonte : c'est le silence observe.
+* Le masque A5 du pont (gsm.a5_xor) laisse bien les bits de vol (60, 87) en
+  clair. Ce n'est donc pas lui.
+* Le pont decode lui-meme le TCH descendant : facch 5 -> 39 entre 11:11:39 et
+  11:11:54 (les retransmissions du CONNECT), tch_dl fige a 219, puis tch_crc
+  qui grimpe de 47 a 877. A partir d'environ 11:11:49, le pont n'arrive plus a
+  decoder une seule trame TCH descendante, ni parole ni FACCH. A creuser en
+  premier : le dechiffrement du TCH par le pont (cle, fn, dl_active), puis la
+  detection FACCH du DSP une fois la parole lancee.
+
+### Decoupage du pont (demande operateur)
+
+* pont/pont.py        = montage DSP (c54x_exe/run.sh MODE=dsp, grgsm_exe sans
+                         argument).
+* pont/pont_uncipher.py = montage grgsm (start-direct.sh, run.sh MODE=grgsm,
+                         PONT_DSP_PORT=0 grgsm_exe). Il refuse --dsp-port.
+* Meme paquet et A5 dans le pont des deux cotes. Ce qui differe passe par des
+  defauts poses avant l'import (os.environ.setdefault) :
+  PONT_UL_RETARD_MAX vaut 0 pour grgsm (jeter le burst en retard, comme
+  avant) et 26 pour le DSP. Le defaut du paquet est 0 : le chemin grgsm garde
+  exactement son comportement d'avant.
+* Motifs de processus mis a jour : 09-teardown.sh, rapport-run.sh,
+  conky-osmo-status.sh, build-debs.sh. /usr/local/bin/grgsm_exe (hors depot)
+  aussi, avec une copie de l'original dans le scratchpad de la session.

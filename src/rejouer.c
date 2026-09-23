@@ -310,7 +310,8 @@ static void fbdet_resp(int attempt)
     }
     /* afc_correct: delta = (norm * err)/slope; slope compal_e88 = 287 */
     afc_dac += (int)(((32768 / 947) * (long)fb.freq_diff) / 287);
-    if (afc_dac > 4095) afc_dac = 4095; if (afc_dac < -4096) afc_dac = -4096;
+    if (afc_dac > 4095) afc_dac = 4095;
+    if (afc_dac < -4096) afc_dac = -4096;
     sched_reset();
     if (fb_mode == 0) {
         if (abs(fb.freq_diff) < THRESH1) plan_fb_set(1, 1);
@@ -324,7 +325,8 @@ static void fbdet_resp(int attempt)
         int delay = fn_offset + 11 - (int)fn_cur - 1;
         if (trace) printf("    -> toa-23=%d ntdma=%d qbits=%d delay=%d\n", toa, ntdma, qbits, delay);
         if (abs(fb.freq_diff) < THRESH2) {
-            if (delay < 0) delay = 0; if (delay > 20) delay = 20;
+            if (delay < 0) delay = 0;
+            if (delay > 20) delay = 20;
             /* REJEU_SB_FORCE=1: aim at the NEXT SCH frame (p51 in {1,11,21,31,41})
              * instead of the computed delay. Separates the DEMODULATOR from the
              * TIMING: a CRC passing here means only the timing (ntdma) is at
@@ -1162,7 +1164,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int16_t v0 = (int16_t)dsp->data[base];
                           int same = 0, n = 0; int16_t mn=32767, mx=-32768;
                           for (int k=0;k<190;k++) { int16_t v=(int16_t)dsp->data[base+k];
-                              if (v==v0) same++; if(v<mn)mn=v; if(v>mx)mx=v; n++; }
+                              if (v==v0) same++;
+                              if(v<mn)mn=v;
+                              if(v>mx)mx=v;
+                              n++; }
                           printf("    0x%04x : %d/%d mots egaux au premier (%d) ; etendue [%d..%d]\n",
                                  base, same, n, v0, mn, mx);
                       }

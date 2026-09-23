@@ -407,7 +407,10 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
             for (int k = 0; k < 148; k++) {
                 double yi = xi[k], yq = xq[k];
                 for (int d = 1; d <= isi_n; d++) if (k - d >= 0) { yi += h[d] * xi[k-d]; yq += h[d] * xq[k-d]; }
-                if (yi > 32767) yi = 32767; if (yi < -32768) yi = -32768; if (yq > 32767) yq = 32767; if (yq < -32768) yq = -32768;
+                if (yi > 32767) yi = 32767;
+                if (yi < -32768) yi = -32768;
+                if (yq > 32767) yq = 32767;
+                if (yq < -32768) yq = -32768;
                 burst_iq[2*k] = (int16_t)lrint(yi); burst_iq[2*k+1] = (int16_t)lrint(yq);
             }
         }
@@ -446,7 +449,8 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
                 seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
                 double g = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
                 double v = burst_iq[k] + sigma * g;
-                if (v > 32767) v = 32767; if (v < -32768) v = -32768;
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
                 burst_iq[k] = (int16_t)lrint(v);
             }
         }

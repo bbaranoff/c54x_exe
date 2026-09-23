@@ -6,7 +6,7 @@ BSC, MSC, HLR…) n'est jamais lancé ici ; le pont l'attend s'il existe.
 | montage | nom à taper | ce qui tourne |
 |---|---|---|
 | **dsp** | `qosmo-dsp` | `c54x_exe --arm` → `qosmo` (QEMU, `CALYPSO_DSP_EXTERN=1`) → `osmocon` → `mobile` → `pont.py --dsp-port 6702` |
-| **grgsm** | `qosmo-grgsm` | `qosmo` (QEMU, couche 1 gr-gsm intégrée) → `osmocon` → `mobile` → `pont.py` |
+| **grgsm** | `qosmo-grgsm` | `qosmo` (QEMU, couche 1 gr-gsm intégrée) → `osmocon` → `mobile` → `pont_uncipher.py` |
 
 `qosmo-dsp` et `qosmo-grgsm` sans argument lancent tout dans l'ordre, chaque étape
 attendant la précédente sur un critère observable. `--status`, `--logs`, `--stop`,
@@ -118,7 +118,7 @@ mobile -c /opt/GSM/c54x_exe/mobile_pont.cfg     # layer2-socket /tmp/osmocom_l2_
 
 ```bash
 grgsm_exe                     # = python3 pont/pont.py --no-record --dsp-port 6702
-PONT_DSP_PORT=0 grgsm_exe     # montage grgsm : vers la L1 de QEMU seulement
+PONT_DSP_PORT=0 grgsm_exe     # montage grgsm : pont/pont_uncipher.py, vers la L1 de QEMU seulement
 ```
 
 - **Rôle** : reçoit les bursts du BTS en TRXD (UDP **5700-5702** depuis osmo-bts-trx),

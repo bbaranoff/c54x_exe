@@ -30,7 +30,14 @@ FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
 OSMOCON="${OSMOCON:-/opt/GSM/osmocom-bb/src/host/osmocon/osmocon}"
 MOBILE="${MOBILE:-$(command -v mobile || echo /usr/local/bin/mobile)}"
 MOBILE_CFG="${MOBILE_CFG:-$HERE/mobile_pont.cfg}"
-PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont.py}"
+# [2026-09-23] Deux points d'entree pour le meme paquet pont/ : pont.py pour le
+# montage dsp (--dsp-port 6702), pont_uncipher.py pour le montage grgsm, qui
+# garde ses defauts d'avant le decoupage. PONT_PY force l'un ou l'autre.
+if [ "$MODE" = grgsm ]; then
+    PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont_uncipher.py}"
+else
+    PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont.py}"
+fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
@@ -48,6 +55,27 @@ IQ="${IQ:-none}"
 AMP="${AMP:-30000}"
 DSP_SOCK=/tmp/calypso_dsp.sock
 DSP_SHM=/dev/shm/calypso_api_ram
+
+# [2026-09-23] LA VITRINE : LES MEMES JOURNAUX QU'EN MODE SHUNT. Le panneau
+# (tmux calypso, osmo-fft-snap) suit /run/user/0/osmo-nitb/logs/{qemu,osmocon,
+# mobile}.log et /dev/shm/pont.log, ceux qu'ecrit le montage grgsm. Ce banc-ci
+# n'ecrivait que dans $RUNDIR : les volets restaient a 0 octet. Le VRAI fichier
+# est donc pose au chemin du panneau et $RUNDIR/<nom>.log devient un lien vers
+# lui -- pas l'inverse : un `tail -F` deja ouvert refuse un fichier remplace par
+# un lien (« untailable symbolic link »). PANNEAU_LOGS=none pour ne rien toucher.
+PANNEAU_LOGS="${PANNEAU_LOGS:-/run/user/0/osmo-nitb/logs}"
+# La FFT du panneau lit /tmp/iq_fft_ms.fifo, que pont.py ne remplit que si
+# l'enregistrement est actif : --no-record la rendait muette. PONT_AIRREC=0 le coupe.
+PONT_AIRREC="${PONT_AIRREC:-1}"
+vitrine() {   # vitrine <nom> : a appeler AVANT le lancement qui ecrit $RUNDIR/<nom>.log
+    rm -f "$RUNDIR/$1.log"
+    [ "$PANNEAU_LOGS" = none ] && return 0
+    local cible="$PANNEAU_LOGS/$1.log"
+    [ "$1" = pont ] && cible=/dev/shm/pont.log
+    [ -d "$(dirname "$cible")" ] || return 0
+    rm -f "$cible" && : > "$cible" && ln -s "$cible" "$RUNDIR/$1.log"
+    return 0
+}
 
 dire()  { printf '\033[1m[run %s]\033[0m %s\n' "$MODE" "$*"; }
 rater() { printf '\033[1;31m[run] ECHEC :\033[0m %s\n' "$*" >&2; exit 1; }
@@ -74,6 +102,7 @@ etape2() {   # l'ARM
     local extern=""
     if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "le DSP ne tourne pas (etape 1 d'abord)"; extern=1; fi
     rm -f "$MONITOR"
+    vitrine qemu
     CALYPSO_DSP_EXTERN="$extern" "$QEMU" -M calypso -cpu arm946 -display none -parallel none \
         -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" \
         -kernel "$FIRMWARE_ELF" > "$RUNDIR/qemu.log" 2>&1 &
@@ -95,6 +124,7 @@ etape3() {   # osmocon
     [ -r "$FIRMWARE_BIN" ] || rater "image .bin absente : $FIRMWARE_BIN"
     local pty; pty="$(cat "$RUNDIR/modem.pty")"
     rm -f "$L2_SOCK"
+    vitrine osmocon
     stdbuf -oL -eL "$OSMOCON" -m romload -i 100 -p "$pty" -s "$L2_SOCK" "$FIRMWARE_BIN" > "$RUNDIR/osmocon.log" 2>&1 &
     echo $! > "$RUNDIR/osmocon.pid"
     if ! attendre 30 grep -aq "your code is running now" "$RUNDIR/osmocon.log"; then
@@ -114,6 +144,7 @@ etape4() {   # le mobile
         rater "le port VTY $vty de $MOBILE_CFG est deja pris par : $(ss -ltnp 2>/dev/null | grep ":$vty " | grep -o 'users:.*' | head -1)
        changez la ligne « bind 127.0.0.1 $vty » de la config (les 42xx sont ceux du reseau du banc)"
     fi
+    vitrine mobile
     stdbuf -oL "$MOBILE" -c "$MOBILE_CFG" > "$RUNDIR/mobile.log" 2>&1 &
     echo $! > "$RUNDIR/mobile.pid"
     sleep 2
@@ -126,7 +157,9 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     vivant pont && { dire "5. pont.py deja lance (pid $(pid_de pont))"; return; }
     [ -r "$PONT_PY" ] || rater "pont.py absent : $PONT_PY"
     local extra=""; [ "$MODE" = dsp ] && extra="--dsp-port 6702"
-    ( cd "$(dirname "$PONT_PY")/.." && exec python3 "$PONT_PY" --no-record $extra ) > "$RUNDIR/pont.log" 2>&1 &
+    [ "$PONT_AIRREC" = 0 ] && extra="$extra --no-record"
+    vitrine pont
+    ( cd "$(dirname "$PONT_PY")/.." && exec python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"

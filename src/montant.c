@@ -429,6 +429,73 @@ static void scruter_dcch(uint32_t fn)
     }
 }
 
+/* [2026-09-22] L'INTERVALLE DU TCH, CHAINON QUI MANQUAIT.
+ *
+ * pont.py publie deja l'intervalle du canal de trafic dans
+ * /dev/shm/calypso_tch_cfg (pont/state.py, Tch._write_cfg : seq, tn, tsc,
+ * arfcn) des qu'il decode l'ASSIGNMENT COMMAND descendante. Mais PERSONNE ne
+ * lisait ce fichier cote DSP : `calypso_bsp_set_dedie()` n'etait appelee que
+ * depuis la bande laterale SDCCH ci-dessus. Le BSP continuait donc de servir
+ * l'intervalle SDCCH pendant que le mobile ecoutait le TCH.
+ *
+ * Mesure du 2026-09-22, appel vers 600 : le BSC assigne un TCH/F sur TS2, le
+ * mobile y bascule (« MON: ... TS=2 »), n'y entend RIEN -- trois secondes de
+ * « MON: no cell info » avec rxlev-full=-110, le plancher -- revient sur TS1
+ * et repond « ASSIGNMENT FAILURE (cause #1) » (gsm48_rr.c:4750). Cote BSC :
+ * « Assignment failed in state WAIT_RR_ASS_COMPLETE, cause EQUIPMENT FAILURE:
+ * Timeout ». La trace DSP ne montrait que « arme TS1 SDCCH/8 », jamais TS2.
+ *
+ * Ce n'etait donc pas un defaut de qualite du lien mais un chainon manquant.
+ * MONTANT_TCH=0 coupe cette lecture. */
+static void scruter_tch(uint32_t fn)
+{
+    static int fd = -1, coupe = -1;
+    static uint32_t seq, prochain_essai;
+    static int tn_arme;
+
+    if (coupe < 0) {
+        const char *e = calypso_getenv("MONTANT_TCH");
+        coupe = (e && *e == '0') ? 1 : 0;
+    }
+    if (coupe) {
+        return;
+    }
+    if (fd < 0) {
+        if (fn < prochain_essai) {
+            return;
+        }
+        prochain_essai = fn + 200;
+        fd = open("/dev/shm/calypso_tch_cfg", O_RDONLY);
+        if (fd < 0) {
+            return;
+        }
+    }
+    uint8_t b[16];
+    if (pread(fd, b, sizeof(b), 0) != (ssize_t)sizeof(b)) {
+        return;
+    }
+    uint32_t s2;
+    memcpy(&s2, b, 4);
+    if (s2 == seq) {
+        return;
+    }
+    seq = s2;
+    int tn = b[4], tsc = b[5];
+    if (!s2 || tn <= 0 || tn > 7) {
+        if (tn_arme) {
+            printf("  [montant] TCH (seq=%u) : libere TS%d\n", seq, tn_arme);
+            calypso_bsp_set_dedie(0, 0xFF, 0);
+            tn_arme = 0;
+            montant_canal_libere();
+        }
+        return;
+    }
+    printf("  [montant] TCH (seq=%u) : arme TS%d TSC=%d - toutes ses trames\n", seq, tn, tsc);
+    calypso_bsp_set_dedie(tn, 2 /* BSP_DEDIE_TCH */, 0);
+    tn_arme = tn;
+    g.dedie_arme = true;
+}
+
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
 {
     static int fd = -2;
@@ -621,6 +688,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     unsigned pg = taches ? ((v_page & B_GSM_PAGE) ? 1u : 0u) : (page & 1u);
 
     scruter_dcch(fn);
+    scruter_tch(fn);      /* le TCH prime sur la SDCCH quand il est arme */
 
     /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
      * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;
