@@ -448,6 +448,21 @@ static void scruter_dcch(uint32_t fn)
     }
     seq = s2;
     int genre = b[4], ss = b[5], tn = b[6];
+    /* [2026-09-23] Genre 2/3 : le tap QEMU (calypso_dcch_tap.c) annonce
+     * desormais le TCH (TCH/F, TCH/H) au lieu de laisser le SDCCH perime
+     * pendant tout l'appel. Simple constat ici : la bascule du BSP suit la
+     * tache du firmware (suivre_tache_tch), l'intervalle et le TSC viennent
+     * du pont (scruter_tch), et le SDCCH memorise ne doit PAS etre ecrase --
+     * c'est lui que l'ASSIGNMENT FAILURE retrouve (le tap le republie quand
+     * le firmware y revient). */
+    if (genre == 2 || genre == 3) {
+        printf("  [montant] canal dedie (side-band seq=%u) : TCH/%c TS%d SS=%d, firmware sur le TCH "
+               "(%s%s)\n", seq, genre == 2 ? 'F' : 'H', tn, ss,
+               g.sur_tch ? "BSP deja sur le TCH" : "BSP pas encore bascule",
+               g.sd_valide ? ", SDCCH memorise" : "");
+        fflush(stdout);
+        return;
+    }
     printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d%s\n",
            seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
            (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
@@ -624,6 +639,27 @@ static void scruter_tch(uint32_t fn)
  * le BSP change donc d'intervalle sur la trame que l'ARM lit vraiment, quel
  * que soit le retard du DSP sur la BTS. Les autres trames (PM des voisines,
  * trame libre) ne changent rien. */
+/* [2026-09-23] SONDE d_fn : la position que le firmware donne au DSP dans la
+ * 104-multitrame (dsp.c:537, d_fn = fn_report | (fn%104) << 8), sur les taches
+ * TCH. A comparer au fn BTS que le BSP joue au meme tick ([sacch_tf]) : un
+ * ecart multiple de 26 laisse passer parole et FACCH mais desentrelace la
+ * SACCH dans le desordre (a_cd FIRE KO a chaque bloc, LOS). 24 lignes. */
+static void sonde_dfn(uint16_t *api_ram, unsigned pg, bool taches, uint32_t fn)
+{
+    static unsigned n;
+    if (!taches || !g.sur_tch || n >= 24) {
+        return;
+    }
+    uint16_t t = api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2] & 0x7fffu;
+    uint16_t dfn = api_ram[(API_W_PAGE(pg) + WP_D_FN) / 2];
+    if (t != TCHA_DSP_TASK) {
+        return;
+    }
+    n++;
+    printf("  [d_fn] tick=%u tache=%u fn_report=%u fn%%104=%u\n",
+           fn, t, dfn & 0xffu, (dfn >> 8) & 0xffu);
+}
+
 static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32_t fn)
 {
     static bool sans_annonce_dit;
@@ -723,6 +759,11 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
         fn_dernier = fn;
     }
     prec = etat;
+}
+
+bool montant_sur_tch(void)
+{
+    return g.sur_tch;
 }
 
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
@@ -919,6 +960,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     scruter_dcch(fn);
     scruter_tch(fn);      /* l'annonce du TCH par le pont                  */
     suivre_tache_tch(api_ram, pg, taches, fn);   /* la bascule, par le firmware */
+    sonde_dfn(api_ram, pg, taches, fn);
 
     /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
      * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;

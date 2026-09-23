@@ -382,8 +382,29 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
              * missing (b0 absent in 23 of 97 BCCH blocks), read by the firmware
              * as EMPTY / BURST ID n!=m. Keep running, in slices, until DMA2 is
              * armed or the DSP idles, half the budget at most. */
-            while (!dsp->idle && !calypso_rhea_dma_rx_armed() && fait < (int)budget / 2)
+            /* [2026-09-23] SUR LE TCH, ALLER JUSQU'A L'IDLE AVANT LE DEPOT.
+             * Pour une tache TCHA (SACCH/TF), la ROM arme la fenetre de la trame
+             * N+1 PUIS demodule, au debut de N+1, le burst SACCH de N qu'elle
+             * a laisse dans 0x0cce ; sur silicium le burst de N+1 n'arrive qu'au
+             * passage de TS2, plus tard. Deposer des l'armement l'ecrasait : la
+             * SACCH se decodait sur un burst de trafic (a_cd FIRE KO a chaque
+             * bloc, 113-118 bits faux, LOS au 32e bloc). Reproducteur
+             * tch_rejeu (scratchpad 2026-09-23) : depot apres l'IDLE -> SACCH
+             * FIRE=0 « 07 00 03 », FACCH 10/10 bonnes (contre 6/12). Hors TCH
+             * (FB, SB, SDCCH) on garde l'arret a l'armement.
+             * PONT_TCH_DEPOT_IDLE=0 retablit l'ancien comportement. */
+            static int tch_idle = -1;
+            if (tch_idle < 0) { const char *e = calypso_getenv("PONT_TCH_DEPOT_IDLE"); tch_idle = (e && *e == '0') ? 0 : 1; }
+            bool jusqua_idle = tch_idle && montant_sur_tch();
+            while (!dsp->idle && (jusqua_idle || !calypso_rhea_dma_rx_armed()) && fait < (int)budget / 2)
                 fait += c54x_run_profile(dsp, 256);
+            if (jusqua_idle) {
+                static unsigned n_tch;
+                if (n_tch++ < 30)
+                    printf("  [depot_tch] fn=%u phase A : %d insn, idle=%d, fenetre armee=%d%s\n",
+                           g_c54x_exe_fn, fait, dsp->idle, calypso_rhea_dma_rx_armed(),
+                           dsp->idle ? "" : "  <- BUDGET/2 ATTEINT, depot avant la fin");
+            }
             fait_a = fait;
             if (phase == 1) {
                 /* ISR played, R page written, window armed: the ARM may run

@@ -6,6 +6,7 @@
 #define C54X_EXE_MONTANT_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* A appeler une fois par trame, apres que l'ARM a rendu la main (fin de
  * scenario : d_dsp_page ecrit, taches posees dans la page W). `page` est le
@@ -17,5 +18,8 @@ void montant_canal_libere(void);
 
 /* Une ligne de bilan en fin de session. */
 void montant_bilan(void);
+
+/* Vrai tant que le BSP joue l'intervalle du TCH (bascule suivie par le firmware). */
+bool montant_sur_tch(void);
 
 #endif

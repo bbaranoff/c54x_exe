@@ -42,7 +42,7 @@ fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
-INSNS="${INSNS:-60000}"
+INSNS="${INSNS:-80000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
