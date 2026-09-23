@@ -29,6 +29,7 @@ SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src
        $(L1DSP)/calypso_dma.c \
        $(L1DSP)/calypso_rhea_dma.c \
        $(L1DSP)/calypso_rif.c \
+       $(L1DSP)/calypso_a5.c \
        $(L1DSP)/calypso_twl3025.c \
        $(CAL)/calypso_xio.c \
        $(CAL)/calypso_iota.c \
@@ -38,7 +39,16 @@ SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src
 
 all: c54x_exe
 
-c54x_exe: $(SRC)
+# [2026-09-23] Les en-tetes aussi : sans eux, une modification d un .h seul
+# (calypso_c54x.h, calypso_bsp.h...) laissait un binaire perime.
+HDR := $(wildcard src/*.h $(L1DSP)/*.h $(CAL)/*.h $(QOSMO)/include/hw/arm/calypso/*.h)
+
+# [2026-09-23] RECOMPILATION A CHAQUE make. Les sources viennent d un autre
+# depot (qosmo) et « make: Nothing to be done » laissait douter du binaire
+# lance : c54x_exe est reconstruit a chaque appel, comme apres un make clean.
+# Une seule commande cc, pas de .o : rien d autre a nettoyer.
+.PHONY: c54x_exe
+c54x_exe: $(SRC) $(HDR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 # ISA conformance: the SPRU172C worked examples replayed on the core.

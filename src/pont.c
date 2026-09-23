@@ -320,6 +320,68 @@ static uint16_t g_daram_apres_dma[384]; static uint16_t g_daram_aad;
 /* phase : 0 = whole frame ; 1 = frame ISR only, up to the arming of the RX
  * window (then DONE|PHASE_A and wait for PONT_GO) ; 2 = burst delivery and
  * the rest of the frame. See CALYPSO_PONT_TICK_DEUX_PHASES. */
+/* [2026-09-23] ENREGISTREUR DU TCH (cote ARM). Les ecritures de l ARM dans
+ * l API RAM, par difference avec l instantane pris quand le DSP a rendu la
+ * main : 'A', tick BE32, fenetre (0 = avant le TICK, 1 = entre phase A et GO),
+ * nombre BE16, puis (mot BE16, valeur BE16). Et a chaque TICK : 'T', tick BE32,
+ * drapeaux (bit0 irq trame, bit1 deux phases), budget BE32. Meme fichier que
+ * les livraisons d I/Q du BSP (calypso_bsp_enreg_fichier), meme garde : TCH
+ * actif, CALYPSO_REJEU_ENREG=0 coupe. Rejoue par tools/rejeu_banc.c. */
+static uint16_t g_enreg_api[CALYPSO_API_WORDS];
+static bool g_enreg_api_ok;
+static void enreg_api_prendre(const uint16_t *api_ram)
+{
+    memcpy(g_enreg_api, api_ram, sizeof g_enreg_api);
+    g_enreg_api_ok = true;
+}
+static void enreg_api_diff(const uint16_t *api_ram, uint32_t tick, int fenetre)
+{
+    FILE *f = calypso_bsp_enreg_fichier();
+    if (!f || !g_enreg_api_ok) return;
+    static uint8_t buf[8 + 4 * CALYPSO_API_WORDS];
+    unsigned n = 0;
+    for (unsigned i = 0; i < CALYPSO_API_WORDS; i++) {
+        if (api_ram[i] == g_enreg_api[i]) continue;
+        uint8_t *q = buf + 8 + 4 * n++;
+        q[0] = i >> 8; q[1] = i; q[2] = api_ram[i] >> 8; q[3] = api_ram[i];
+    }
+    buf[0] = 'A'; buf[1] = tick >> 24; buf[2] = tick >> 16; buf[3] = tick >> 8; buf[4] = tick;
+    buf[5] = (uint8_t)fenetre; buf[6] = n >> 8; buf[7] = n;
+    fwrite(buf, 1, 8 + 4 * n, f);
+    fflush(f);
+}
+/* Etat de depart, une fois, au premier TICK enregistre (DSP rendu, au repos) :
+ * 'S' API RAM complete, 'D' registres puis memoire de donnees du C54x. */
+typedef struct {
+    int64_t a, b; uint16_t ar[8], t, trn, sp, bk, brc, rsa, rea, st0, st1, pmst, imr, ifr, xpc;
+    uint32_t pc; uint8_t idle, running;
+} EnregRegs;
+static void enreg_base(FILE *f, const C54xState *dsp, const uint16_t *api_ram, uint32_t tick)
+{
+    uint8_t h[5] = { 'S', tick >> 24, tick >> 16, tick >> 8, tick };
+    fwrite(h, 1, 5, f);
+    fwrite(api_ram, sizeof(uint16_t), CALYPSO_API_WORDS, f);
+    EnregRegs r = { .a = dsp->a, .b = dsp->b, .t = dsp->t, .trn = dsp->trn, .sp = dsp->sp, .bk = dsp->bk,
+                    .brc = dsp->brc, .rsa = dsp->rsa, .rea = dsp->rea, .st0 = dsp->st0, .st1 = dsp->st1,
+                    .pmst = dsp->pmst, .imr = dsp->imr, .ifr = dsp->ifr, .xpc = dsp->xpc, .pc = dsp->pc,
+                    .idle = dsp->idle, .running = dsp->running };
+    memcpy(r.ar, dsp->ar, sizeof r.ar);
+    h[0] = 'D';
+    fwrite(h, 1, 5, f);
+    fwrite(&r, sizeof r, 1, f);
+    fwrite(dsp->data, sizeof(uint16_t), C54X_DATA_SIZE, f);
+}
+static void enreg_tick(const C54xState *dsp, const uint16_t *api_ram, uint32_t tick, bool irq, bool deux, long budget)
+{
+    FILE *f = calypso_bsp_enreg_fichier();
+    if (!f) return;
+    static bool base;
+    if (!base) { base = true; enreg_base(f, dsp, g_enreg_api_ok ? g_enreg_api : api_ram, tick); }
+    uint8_t h[10] = { 'T', tick >> 24, tick >> 16, tick >> 8, tick, (uint8_t)((irq ? 1 : 0) | (deux ? 2 : 0)),
+                      (uint8_t)(budget >> 24), (uint8_t)(budget >> 16), (uint8_t)(budget >> 8), (uint8_t)budget };
+    fwrite(h, 1, sizeof h, f);
+}
+
 static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32_t *insns, int phase)
 {
     uint32_t drapeaux = 0;
@@ -1124,6 +1186,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             g_tick_irq_trame = (m.b & CALYPSO_PONT_TICK_IRQ_TRAME) != 0;
             bool deux_phases = (m.b & CALYPSO_PONT_TICK_DEUX_PHASES) != 0;
             m.b &= 1u;
+            enreg_tick(dsp, api_ram, m.a, g_tick_irq_trame, deux_phases, insns);
+            enreg_api_diff(api_ram, m.a, 0);
             calypso_bsp_set_tpu_offset((int)m.c);   /* firmware RX window */
             /* AFC relay, closing the loop. The ARM writes d_afc (word 15 of the W
              * page) into the shared API RAM; on silicon the DSP serialises it to
@@ -1195,6 +1259,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                  * That is the silicon order, and what keeps "BURST ID n!=m" and
                  * "EMPTY" (prim_rx_nb.c) away. */
                 sonde_pages("A", m.a, dsp, api_ram);
+                enreg_api_prendre(api_ram);
                 envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                 bool go = false;
                 while (!g_stop && !go) {
@@ -1208,6 +1273,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 }
                 if (!go) break;
                 sonde_pages("G", m.a, dsp, api_ram);
+                enreg_api_diff(api_ram, m.a, 1);
                 if (calypso_getenv("PONT_NB_DEBUG") && ((m.a % 51u) % 10u - 2) % 4 == 3 && m.a % 51u <= 5 &&
                     (api_ram[API_R_PAGE(0) / 2] == 24 || api_ram[API_R_PAGE(1) / 2] == 24)) {
                     static unsigned nq;
@@ -1391,6 +1457,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             trames++;
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
+            enreg_api_prendre(api_ram);
             envoyer(fd, PONT_DONE, drapeaux, ninsn);
             if (!init_avant && init_done) {
                 printf("pont : DSP boote (premier IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
