@@ -736,6 +736,39 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
  * BTS (UA) et le mobile n'en recevait aucune (T200, MDL-ERROR cause 1). Cette
  * sonde tranche entre ROM (B_BLUD jamais pose) et plomberie (pose mais
  * FIRE). MONTANT_AFD=0 la coupe. */
+/* [2026-09-23] TRAMES DESCENDANTES LIVREES PAR LA ROM, POUR LA COMPARAISON.
+ * Chaque parole (a_dd_0, convertie du format TI au FR standard comme le
+ * montant) et chaque FACCH (a_fd) vue avec B_BLUD, avec le tick, le mot
+ * d'etat et le nombre d'erreurs rapporte (mot 2). Enregistrements de 48
+ * octets : fn LE32, type (0 parole, 1 FACCH), n, etat LE16, err LE16, 2 octets
+ * de bourrage, 36 octets de donnees. Fichier remis a zero a chaque appel (plus
+ * de 500 trames sans rien), 8000 enregistrements au plus.
+ * tools/comparer_parole.py le met en regard de /dev/shm/calypso_tch_dl.bin
+ * (bursts du BSP) et de /dev/shm/pont_tch_dl.bin (decodage du pont). */
+static void noter_dl(uint32_t fn, uint8_t type, uint16_t etat, uint16_t err,
+                     const uint8_t *data, int n)
+{
+    static FILE *f;
+    static unsigned nrec;
+    static uint32_t fn_prec;
+    if (!f || (uint32_t)(fn - fn_prec) > 500u) {
+        if (f) fclose(f);
+        f = fopen("/dev/shm/calypso_add_dl.bin", "wb");
+        nrec = 0;
+    }
+    fn_prec = fn;
+    if (!f || nrec >= 8000) return;
+    uint8_t r[48];
+    memset(r, 0, sizeof r);
+    memcpy(r, &fn, 4);
+    r[4] = type; r[5] = (uint8_t)n;
+    memcpy(r + 6, &etat, 2);
+    memcpy(r + 8, &err, 2);
+    memcpy(r + 12, data, n > 36 ? 36 : n);
+    fwrite(r, 1, sizeof r, f);
+    if ((++nrec % 32) == 0) fflush(f);
+}
+
 static void sonde_afd(uint16_t *api_ram, uint32_t fn)
 {
     static int sonde = -1;
@@ -754,6 +787,7 @@ static void sonde_afd(uint16_t *api_ram, uint32_t fn)
         uint16_t mode = api_ram[(API_NDB + NDB_D_TCH_MODE) / 2];
         bool fire = (etat & 0x0040) != 0;          /* B_FIRE1 */
         if (fire) ko++; else ok++;
+        noter_dl(fn, 1, etat, api_ram[(API_NDB + NDB_A_FD) / 2 + 2], d, 23);
         if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
             printf("  [a_fd] fn=%u fn%%13=%u etat=%04x BLUD=1 FIRE=%d d_tch_mode=%04x "
                    "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
@@ -796,6 +830,16 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
         bool fire = (etat & 0x0040) != 0;
         bool mauvaise = (etat & 0x0004) != 0;      /* B_BFI */
         uint16_t erreurs = api_ram[(API_NDB + NDB_A_DD_0) / 2 + 2];
+        {
+            const uint16_t *w = &api_ram[(API_NDB + NDB_A_DD_0) / 2];
+            uint8_t fr[FR_BYTES];
+            for (int k = 0; k < FR_BYTES; k += 2) {       /* octet fort d'abord, comme prendre_ul */
+                fr[k] = (uint8_t)(w[3 + k / 2] >> 8);
+                if (k + 1 < FR_BYTES) fr[k + 1] = (uint8_t)(w[3 + k / 2] & 0xff);
+            }
+            parole_ti_vers_fr(fr);
+            noter_dl(fn, 0, etat, erreurs, fr, FR_BYTES);
+        }
         vues++;
         if (fire) ko++;
         if (mauvaise) bfi++;

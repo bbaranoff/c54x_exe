@@ -16,7 +16,7 @@
 #   MODE=grgsm ./run.sh      montage gr-gsm         ./run.sh --logs      suivre les journaux
 #   PONT=1 ./run.sh          avec le pont           ./run.sh --stop      tout arreter, nettoyer
 #   ./run.sh --step N        une seule etape (les precedentes doivent tourner)
-# Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (200000),
+# Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (80000),
 #   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
 # Details, attendus et verifications : LAUNCH.md a cote.
@@ -46,7 +46,7 @@ GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (et
 GDB_STUB="${GDB_STUB:-1234}"
 GDB_TELNET="${GDB_TELNET:-44444}"
 GDB_TELNET_PY="${GDB_TELNET_PY:-/opt/GSM/qosmo-dsp/tools/gdb-telnet.py}"
-INSNS="${INSNS:-80000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
+INSNS="${INSNS:-8000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
