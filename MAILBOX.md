@@ -2509,3 +2509,100 @@ cellule serait jugee inutilisable. A regarder dans calypso_bsp_rssi_apm.
 5. Fin d'appel : pas de « Kc lache » a la liberation, plus d'echecs TS1/8
    cote pont apres. Au RACH suivant : « Kc lache (IMMEDIATE ASSIGNMENT) ».
 6. Non-regression grgsm : MODE=grgsm, un appel MO, memes messages qu'avant.
+
+## 2026-09-23 18:45 — SACCH en TCH : depot apres l'IDLE, enregistreur, et le coupable MVKD/MVDK
+
+Journal reconstitue des commits de l'apres-midi (bbc66c4 16:24, d474b76 17:40,
+05388d8 18:42, et qosmo f5c8110 16:24, 7f27ab7 17:40, 9e61950 18:42). Banc non
+relance par cette mise a jour de la doc.
+
+### 1. Le burst TCH depose trop tot (bbc66c4)
+
+* Pour une tache TCHA (SACCH/TF), la ROM arme la fenetre de N+1 PUIS
+  demodule, au debut de N+1, le burst SACCH de N laisse en 0x0cce. Le pont
+  deposait le burst des l'armement et l'ecrasait : a_cd FIRE KO a chaque
+  bloc, 113-118 bits faux, LOS au 32e bloc.
+* `src/pont.c` : sur le TCH, la phase A va jusqu'a l'IDLE avant le depot
+  (budget/2 au plus). Reproducteur tch_rejeu : SACCH FIRE=0 « 07 00 03 »,
+  FACCH 10/10 bonnes contre 6/12. `PONT_TCH_DEPOT_IDLE=0` = ancien depot ;
+  trace `[depot_tch]` (30 premieres trames). Hors TCH, arret a l'armement
+  inchange.
+* `montant.c` : le tap QEMU (calypso_dcch_tap.c, qosmo f5c8110) annonce maintenant le TCH
+  (genre 2 = TCH/F, 3 = TCH/H). C'est un simple constat : le SDCCH memorise
+  n'est PAS ecrase, c'est lui que l'ASSIGNMENT FAILURE retrouve.
+* `INSNS` 60000 -> 80000 dans run.sh : 60000 debordait en TCH (jusqu'a 87000
+  insn/trame).
+
+### 2. Enregistrer le banc, le rejouer ailleurs (d474b76)
+
+* `c54x_exe` ecrit, sur tout canal dedie, les ecritures ARM dans l'API RAM
+  (par difference, avant le TICK et entre phase A et GO), les TICK, et les
+  livraisons d'I/Q du BSP dans `/dev/shm/calypso_rejeu_tch.bin` (60000
+  livraisons au plus ; `CALYPSO_REJEU_ENREG=0` coupe).
+* `tools/rejeu_banc [fichier] [ticks]` rejoue le tout dans l'ordre de pont.c
+  et imprime chaque a_cd / a_fd. `REJEU_SANS_D=1` garde l'etat du boot local.
+* `tools/sacch_tf_decode [fichier] [TN] [Kc]` decode hors DSP la SACCH/TF
+  enregistree par le BSP (`/dev/shm/calypso_sacch_tf.bin`) avec le Kc de
+  `calypso_kc_l1`. Mesure de la session : 63/63 blocs, 0 erreur. Les bursts
+  que recoit le BSP sont bons ; le defaut est apres lui. (Chiffre de la
+  note de session, non verifiable dans le code.)
+* Le rejeu reproduit l'echec du banc. Cause : `data[0x3d89]`, pointeur du
+  tampon SACCH (normalement 0x4dxx), vaut deja 0x08xx au debut du TCH ; la
+  copie de 28 mots depuis 0x0cce ecrase alors les pages W/R et le NDB, dont
+  `d_debug_ptr` (DSP perdu).
+* L'ecrivain : la routine de mesure de puissance (autour de 0x76c0), a cause
+  du coeur. MVKD (0x70) / MVDK (0x71) en adressage long lisaient dmad en pc+1 et
+  lk en pc+2 ; le bon ordre est lk puis dmad (comme PORTW, ST et binutils).
+  `70f8 0012 0014` faisait AR4 <- AR2 au lieu de AR2 <- AR4, et la PM ecrivait
+  en 0x3d0b..0x3d89. Corrige dans qosmo `c54x_exec.c` par 9e61950 (18:42,
+  livre avec 05388d8 ; `CALYPSO_MVKD_DMAD_AVANT=1` = ancien ordre, A/B).
+  Garde permanente `[garde-3d89]` dans `c54x_mem.c` (7f27ab7) : les 12
+  premieres ecritures de 0x3d89 hors 0x4d00..0x4dff, avec PC, DP, ST0/ST1,
+  SP, AR2, BK.
+* A5 : `calypso_a5.c` (qosmo 7f27ab7), le coprocesseur XIO sur les ports
+  0x2800..0x2818, compile dans c54x_exe (Makefile, d474b76). `CALYPSO_A5=0`
+  le coupe.
+
+### 3. Le temps d'une trame (05388d8)
+
+* `PONT_DONE_TOT` (defaut 1) : DONE rendu des le burst depose, le DSP finit la
+  trame pendant que QEMU repart. `0` = ancien ordre.
+* `[chrono]` dans dsp.log toutes les 1000 trames : `qemu | A | go | B | apres
+  DONE | trame` en ms, contre 4,62 ms de temps reel.
+* run.sh pose `CALYPSO_PONT_RETRY_DIV=64` sur QEMU : relance vers le DSP toutes
+  les trame/64 (0,07 ms) au lieu de trame/16 (0,29 ms), latence payee deux
+  fois par trame (DONE de la phase A, GO).
+
+### 4. La parole montante TI -> FR (05388d8)
+
+mobile_pont.cfg dit `io-tch-format ti` : gapk rend la voix au format du DSP
+TI, le firmware la copie dans a_du, et le pont la passait a
+`gsm0503_tch_fr_encode(..., net_order=1)`, qui attend du FR TS 101 318. La BTS
+recevait une parole melangee, l'echo la renvoyait en bruit sature.
+`montant.c` convertit (repris de fmt_ti.c puis fmt_gsm.c) ;
+`MONTANT_PAROLE_TI=0` = passage brut.
+
+### 5. Sondes et outillage (05388d8, sauf mention)
+
+* `[a5-arm]` : chaque changement de d_a5mode ou du Kc pose par l'ARM.
+* `[d_fn]` (bbc66c4) : la position que le firmware donne au DSP sur TCHA.
+* run.sh : gdbstub QEMU `tcp:127.0.0.1:1234` et console `telnet 0 44444`
+  (`GDB=0` coupe) ; `ASSEMBLY_LOGS=1` = trace asm ARM dans qemu-asm.log.
+* Makefile : cible `.PHONY` et dependance aux en-tetes (d474b76),
+  `-O3 -march=native` (05388d8).
+  `make` reconstruit c54x_exe a chaque appel ; plus besoin de `make clean`.
+
+### A mesurer
+
+1. Correctif MVKD/MVDK sur le banc : plus aucune ligne `[garde-3d89]`, a_cd
+   FIRE=0 sur la SACCH/TF, plus de LOS en appel, et l'appel suivant ne tombe
+   plus sur une connexion SCCP restee ouverte.
+2. SABM repetes / UA perdu (« SABM frame with information not allowed » au
+   BSC, 19:06) : cote osmo-operator, `pont/dsp/clock.py` mesurait l'avance de
+   la BTS contre l'horloge reelle ; corrige a 20:14 (boucle fermee sur
+   DSP + avance, `PONT_AVANCE_MIN` 4 -> 10), apres le dernier commit de
+   c54x_exe. Lire ensemble « marge DL reelle ... moy » dans pont.log (doit
+   rester ~>= 10) et la colonne B de `[chrono]` (B >> 1 ms = le DSP attend la
+   BTS).
+3. Chiffre de vitesse du coeur avec les sondes coupees, a remesurer avant de
+   l'ecrire dans le README.
