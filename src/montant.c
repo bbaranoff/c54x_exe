@@ -230,6 +230,41 @@ static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
     return true;
 }
 
+/* [2026-09-23] LA PAROLE MONTANTE EST AU FORMAT TI, LE PONT ATTEND DU FR STANDARD.
+ * mobile_pont.cfg : io-tch-format ti. gapk convertit donc la voix du micro
+ * au format du DSP TI (osmo-gapk fmt_ti.c, ti_fr_from_canon), le firmware la
+ * copie telle quelle dans a_du, et le pont la passait a
+ * gsm0503_tch_fr_encode(..., net_order=1), qui attend du FR TS 101 318 (le
+ * format RTP « gsm », nibble 0xd en tete). L'ordre des 260 bits n'est pas le
+ * meme : la BTS recevait une parole melangee, l'echo test la renvoyait et le
+ * decodeur du mobile la rendait en bruit sature (descendant colle a +-12882).
+ * Le descendant, lui, reste TI de bout en bout : il etait propre tant qu'il ne
+ * portait pas la voix de l'operateur. Conversion reprise de fmt_ti.c
+ * (ti_fr_to_canon) puis fmt_gsm.c (gsm_from_canon). MONTANT_PAROLE_TI=0 :
+ * passage brut, comme avant. */
+#include <osmocom/codec/codec.h>
+static int bit_msb(const uint8_t *b, int i) { return (b[i >> 3] >> (7 - (i & 7))) & 1; }
+static void mettre_bit_msb(uint8_t *b, int i, int v)
+{
+    if (v) b[i >> 3] |= (uint8_t)(0x80 >> (i & 7));
+    else   b[i >> 3] &= (uint8_t)~(0x80 >> (i & 7));
+}
+static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
+{
+    static int conv = -1;
+    if (conv < 0) { const char *e = calypso_getenv("MONTANT_PAROLE_TI"); conv = !(e && *e == '0'); }
+    if (!conv) return;
+    uint8_t canon[FR_BYTES];
+    memset(canon, 0, sizeof canon);
+    for (int i = 0; i < 260; i++) {                 /* ti_fr_to_canon */
+        int si = i >= 182 ? i + 4 : i;
+        mettre_bit_msb(canon, gsm610_bitorder[i], bit_msb(fr, si));
+    }
+    fr[0] = (uint8_t)(0xd0 | (canon[0] >> 4));      /* gsm_from_canon : 0xd + 260 bits */
+    for (int i = 1; i < FR_BYTES; i++)
+        fr[i] = (uint8_t)((canon[i - 1] << 4) | (canon[i] >> 4));
+}
+
 static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
 {
     static int fd_facch = -2, fd_sacch = -2;
@@ -244,6 +279,7 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
                 printf("  [montant] FACCH UL fn=%u task=0x%04x\n", fn, task_u);
         }
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
+            parole_ti_vers_fr(fr);
             publier_parole(fr, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u\n", fn);
@@ -957,6 +993,21 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     bool taches = (v_page & B_GSM_TASK) != 0;
     unsigned pg = taches ? ((v_page & B_GSM_PAGE) ? 1u : 0u) : (page & 1u);
 
+    {   /* [2026-09-23] SONDE CHIFFREMENT : chaque changement de d_a5mode ou de
+         * a_kc tel que l'ARM les laisse (NDB 0x1ce / 0x2ce), avec le tick. Le
+         * DSP chiffre et dechiffre lui-meme (calypso_a5.c) d'apres ces deux
+         * champs ; une remise a zero sur le TCH arrete le dechiffrement alors
+         * que la BTS chiffre toujours. */
+        static uint16_t a5_prec = 0xffff, kc_prec[4];
+        uint16_t a5 = api_ram[(API_NDB + 0x1ce) / 2];
+        const uint16_t *kc = &api_ram[(API_NDB + 0x2ce) / 2];
+        if (a5 != a5_prec || memcmp(kc, kc_prec, sizeof kc_prec)) {
+            printf("  [a5-arm] tick=%u d_a5mode=%u a_kc=%04x %04x %04x %04x%s\n", fn, a5, kc[0], kc[1], kc[2], kc[3],
+                   g.sur_tch ? "  (BSP sur le TCH)" : "");
+            fflush(stdout);
+            a5_prec = a5; memcpy(kc_prec, kc, sizeof kc_prec);
+        }
+    }
     scruter_dcch(fn);
     scruter_tch(fn);      /* l'annonce du TCH par le pont                  */
     suivre_tache_tch(api_ram, pg, taches, fn);   /* la bascule, par le firmware */

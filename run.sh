@@ -42,6 +42,10 @@ fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
+GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (etape 2)
+GDB_STUB="${GDB_STUB:-1234}"
+GDB_TELNET="${GDB_TELNET:-44444}"
+GDB_TELNET_PY="${GDB_TELNET_PY:-/opt/GSM/qosmo-dsp/tools/gdb-telnet.py}"
 INSNS="${INSNS:-80000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
@@ -109,10 +113,33 @@ etape2() {   # l'ARM
     if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "le DSP ne tourne pas (etape 1 d'abord)"; extern=1; fi
     rm -f "$MONITOR"
     vitrine qemu
+    # [2026-09-23] gdb sur l'ARM : gdbstub QEMU en tcp::$GDB_STUB, et la console
+    # telnet de qosmo-dsp (tools/gdb-telnet.py) sur le port $GDB_TELNET :
+    #     telnet 0 44444      (Ctrl-C arrete l'ARM, « continue & » le relance)
+    # Tant que personne n'est connecte, gdb ne tourne pas et l'ARM n'est pas
+    # touche. GDB=0 : ni stub ni console.
+    local gdb_opt=()
+    [ "$GDB" = 1 ] && gdb_opt=(-gdb "tcp:127.0.0.1:$GDB_STUB")
+    # [2026-09-23] ASSEMBLY_LOGS=1 (start-direct.sh --assembly-logs) : trace asm
+    # de l'ARM, chaque bloc traduit et chaque bloc execute, dans qemu-asm.log.
+    # nochain sinon les blocs chaines ne sont journalises qu'une fois.
+    if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then
+        gdb_opt+=(-d "${ASSEMBLY_LOGS_FLAGS:-in_asm,exec,nochain}" -D "$RUNDIR/qemu-asm.log")
+        [ -n "${ASSEMBLY_LOGS_FILTRE:-}" ] && gdb_opt+=(-dfilter "$ASSEMBLY_LOGS_FILTRE")
+    fi
+    # [2026-09-23] Relance de QEMU vers le DSP toutes les trame/64 (0,07 ms) au
+    # lieu de trame/16 (0,29 ms) : la partie en serie d'une trame (DONE de la
+    # phase A, GO) payait deux fois cette latence -- mesure [chrono] en TCH.
+    CALYPSO_PONT_RETRY_DIV="${CALYPSO_PONT_RETRY_DIV:-64}" \
     CALYPSO_DSP_EXTERN="$extern" "$QEMU" -M calypso -cpu arm946 -display none -parallel none \
-        -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" \
+        -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" "${gdb_opt[@]}" \
         -kernel "$FIRMWARE_ELF" > "$RUNDIR/qemu.log" 2>&1 &
     echo $! > "$RUNDIR/qemu.pid"
+    if [ "$GDB" = 1 ] && [ -f "$GDB_TELNET_PY" ] && ! vivant gdb; then
+        python3 "$GDB_TELNET_PY" --port "$GDB_TELNET" --stub "$GDB_STUB" --elf "$FIRMWARE_ELF" \
+            > "$RUNDIR/gdb.log" 2>&1 &
+        echo $! > "$RUNDIR/gdb.pid"
+    fi
     attendre 10 grep -aq "label serial0" "$RUNDIR/qemu.log" || rater "QEMU n'a pas publie son pty (voir $RUNDIR/qemu.log)"
     if [ "$MODE" = dsp ]; then
         grep -aq "pont DSP : API RAM partagee" "$RUNDIR/qemu.log" || rater "QEMU n'a pas rejoint le DSP (voir $RUNDIR/qemu.log)"
@@ -121,6 +148,8 @@ etape2() {   # l'ARM
     fi
     sed -n 's/.*redirected to \(\/dev\/pts\/[0-9]*\) (label serial0).*/\1/p' "$RUNDIR/qemu.log" | head -1 > "$RUNDIR/modem.pty"
     dire "2. qemu-system-arm  pid $(pid_de qemu)  pty modem $(cat "$RUNDIR/modem.pty")  moniteur $MONITOR  L1=$([ "$MODE" = dsp ] && echo "DSP externe" || echo "gr-gsm (udp 4730/4731)")"
+    [ "$GDB" = 1 ] && dire "   gdb ARM : telnet 0 $GDB_TELNET  (stub tcp::$GDB_STUB, journal $RUNDIR/gdb.log)"
+    [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   trace asm ARM : $RUNDIR/qemu-asm.log (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm,exec,nochain}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE})"
 }
 
 etape3() {   # osmocon
@@ -180,7 +209,7 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
 
 arreter() {
     local n
-    for n in pont mobile osmocon qemu dsp; do
+    for n in pont mobile osmocon gdb qemu dsp; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done

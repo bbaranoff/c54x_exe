@@ -196,6 +196,15 @@ static long courir(long n)
                    "[4bcc]=%04x d_task_md(W0/W1)=%04x/%04x d_task_d=%04x/%04x\n",
                    wa, wv, dsp->data[wa], pc, g_c54x_exe_fn, dsp->ar[0], dsp->ar[2], dsp->ar[3], dsp->ar[4], dsp->bk,
                    dsp->data[0x4bcc], api[4], api[0x14 + 4], api[0], api[0x14]);
+            if (getenv("REJEU_ANNEAU_W")) {
+                int m = atoi(getenv("REJEU_ANNEAU_W"));
+                for (int j = m; j > 0; j--) {
+                    unsigned q = (apos - j) & (ANNEAU - 1);
+                    printf("  %4d pc=%04x op=%04x %04x ar0=%04x ar2=%04x ar3=%04x ar4=%04x ar5=%04x sp=%04x\n", -j, anneau[q].pc,
+                           anneau[q].op, anneau[q].op2, anneau[q].ar[0], anneau[q].ar[2], anneau[q].ar[3], anneau[q].ar[4], anneau[q].ar[5], anneau[q].sp);
+                }
+                exit(4);
+            }
             static int nw; if (++nw >= 6) exit(4);
         }
         if (dsp->sp < 0x5900 || dsp->sp > 0x5c00 || (getenv("REJEU_STOP_PC") && npc == (uint16_t)strtoul(getenv("REJEU_STOP_PC"), NULL, 16)) || (getenv("REJEU_STOP_DEBUG") && dsp->data[0x08dc] != 0x0074 && g_c54x_exe_fn > 6200)) {

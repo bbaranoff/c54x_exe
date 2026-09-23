@@ -382,6 +382,45 @@ static void enreg_tick(const C54xState *dsp, const uint16_t *api_ram, uint32_t t
     fwrite(h, 1, sizeof h, f);
 }
 
+/* [2026-09-23] LE DSP ET L'ARM EN PARALLELE (PONT_DONE_TOT, 1 par defaut).
+ * En pas-a-pas, une trame coutait la SOMME de QEMU (l'ARM) et du C54x : sur un
+ * TCH le DSP monte a ~4 ms par trame (demodulation, Viterbi, parole), QEMU en
+ * prend ~2, et le banc tombait a 174 trames/s au lieu de 216,7 -- la parole
+ * arrivait a 40 trames/s pour un ALSA a 50 : echo test qui « part en live ».
+ * Sur silicium l'ARM et le DSP tournent en meme temps et l'ARM ne relit les
+ * resultats qu'a la trame suivante. On renvoie donc PONT_DONE des le burst
+ * depose, et on finit la trame (reste du budget, pompe DMA, montant, sondes)
+ * pendant que QEMU avance ; le TICK suivant attend dans la socket. Une trame
+ * coute alors le plus long des deux, pas leur somme. Seul effet de bord :
+ * PONT_DONE_API_IRQ n'est plus connu au moment du DONE (jamais leve sur ce
+ * banc : irq=0 dans tous les bilans). PONT_DONE_TOT=0 retablit l'ancien ordre. */
+static int g_done_tot = -1;
+static int g_reste_b;
+
+/* [2026-09-23] CHRONO PAR TRAME : ou passe une trame du banc, en ms moyennes,
+ * imprime toutes les 1000 trames (« [chrono] »). qemu = attente du TICK apres
+ * le DONE (l'ARM), A = phase A DSP, go = attente du GO (l1_sync de l'ARM),
+ * B = phase B jusqu'au DONE, apres = fin de trame DSP apres le DONE. */
+#include <time.h>
+static double chrono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static struct { double t_fin, qemu, a, go, b, apres; unsigned n; } g_chrono;
+static void chrono_trame(double t_tick, double t_done_a, double t_go, double t_done, double t_fin, uint32_t fn)
+{
+    if (g_chrono.t_fin > 0) g_chrono.qemu += t_tick - g_chrono.t_fin;
+    g_chrono.a += t_done_a - t_tick; g_chrono.go += t_go - t_done_a;
+    g_chrono.b += t_done - t_go; g_chrono.apres += t_fin - t_done;
+    g_chrono.t_fin = t_fin;
+    if (++g_chrono.n == 1000) {
+        double k = 1.0 / g_chrono.n;
+        printf("  [chrono] fn=%u sur 1000 trames (ms) : qemu %.2f | A %.2f | go %.2f | B %.2f | apres DONE %.2f "
+               "| trame %.2f (temps reel 4.62)\n", fn, g_chrono.qemu * k, g_chrono.a * k, g_chrono.go * k,
+               g_chrono.b * k, g_chrono.apres * k,
+               (g_chrono.qemu + g_chrono.a + g_chrono.go + g_chrono.b + g_chrono.apres) * k);
+        fflush(stdout);
+        double tf = g_chrono.t_fin; memset(&g_chrono, 0, sizeof g_chrono); g_chrono.t_fin = tf;
+    }
+}
+
 static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32_t *insns, int phase)
 {
     uint32_t drapeaux = 0;
@@ -541,7 +580,11 @@ phase_b:
                 if (f) { for (unsigned w = 0; w < 65536; w++) if (hist[w]) fprintf(f, "%04x %u\n", w, hist[w]); fclose(f); }
                 hist_n++;
             }
-            if (!dsp->idle) c54x_run_profile(dsp, (int)budget - fait);
+            /* [2026-09-23] PONT_DONE_TOT : le reste de la trame (phase B) est joue
+             * APRES le PONT_DONE, pendant que QEMU fait tourner l'ARM -- voir
+             * servir(). */
+            if (g_done_tot && phase == 2) g_reste_b = (int)budget - fait;
+            else if (!dsp->idle) c54x_run_profile(dsp, (int)budget - fait);
         } else if (!dsp->idle) {
             c54x_run_profile(dsp, (int)budget);
         }
@@ -1185,6 +1228,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             g_c54x_exe_fn = m.a;
             g_tick_irq_trame = (m.b & CALYPSO_PONT_TICK_IRQ_TRAME) != 0;
             bool deux_phases = (m.b & CALYPSO_PONT_TICK_DEUX_PHASES) != 0;
+            bool done_envoye = false;
+            double t_tick = chrono_ms(), t_done_a = t_tick, t_go = t_tick, t_done = 0;
             m.b &= 1u;
             enreg_tick(dsp, api_ram, m.a, g_tick_irq_trame, deux_phases, insns);
             enreg_api_diff(api_ram, m.a, 0);
@@ -1261,6 +1306,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 sonde_pages("A", m.a, dsp, api_ram);
                 enreg_api_prendre(api_ram);
                 envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
+                t_done_a = chrono_ms();
                 bool go = false;
                 while (!g_stop && !go) {
                     struct pollfd pg = { .fd = fd, .events = POLLIN };
@@ -1268,7 +1314,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     CalypsoPontMsg g;
                     ssize_t ng = recv(fd, &g, sizeof(g), 0);
                     if (ng != (ssize_t)sizeof(g)) { printf("pont : ARM deconnecte en attente de GO (%zd)\n", ng); g_stop = 1; break; }
-                    if (g.type == PONT_GO) go = true;
+                    if (g.type == PONT_GO) { go = true; t_go = chrono_ms(); }
                     else { static unsigned nx; if (nx++ < 3) printf("pont : message %u recu en attente de GO, ignore\n", g.type); }
                 }
                 if (!go) break;
@@ -1303,8 +1349,22 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 }
                 uint32_t n2 = 0;
                 g_insn_a = ninsn;
+                if (g_done_tot < 0) { const char *e = calypso_getenv("PONT_DONE_TOT"); g_done_tot = !(e && *e == '0'); }
+                g_reste_b = 0;
                 drapeaux = jouer_trame(dsp, insns, &init_done, &n2, 2);
                 ninsn += n2; g_insn_b = n2;
+                if (g_done_tot) {
+                    /* DONE tout de suite : QEMU repart, le DSP finit la trame ici. */
+                    envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
+                    done_envoye = true;
+                    t_done = chrono_ms();
+                    if (g_reste_b > 0 && !dsp->idle && dsp->running) {
+                        uint32_t av = dsp->insn_count;
+                        c54x_run_profile(dsp, g_reste_b);
+                        ninsn += dsp->insn_count - av;
+                    }
+                    g_reste_b = 0;
+                }
             }
             g_inj.actif = false;
             sonde_pages("B", m.a, dsp, api_ram);
@@ -1458,7 +1518,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
             enreg_api_prendre(api_ram);
-            envoyer(fd, PONT_DONE, drapeaux, ninsn);
+            if (!done_envoye) envoyer(fd, PONT_DONE, drapeaux, ninsn);
+            { double t_fin = chrono_ms(); chrono_trame(t_tick, t_done_a, t_go, t_done > 0 ? t_done : t_fin, t_fin, m.a); }
             if (!init_avant && init_done) {
                 printf("pont : DSP boote (premier IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
             }
