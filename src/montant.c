@@ -423,7 +423,15 @@ static void scruter_dcch(uint32_t fn)
         if (fn < prochain_essai) {
             return;
         }
-        prochain_essai = fn + 200;          /* ~1 s entre deux tentatives */
+        /* [2026-09-23] A CHAQUE TRAME, plus toutes les 200. run.sh efface les
+         * side-bands au demarrage : le fichier n'apparait qu'a la premiere
+         * ecriture (tap QEMU ici, pont pour calypso_tch_cfg), et on le voyait
+         * jusqu'a 200 trames trop tard. Pour calypso_tch_cfg c'etait fatal au
+         * premier appel apres chaque relance : le firmware posait sa tache TCH
+         * 113 a 164 trames avant que l'annonce soit lue (« sans annonce du
+         * pont »), l'UA de l'assignation se perdait, ASSIGNMENT FAILURE. Un
+         * open() qui echoue coute une microseconde. */
+        prochain_essai = fn + 1;
         fd = open("/dev/shm/calypso_dcch_cfg", O_RDONLY);
         if (fd < 0) {
             return;
@@ -549,7 +557,7 @@ static void scruter_tch(uint32_t fn)
         if (fn < prochain_essai) {
             return;
         }
-        prochain_essai = fn + 200;
+        prochain_essai = fn + 1;            /* voir scruter_dcch */
         fd = open("/dev/shm/calypso_tch_cfg", O_RDONLY);
         if (fd < 0) {
             return;
@@ -679,6 +687,40 @@ static void sonde_afd(uint16_t *api_ram, uint32_t fn)
                    "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
                    fn, fn % 13u, etat, fire ? 1 : 0, mode, d[0], d[1], d[2], d[3], ok, ko);
         }
+    }
+    prec = etat;
+}
+
+/* [2026-09-23] SONDE a_dd : LA PAROLE DESCENDANTE SUR TCH.
+ * Le firmware ne remonte une trame de parole au mobile (L1CTL_TRAFFIC_IND) que
+ * si a_dd_0[0] porte B_BLUD (prim_tch.c:322-327) ; GAPK ne code le montant
+ * qu'en reponse. Appel de 15:02 : 19 trames « parole UL » puis plus rien, alors
+ * que le pont decodait la parole de la BTS. Cette sonde dit si le DSP livre
+ * encore la parole descendante. Une ligne pour les 20 premieres, puis toutes
+ * les 100. MONTANT_ADD=0 la coupe. */
+static void sonde_add(uint16_t *api_ram, uint32_t fn)
+{
+    static int sonde = -1;
+    static uint16_t prec;
+    static unsigned long vues, ko;
+    static uint32_t fn_dernier;
+    if (sonde < 0) {
+        const char *e = calypso_getenv("MONTANT_ADD");
+        sonde = (e && *e == '0') ? 0 : 1;
+    }
+    if (!sonde || !g.sur_tch) {
+        return;
+    }
+    uint16_t etat = api_ram[(API_NDB + NDB_A_DD_0) / 2];
+    if ((etat & B_BLUD) && etat != prec) {
+        bool fire = (etat & 0x0040) != 0;
+        vues++;
+        if (fire) ko++;
+        if (vues <= 20 || vues % 100 == 0) {
+            printf("  [a_dd] fn=%u etat=%04x FIRE=%d (ecart %u trames) | vues=%lu ko=%lu\n",
+                   fn, etat, fire ? 1 : 0, fn - fn_dernier, vues, ko);
+        }
+        fn_dernier = fn;
     }
     prec = etat;
 }
@@ -906,6 +948,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         }
     }
     sonde_afd(api_ram, fn);
+    sonde_add(api_ram, fn);
 
     /* [2026-09-21] QUI RATE, ET QUAND. La descente dediee perd environ un bloc
      * sur deux (« Dropping frame with 110 bit errors », fire_crc >= 2 cote

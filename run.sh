@@ -42,7 +42,7 @@ fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
-INSNS="${INSNS:-200000}"
+INSNS="${INSNS:-60000}"
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
@@ -93,7 +93,9 @@ etape1() {   # le DSP (montage dsp seulement)
     # [2026-09-23] L'annonce TCH d'une session morte (pont/dsp/tch.py) ne doit
     # pas etre relue par montant.c au demarrage.
     rm -f /dev/shm/calypso_tch_cfg
-    ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 exec ./c54x_exe --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    # [2026-09-23] Attendre (au plus 40 ms) une trame que la BTS livre en
+    # retard plutot que la jouer en effacement (calypso_bsp.c, bsp_attendre_trame).
+    ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ./c54x_exe --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
     dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"
@@ -215,14 +217,40 @@ statut() {
     [ -f "$RUNDIR/osmocon.log" ] && grep -a "FB0\|FB1\|SB\|BSIC" "$RUNDIR/osmocon.log" | tail -1
 }
 
+# [2026-09-23] GARDER LES JOURNAUX DU DSP ET DU PONT. dsp.log est ecrase a
+# chaque lancement et pont.log est vide par vitrine ; aucun des deux n'est dans
+# les archives du panneau (osmo-nitb/archives). Deux appels de suite ont ete
+# perdus ainsi (13:11 et 13:21 : SP-CORRUPT et FACCH ko sans trace). On range
+# la session precedente dans $RUNDIR/archives/<date de dsp.log>/ et on en garde
+# JOURNAUX_GARDES (10). JOURNAUX_GARDES=0 ne garde rien.
+JOURNAUX_GARDES="${JOURNAUX_GARDES:-10}"
+garder_journaux() {
+    [ "$JOURNAUX_GARDES" -gt 0 ] 2>/dev/null || return 0
+    [ -s "$RUNDIR/dsp.log" ] || [ -s /dev/shm/pont.log ] || return 0
+    local d="$RUNDIR/archives/$(date -r "$RUNDIR/dsp.log" +%Y%m%d-%H%M%S 2>/dev/null || date +%Y%m%d-%H%M%S)"
+    [ -d "$d" ] && return 0                      # deja range (--stop puis relance)
+    mkdir -p "$d" || return 0
+    local n
+    for n in dsp pont mobile qemu osmocon; do
+        [ -s "$RUNDIR/$n.log" ] && cp -L "$RUNDIR/$n.log" "$d/" 2>/dev/null
+    done
+    # etat du magasin dedie du BSP (stockes/joues/manques/replis/perdues)
+    [ -s /dev/shm/calypso_bsp_dedie ] && cp /dev/shm/calypso_bsp_dedie "$d/bsp_dedie.txt" 2>/dev/null
+    ls -1dt "$RUNDIR"/archives/*/ 2>/dev/null | tail -n +$((JOURNAUX_GARDES + 1)) | xargs -r rm -rf
+    dire "journaux de la session precedente ranges dans $d"
+}
+
 mkdir -p "$RUNDIR"
 case "${1:-}" in
-    --stop)   arreter ;;
+    --stop)   arreter; garder_journaux
+              # vides une fois ranges : le lancement suivant ne les range pas deux fois
+              [ -f "$RUNDIR/dsp.log" ] && : > "$RUNDIR/dsp.log"
+              [ -f /dev/shm/pont.log ] && : > /dev/shm/pont.log ;;
     --status) statut ;;
     --logs)   exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log 2>/dev/null ;;
     --step)   case "${2:-}" in 1) etape1;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|2|3|4|5";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;
-    "")       etape1; etape2; etape3; etape4; etape5
+    "")       garder_journaux; etape1; etape2; etape3; etape4; etape5
               dire "tout tourne. Journaux : $RUNDIR/*.log   suivre : ./run.sh --logs   arreter : ./run.sh --stop" ;;
     *)        rater "option inconnue : $1 (voir --help)" ;;
 esac

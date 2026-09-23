@@ -2432,3 +2432,80 @@ MODE=dsp. L'ancien binaire est garde dans le scratchpad de la session.
 A noter aussi : la mesure de puissance rend souvent « rxlev <=-110 (0) », le
 plancher, soit C1 = 0 tout juste. Avec un RXLEV_ACCESS_MIN plus haut, la
 cellule serait jugee inutilisable. A regarder dans calypso_bsp_rssi_apm.
+
+## 2026-09-23 12:47 — Le pont DSP (pont/dsp/) : la bascule TCH suit le firmware
+
+### Ce qui cassait les appels du run de 12:22 (confirme dans le code)
+
+* Appels 2 et 3 : le pont decode l'ASSIGNMENT COMMAND et ecrit aussitot
+  /dev/shm/calypso_tch_cfg (Tch.arm). montant.c scruter_tch armait alors le
+  BSP en TCH des la trame suivante. Pour un TCH, bsp_dedie_trame() est vrai
+  sur TOUTES les trames : le BSP jouait TS2 a la place de TS0 et du SDCCH TS1
+  pour toutes les trames pas encore jouees. Or le DSP a 12 a ~200 trames de
+  retard sur la BTS, et l'ASSIGNMENT COMMAND elle-meme en faisait partie.
+  Dans dsp.log : « TCH (seq=2) : arme TS2 », un seul a_cd FIRE KO, puis plus
+  aucun bloc SDCCH. Cote mobile : 80-100 bit errors, jamais d'ASSIGNMENT
+  COMMAND, puis LOS.
+* Appel 1, retour sur le SDCCH : rien ne rendait TS1 au BSP apres
+  l'ASSIGNMENT FAILURE, parce que le tap QEMU ne republie dcch_cfg que si
+  chan_nr change. D'ou 90-110 bit errors jusqu'a la liberation. En plus,
+  l'ASSIGNMENT FAILURE, publiee sur calypso_sdcch_ul, partait en FACCH sur
+  TS2 (uplink.py : is_open() suffisait).
+* Le TS du TCH n'etait dechiffre vers le DSP qu'apres Tch.prove(), alors
+  qu'osmo-bts le chiffre des l'activation. Les premiers blocs, dont l'UA,
+  etaient perdus.
+* Le Kc etait lache a la liberation lue dans dcch_cfg, donc a l'heure du DSP,
+  alors que la BTS chiffrait encore. Blocs TS1 en echec cote pont.
+
+### Ce qui change
+
+* pont/pont_dsp.py lance pont.dsp.main (nouveau sous-paquet pont/dsp/). C'est
+  deja le PONT_PY de run.sh en MODE=dsp, donc aussi celui de
+  start-direct.sh --dsp. Il refuse de demarrer sans --dsp-port.
+  pont/__init__.py et pont.py (grgsm) ne l'importent pas. La seule retouche
+  du code partage est l'extraction de methode Uplink._route_sdcch, sans effet :
+  un harnais qui rejoue SABM, MEAS, UA SAPI3, ASSIGNMENT COMPLETE, arm et
+  prove donne un resultat identique octet pour octet avant et apres.
+* TchDsp : l'ecriture dans tch_cfg n'est plus qu'une ANNONCE (meme format,
+  meme moment). abandon() ecrit seq+1 avec tn=0 : retour au SDCCH, Kc garde.
+* montant.c : scruter_tch ne fait plus que memoriser l'annonce. La nouvelle
+  fonction suivre_tache_tch lit d_task_d dans la page W fraiche. Sur TCHT,
+  TCHA ou TCHD avec une annonce, le BSP bascule sur le TS du TCH. Sur ALLC
+  (24, la tache de lecture de bloc SDCCH/SACCH, prim_rx_nb.c:200 ; pas DDL/ADL
+  comme je le croyais), il revient au SDCCH memorise par scruter_dcch.
+  Log : « [montant] TCH : le firmware poste la tache 13 a fn=..., BSP bascule
+  sur TS2 » et « le firmware est revenu sur le SDCCH (tache ALLC) ».
+  MONTANT_TCH_TACHE=0 retablit l'armement a l'annonce.
+* Nouvelle sonde a_fd (NDB+0x21A), active seulement sur TCH :
+  « [a_fd] fn= fn%13= etat= BLUD=1 FIRE= d_tch_mode= L2=... ».
+  MONTANT_AFD=0 la coupe.
+* TrxDsp : le TS du TCH est dechiffre des l'annonce, toujours sous
+  cipher.dl_active.
+* UplinkDsp : un bloc sdcch_ul n'est jamais une FACCH. S'il arrive pendant
+  un TCH annonce, il declenche abandon() quand c'est une ASSIGNMENT FAILURE
+  ou quand le mobile etait deja passe sur le TCH. _poll_release ne lache plus
+  le Kc : il tombe a l'IMMEDIATE ASSIGNMENT suivante. PONT_KC_RETENTION=1 est
+  pose par pont_dsp.py.
+* FeederDsp et DownlinkDsp : plus de GSMTAP 4730/4731 ni de
+  /dev/shm/calypso_tch_dl (lus seulement par la L1 gr-gsm). Le tap 4729 reste.
+* run.sh : calypso_tch_cfg est efface avant l'etape 1 et, en MODE=dsp
+  seulement, a l'arret. c54x_exe a ete reconstruit.
+* build-debs.sh embarque pont/dsp/.
+
+### A mesurer au prochain run (banc non relance par cette etape)
+
+1. dsp.log : « TCH ... annonce par le pont », puis « le firmware poste la
+   tache 13|14 » plus tard, jamais avant. Entre les deux, les a_cd SDCCH
+   doivent rester ok.
+2. mobile.log : ASSIGNMENT COMMAND recu a chaque appel, plus de rafale de
+   80-110 bit errors apres l'annonce. /dev/shm/calypso_bsp_dedie doit passer
+   de tn=1 a tn=2 seulement a la tache TCH.
+3. FACCH DL sur TCH (T200 de l'appel 1) : si les lignes [a_fd] BLUD=1
+   arrivent, la plomberie est bonne. Si a_fd reste muet alors que le pont
+   decode des FACCH, il faut chercher dans la ROM ou le coeur (SP-CORRUPT
+   pc=0x0000 au tick 10253, watchpoint calypso_c54x.c:6226-6240).
+4. ASSIGNMENT FAILURE provoquee : « revenu sur le SDCCH », « TCH TN=2
+   abandonne » cote pont, SDCCH de nouveau decode par le mobile.
+5. Fin d'appel : pas de « Kc lache » a la liberation, plus d'echecs TS1/8
+   cote pont apres. Au RACH suivant : « Kc lache (IMMEDIATE ASSIGNMENT) ».
+6. Non-regression grgsm : MODE=grgsm, un appel MO, memes messages qu'avant.

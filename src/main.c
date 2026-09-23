@@ -36,6 +36,7 @@
 
 /* ── what the platform would otherwise provide ─────────────────────────── */
 extern int c54x_rapide;      /* calypso_c54x.h : fast path of the core */
+extern int c54x_sondes;      /* c54x_internal.h : sondes pures, coupees par defaut */
 uint32_t g_c54x_exe_fn;      /* non-static: pont.c updates it on every TICK */
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 
@@ -144,6 +145,10 @@ int main(int argc, char **argv)
     /* Fast path of the core (calypso_c54x.h): on unless a probe is armed. */
     { const char *d = getenv("CALYPSO_DEBUG"), *r = getenv("CALYPSO_C54X_RAPIDE");
       c54x_rapide = (r && *r) ? (*r != '0') : !(d && *d); }
+    /* [2026-09-23] Sondes pures du coeur (c54x_internal.h) : coupees par defaut ;
+     * -vvvv et plus les allument, puisque c'est a ce niveau qu'on les lit.
+     * Sinon le coeur resout CALYPSO_SONDES / CALYPSO_DEBUG au premier c54x_init. */
+    if (niveau >= 4) c54x_sondes = 1;
 
     qemu_mutex_init(&calypso_pcb_daram_lock);
 
