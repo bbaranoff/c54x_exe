@@ -30,13 +30,13 @@ FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
 OSMOCON="${OSMOCON:-/opt/GSM/osmocom-bb/src/host/osmocon/osmocon}"
 MOBILE="${MOBILE:-$(command -v mobile || echo /usr/local/bin/mobile)}"
 MOBILE_CFG="${MOBILE_CFG:-$HERE/mobile_pont.cfg}"
-# [2026-09-23] Deux points d'entree pour le meme paquet pont/ : pont.py pour le
-# montage dsp (--dsp-port 6702), pont_uncipher.py pour le montage grgsm, qui
+# [2026-09-23] Deux points d'entree pour le meme paquet pont/ : pont_dsp.py pour le
+# montage dsp (--dsp-port 6702), pont.py pour le montage grgsm, qui
 # garde ses defauts d'avant le decoupage. PONT_PY force l'un ou l'autre.
 if [ "$MODE" = grgsm ]; then
-    PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont_uncipher.py}"
-else
     PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont.py}"
+else
+    PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont_dsp.py}"
 fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
@@ -145,6 +145,13 @@ etape4() {   # le mobile
        changez la ligne « bind 127.0.0.1 $vty » de la config (les 42xx sont ceux du reseau du banc)"
     fi
     vitrine mobile
+    # [2026-09-23] Resynchro sur la cellule choisie : 8 essais au lieu de 1
+    # (gsm322.c, sync_retries_selection). Le DSP ne passe le SB qu'une fois sur
+    # trois a cinq, et deux echecs suffisaient a la boucle « no service ».
+    # Montage grgsm : defaut du binaire, inchange.
+    local retries=""
+    [ "$MODE" = dsp ] && retries="${L23_SYNC_RETRIES_SELECTION:-8}"
+    L23_SYNC_RETRIES_SELECTION="$retries" \
     stdbuf -oL "$MOBILE" -c "$MOBILE_CFG" > "$RUNDIR/mobile.log" 2>&1 &
     echo $! > "$RUNDIR/mobile.pid"
     sleep 2

@@ -2407,3 +2407,28 @@ et T313 expire a 11:12:07.
 * Motifs de processus mis a jour : 09-teardown.sh, rapport-run.sh,
   conky-osmo-status.sh, build-debs.sh. /usr/local/bin/grgsm_exe (hors depot)
   aussi, avec une copie de l'original dans le scratchpad de la session.
+
+## 2026-09-23 11:27 — La boucle « no service » toutes les 5 a 6 s : la seconde synchro de la selection
+
+Trace DCS (cs debug, pose par la VTY 4347), une boucle complete :
+1. Balayage : « Sync to ARFCN=514 (No sysinfo yet) », « Channel synched »,
+   SI lues, « Cell found », C1 = 0.
+2. « Cell ARFCN 514 selected », puis « Tune to frequency 514 » : une SECONDE
+   acquisition FB+SB (gsm322_sync_to_cell, mode CCCH COMB).
+3. Elle echoue : « Channel sync error, try again », puis a nouveau
+   « Channel sync error ». SYNC_RETRIES vaut 1 : la cellule est desselectionnee
+   (« Unselect cell due to sync error », « Loss of CCCH »),
+   MM_EVENT_LOST_COVERAGE, et la boucle repart en 1.
+Sur ce run, 93 FBSB_REQ sur 514 et 4 sur le voisin 614. Il faut deux
+synchros reussies de suite, alors que le DSP n'en reussit qu'une sur trois a
+cinq : c'est le verrou de la fenetre SB (voir 2026-09-22 19:55).
+
+Correctif cote mobile : gsm322.c, sync_retries_selection(). Le nombre
+d'essais du « Tune to frequency » se lit dans L23_SYNC_RETRIES_SELECTION. Le
+defaut reste SYNC_RETRIES (1) : le binaire /usr/local/bin/mobile est partage
+avec le montage grgsm et le mobile fake_trx. c54x_exe/run.sh pose 8 en
+MODE=dsp. L'ancien binaire est garde dans le scratchpad de la session.
+
+A noter aussi : la mesure de puissance rend souvent « rxlev <=-110 (0) », le
+plancher, soit C1 = 0 tout juste. Avec un RXLEV_ACCESS_MIN plus haut, la
+cellule serait jugee inutilisable. A regarder dans calypso_bsp_rssi_apm.
