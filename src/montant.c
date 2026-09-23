@@ -769,12 +769,20 @@ static void sonde_afd(uint16_t *api_ram, uint32_t fn)
  * qu'en reponse. Appel de 15:02 : 19 trames « parole UL » puis plus rien, alors
  * que le pont decodait la parole de la BTS. Cette sonde dit si le DSP livre
  * encore la parole descendante. Une ligne pour les 20 premieres, puis toutes
- * les 100. MONTANT_ADD=0 la coupe. */
+ * les 100. MONTANT_ADD=0 la coupe.
+ *
+ * [2026-09-23] ko ne voyait rien sur la parole : 0x0040 est B_FIRE1, et le code
+ * de Fire ne protege que les canaux de controle. Run de 20:22 : 40 etats releves
+ * (c214, c204, 8084), ko=0, mais tous avec le bit 2 = B_BFI (l1_environment.h:272).
+ * Le firmware ne teste que B_BLUD (prim_tch.c:327) et ne remonte pas le BFI :
+ * GAPK decode les 33 octets tels quels. La sonde compte donc aussi le BFI et
+ * affiche a_dd_0[2], le nombre d'erreurs que la ROM rapporte (num_biterr cote
+ * firmware). */
 static void sonde_add(uint16_t *api_ram, uint32_t fn)
 {
     static int sonde = -1;
     static uint16_t prec;
-    static unsigned long vues, ko;
+    static unsigned long vues, ko, bfi;
     static uint32_t fn_dernier;
     if (sonde < 0) {
         const char *e = calypso_getenv("MONTANT_ADD");
@@ -786,11 +794,14 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
     uint16_t etat = api_ram[(API_NDB + NDB_A_DD_0) / 2];
     if ((etat & B_BLUD) && etat != prec) {
         bool fire = (etat & 0x0040) != 0;
+        bool mauvaise = (etat & 0x0004) != 0;      /* B_BFI */
+        uint16_t erreurs = api_ram[(API_NDB + NDB_A_DD_0) / 2 + 2];
         vues++;
         if (fire) ko++;
+        if (mauvaise) bfi++;
         if (vues <= 20 || vues % 100 == 0) {
-            printf("  [a_dd] fn=%u etat=%04x FIRE=%d (ecart %u trames) | vues=%lu ko=%lu\n",
-                   fn, etat, fire ? 1 : 0, fn - fn_dernier, vues, ko);
+            printf("  [a_dd] fn=%u etat=%04x FIRE=%d BFI=%d err=%u (ecart %u trames) | vues=%lu ko=%lu bfi=%lu\n",
+                   fn, etat, fire ? 1 : 0, mauvaise ? 1 : 0, erreurs, fn - fn_dernier, vues, ko, bfi);
         }
         fn_dernier = fn;
     }
