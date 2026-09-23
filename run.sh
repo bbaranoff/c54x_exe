@@ -6,7 +6,8 @@
 #                    2. qosmo            l'ARM + layer1 osmocom-bb (CALYPSO_DSP_EXTERN=1)
 #                    3. osmocon          romload sur le pty serial0, relais L1CTL
 #                    4. mobile           couche 2/3 osmocom-bb
-#                    5. pont.py          (PONT=1) bursts du BTS -> DSP (--dsp-port 6702)
+#                    5. pont_dsp.py      (PONT=1) bursts du BTS -> DSP (--dsp-port 6702) ;
+#                                        le pont DSP (pont/dsp/), bascule TCH suivie par le firmware
 #   grgsm            2. qosmo            l'ARM + layer1 avec la couche 1 gr-gsm (shunt)
 #                    3. osmocon  4. mobile  5. pont.py (PONT=1) bursts du BTS -> L1 gr-gsm
 # Le pont a besoin du BTS (osmo-bts-trx, TRXD 5700) : sans reseau il demarre et attend.
@@ -89,6 +90,9 @@ etape1() {   # le DSP (montage dsp seulement)
     vivant dsp && { dire "1. c54x_exe deja lance (pid $(pid_de dsp))"; return; }
     [ -x "$HERE/c54x_exe" ] || make -C "$HERE" >/dev/null || rater "make c54x_exe"
     rm -f "$DSP_SHM" "$DSP_SOCK"
+    # [2026-09-23] L'annonce TCH d'une session morte (pont/dsp/tch.py) ne doit
+    # pas etre relue par montant.c au demarrage.
+    rm -f /dev/shm/calypso_tch_cfg
     ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 exec ./c54x_exe --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
@@ -195,6 +199,10 @@ arreter() {
     rm -f /dev/shm/calypso_rach /dev/shm/calypso_sdcch_ul \
           /dev/shm/calypso_tch_facch_ul /dev/shm/calypso_tch_sacch_ul \
           /dev/shm/calypso_tch_ul
+    # [2026-09-23] Annonce du TCH par le pont DSP (pont/dsp/tch.py -> montant.c
+    # scruter_tch). Montage dsp seulement : en grgsm ce fichier est celui de la
+    # L1 gr-gsm de QEMU, on n'y touche pas.
+    [ "$MODE" = dsp ] && rm -f /dev/shm/calypso_tch_cfg
 }
 
 statut() {

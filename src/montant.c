@@ -119,7 +119,27 @@ static struct {
     bool     blud_vu;          /* a_cu a deja annonce un bloc par B_BLUD   */
     unsigned sans_blud;        /* taches montantes vues sans B_BLUD        */
     bool     dedie_arme;
+    /* [2026-09-23] Bascule SDCCH <-> TCH suivie par le firmware (voir
+     * suivre_tache_tch). Le dernier SDCCH lu dans calypso_dcch_cfg est garde
+     * pour y revenir ; l'annonce du TCH vient du pont (calypso_tch_cfg). */
+    int      sd_tn, sd_genre, sd_ss;
+    bool     sd_valide;        /* un SDCCH est connu (dcch_cfg arme)       */
+    int      tch_tn, tch_tsc;  /* annonce du pont : 0 = pas de TCH annonce */
+    bool     sur_tch;          /* le BSP joue l'intervalle du TCH          */
 } g;
+
+/* Taches de lecture que l'ARM pose dans d_task_d de la page W
+ * (osmocom-bb firmware, include/calypso/l1_environment.h:45-52). La lecture
+ * d'un bloc SDCCH/SACCH passe par ALLC (prim_rx_nb.c:200), comme la BCCH et
+ * la CCCH ; DDL/ADL sont gardees par prudence. */
+#ifndef DDL_DSP_TASK
+#define DDL_DSP_TASK 26
+#endif
+#ifndef ADL_DSP_TASK
+#define ADL_DSP_TASK 27
+#endif
+/* d_tch_mode : quatrieme mot du NDB (dsp_api.h:121, rejouer.c:623). */
+#define NDB_D_TCH_MODE 0x006u
 
 static int journal(void)
 {
@@ -420,13 +440,59 @@ static void scruter_dcch(uint32_t fn)
     }
     seq = s2;
     int genre = b[4], ss = b[5], tn = b[6];
-    printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d\n",
-           seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss);
-    calypso_bsp_set_dedie(genre == 0xFF ? 0 : tn, genre, ss);
-    g.dedie_arme = (genre != 0xFF);
+    printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d%s\n",
+           seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
+           (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
     if (genre == 0xFF) {
+        calypso_bsp_set_dedie(0, 0xFF, 0);
+        g.dedie_arme = false;
+        g.sd_valide = false;
+        g.sur_tch = false;
         montant_canal_libere();
+        return;
     }
+    /* [2026-09-23] Le SDCCH est MEMORISE : c'est lui que le BSP retrouve quand
+     * le firmware quitte le TCH (ASSIGNMENT FAILURE). Tant que le firmware est
+     * sur le TCH, on ne touche pas au BSP. */
+    g.sd_tn = tn;
+    g.sd_genre = genre;
+    g.sd_ss = ss;
+    g.sd_valide = true;
+    if (g.sur_tch) {
+        return;
+    }
+    calypso_bsp_set_dedie(tn, genre, ss);
+    g.dedie_arme = true;
+}
+
+/* Rendre au BSP le SDCCH memorise (ou le liberer s'il n'y en a pas). */
+static void revenir_sdcch(const char *raison, uint32_t fn)
+{
+    g.sur_tch = false;
+    if (g.sd_valide) {
+        printf("  [montant] %s a fn=%u : BSP rendu au SDCCH TS%d SS=%d\n",
+               raison, fn, g.sd_tn, g.sd_ss);
+        calypso_bsp_set_dedie(g.sd_tn, g.sd_genre, g.sd_ss);
+        g.dedie_arme = true;
+    } else {
+        printf("  [montant] %s a fn=%u : aucun SDCCH connu, canal dedie libere\n",
+               raison, fn);
+        calypso_bsp_set_dedie(0, 0xFF, 0);
+        g.dedie_arme = false;
+    }
+    fflush(stdout);
+}
+
+/* [2026-09-23] 0 : armer le BSP des l'annonce du pont (comportement du
+ * 2026-09-22). Voir scruter_tch. */
+static bool tch_sur_tache(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = calypso_getenv("MONTANT_TCH_TACHE");
+        v = (e && *e == '0') ? 0 : 1;
+    }
+    return v != 0;
 }
 
 /* [2026-09-22] L'INTERVALLE DU TCH, CHAINON QUI MANQUAIT.
@@ -446,12 +512,31 @@ static void scruter_dcch(uint32_t fn)
  * Timeout ». La trace DSP ne montrait que « arme TS1 SDCCH/8 », jamais TS2.
  *
  * Ce n'etait donc pas un defaut de qualite du lien mais un chainon manquant.
- * MONTANT_TCH=0 coupe cette lecture. */
+ * MONTANT_TCH=0 coupe cette lecture.
+ *
+ * [2026-09-23] L'ANNONCE N'EST PAS LA BASCULE.
+ * Le pont ecrit ce fichier au DECODAGE de l'ASSIGNMENT COMMAND, donc a
+ * l'heure de la BTS, alors que le BSP joue les trames a l'heure du DSP -- en
+ * retard de 12 a ~200 trames (decalage tick/fn BTS de 681 au run de 12:22).
+ * Armer le BSP ici remplacait par des bursts TS2 TOUTES les trames pas
+ * encore jouees (bsp_dedie_trame est vrai partout pour un TCH), l'ASSIGNMENT
+ * COMMAND comprise, et TS0 avec. Releve du run de 12:22, appels 2 et 3 :
+ * « TCH (seq=2) : arme TS2 » puis un seul a_cd « FIRE KO » et plus aucun
+ * bloc SDCCH ; cote mobile 80-100 bit errors, jamais d'ASSIGNMENT COMMAND,
+ * LOS apres ~20 s. Et apres une ASSIGNMENT FAILURE (appel 1) rien ne rendait
+ * TS1 au BSP : 90-110 bit errors sur le SDCCH jusqu'a la liberation.
+ *
+ * Desormais ce fichier n'est plus qu'une ANNONCE (intervalle, TSC). La
+ * bascule vient du firmware lui-meme : suivre_tache_tch() arme le TCH a la
+ * premiere tache TCHT/TCHA/TCHD qu'il pose, et rend le SDCCH des qu'il repose
+ * une tache de lecture de bloc (ALLC). Un seq non nul avec tn=0 est l'abandon
+ * du pont (pont/dsp/tch.py, TchDsp.abandon) : retour au SDCCH sans lacher le
+ * Kc. seq=0 reste la liberation complete.
+ * MONTANT_TCH_TACHE=0 retablit l'armement a l'annonce. */
 static void scruter_tch(uint32_t fn)
 {
     static int fd = -1, coupe = -1;
     static uint32_t seq, prochain_essai;
-    static int tn_arme;
 
     if (coupe < 0) {
         const char *e = calypso_getenv("MONTANT_TCH");
@@ -481,19 +566,121 @@ static void scruter_tch(uint32_t fn)
     }
     seq = s2;
     int tn = b[4], tsc = b[5];
-    if (!s2 || tn <= 0 || tn > 7) {
-        if (tn_arme) {
-            printf("  [montant] TCH (seq=%u) : libere TS%d\n", seq, tn_arme);
+    if (!s2) {
+        /* Liberation complete (Tch.close) : comme avant le 2026-09-23. */
+        int etait = g.tch_tn;
+        g.tch_tn = 0;
+        if (g.sur_tch) {
+            printf("  [montant] TCH (seq=0) : libere TS%d\n", etait);
             calypso_bsp_set_dedie(0, 0xFF, 0);
-            tn_arme = 0;
+            g.sur_tch = false;
+            g.dedie_arme = false;
             montant_canal_libere();
+        } else if (etait) {
+            printf("  [montant] TCH (seq=0) : annonce TS%d retiree (le firmware n'y etait pas)\n", etait);
         }
         return;
     }
-    printf("  [montant] TCH (seq=%u) : arme TS%d TSC=%d - toutes ses trames\n", seq, tn, tsc);
-    calypso_bsp_set_dedie(tn, 2 /* BSP_DEDIE_TCH */, 0);
-    tn_arme = tn;
-    g.dedie_arme = true;
+    if (tn <= 0 || tn > 7) {
+        /* Abandon par le pont (ASSIGNMENT FAILURE, retour du mobile sur le
+         * SDCCH) : le SDCCH vit encore, le Kc aussi. */
+        int etait = g.tch_tn;
+        g.tch_tn = 0;
+        printf("  [montant] TCH (seq=%u) : annonce TS%d abandonnee par le pont\n", seq, etait);
+        if (g.sur_tch) {
+            revenir_sdcch("abandon du TCH", fn);
+        }
+        return;
+    }
+    g.tch_tn = tn;
+    g.tch_tsc = tsc;
+    if (!tch_sur_tache()) {
+        printf("  [montant] TCH (seq=%u) : arme TS%d TSC=%d - toutes ses trames (MONTANT_TCH_TACHE=0)\n",
+               seq, tn, tsc);
+        calypso_bsp_set_dedie(tn, 2 /* BSP_DEDIE_TCH */, 0);
+        g.sur_tch = true;
+        g.dedie_arme = true;
+        return;
+    }
+    printf("  [montant] TCH (seq=%u) : TS%d TSC=%d annonce par le pont, "
+           "bascule du BSP a la premiere tache TCH du firmware\n", seq, tn, tsc);
+    fflush(stdout);
+}
+
+/* [2026-09-23] LA BASCULE SDCCH <-> TCH SUIT LE FIRMWARE.
+ *
+ * d_task_d de la page W que l'ARM vient d'ecrire dit ce qu'il ecoute a la
+ * trame suivante : TCHT (13, trafic et FACCH), TCHA (14, SACCH/T) ou TCHD
+ * (28) sur un TCH (prim_tch.c:520-585, 791-802), ALLC (24) pour un bloc
+ * SDCCH/SACCH (prim_rx_nb.c:200). Cette tache est posee au rythme du DSP :
+ * le BSP change donc d'intervalle sur la trame que l'ARM lit vraiment, quel
+ * que soit le retard du DSP sur la BTS. Les autres trames (PM des voisines,
+ * trame libre) ne changent rien. */
+static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32_t fn)
+{
+    static bool sans_annonce_dit;
+    if (!taches || !tch_sur_tache()) {
+        return;
+    }
+    uint16_t t = api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2] & 0x7fffu;
+    bool tache_tch = (t == TCHT_DSP_TASK || t == TCHA_DSP_TASK || t == TCHD_DSP_TASK);
+    bool tache_bloc = (t == ALLC_DSP_TASK || t == DDL_DSP_TASK || t == ADL_DSP_TASK);
+
+    if (tache_tch && !g.sur_tch) {
+        if (!g.tch_tn) {
+            if (!sans_annonce_dit) {
+                sans_annonce_dit = true;
+                printf("  [montant] TCH : tache %u postee a fn=%u sans annonce du pont "
+                       "(calypso_tch_cfg) : intervalle inconnu, BSP inchange\n", t, fn);
+            }
+            return;
+        }
+        sans_annonce_dit = false;
+        printf("  [montant] TCH : le firmware poste la tache %u a fn=%u, BSP bascule sur TS%d (TSC=%d)\n",
+               t, fn, g.tch_tn, g.tch_tsc);
+        fflush(stdout);
+        calypso_bsp_set_dedie(g.tch_tn, 2 /* BSP_DEDIE_TCH */, 0);
+        g.sur_tch = true;
+        g.dedie_arme = true;
+        return;
+    }
+    if (tache_bloc && g.sur_tch) {
+        revenir_sdcch("le firmware est revenu sur le SDCCH (tache ALLC)", fn);
+    }
+}
+
+/* [2026-09-23] SONDE a_fd : LA FACCH DESCENDANTE SUR TCH.
+ * Le firmware ne remonte une FACCH que si ((fn%13)%4)==3 ET a_fd[0] porte
+ * B_BLUD (prim_tch.c:235-246), puis remet a_fd[0] = B_FIRE1 : seul le DSP
+ * pose B_BLUD. Sur l'appel 1 du run de 12:22 le pont decodait 6 FACCH de la
+ * BTS (UA) et le mobile n'en recevait aucune (T200, MDL-ERROR cause 1). Cette
+ * sonde tranche entre ROM (B_BLUD jamais pose) et plomberie (pose mais
+ * FIRE). MONTANT_AFD=0 la coupe. */
+static void sonde_afd(uint16_t *api_ram, uint32_t fn)
+{
+    static int sonde = -1;
+    static uint16_t prec;
+    static unsigned long ok, ko;
+    if (sonde < 0) {
+        const char *e = calypso_getenv("MONTANT_AFD");
+        sonde = (e && *e == '0') ? 0 : 1;
+    }
+    if (!sonde || !g.sur_tch) {
+        return;
+    }
+    uint16_t etat = api_ram[(API_NDB + NDB_A_FD) / 2];
+    if ((etat & B_BLUD) && etat != prec) {
+        const uint8_t *d = (const uint8_t *)api_ram + API_NDB + NDB_A_FD + 6;
+        uint16_t mode = api_ram[(API_NDB + NDB_D_TCH_MODE) / 2];
+        bool fire = (etat & 0x0040) != 0;          /* B_FIRE1 */
+        if (fire) ko++; else ok++;
+        if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
+            printf("  [a_fd] fn=%u fn%%13=%u etat=%04x BLUD=1 FIRE=%d d_tch_mode=%04x "
+                   "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
+                   fn, fn % 13u, etat, fire ? 1 : 0, mode, d[0], d[1], d[2], d[3], ok, ko);
+        }
+    }
+    prec = etat;
 }
 
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
@@ -688,7 +875,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     unsigned pg = taches ? ((v_page & B_GSM_PAGE) ? 1u : 0u) : (page & 1u);
 
     scruter_dcch(fn);
-    scruter_tch(fn);      /* le TCH prime sur la SDCCH quand il est arme */
+    scruter_tch(fn);      /* l'annonce du TCH par le pont                  */
+    suivre_tache_tch(api_ram, pg, taches, fn);   /* la bascule, par le firmware */
 
     /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
      * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;
@@ -711,10 +899,13 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
                    "canal dedie libere (TS0 rendu au FCCH/SCH)\n",
                    (md0 == FB_DSP_TASK || md1 == FB_DSP_TASK) ? "FB" : "SB");
             g.dedie_arme = false;
+            g.sur_tch = false;
+            g.sd_valide = false;
             calypso_bsp_set_dedie(0, 0xFF, 0);
             montant_canal_libere();
         }
     }
+    sonde_afd(api_ram, fn);
 
     /* [2026-09-21] QUI RATE, ET QUAND. La descente dediee perd environ un bloc
      * sur deux (« Dropping frame with 110 bit errors », fire_crc >= 2 cote
