@@ -298,21 +298,56 @@ signalée comme telle dans le fichier.
 
 ## Ce que ça mesure, et ce que ça ne mesure pas encore
 
-**État au 2026-09-23.** En montage dsp avec la BTS (`PONT=1`), le DSP détecte
-FB et SB, décode les BCCH (SI1-4), le mobile obtient le LU ACCEPT, le premier
-SMS MT est livré de bout en bout (2026-09-23 11:06), l'appel passe
-l'ASSIGNMENT (2026-09-22 19:47) et la bascule TCH suit la tâche du firmware ;
-l'A5 est modélisé dans le DSP (`calypso_a5.c`), la parole montante est
-convertie TI -> FR. Restent ouverts :
+**État au 2026-09-23 (runs du banc DSP de 20:22 et 20:32).** En montage dsp
+avec la BTS (`PONT=1`), le DSP détecte FB et SB, décode les BCCH (SI1-4), le
+mobile obtient le LU ACCEPT, le premier SMS MT est livré de bout en bout
+(2026-09-23 11:06), l'appel passe l'ASSIGNMENT (2026-09-22 19:47) et la
+bascule TCH suit la tâche du firmware ; l'A5 est modélisé dans le DSP
+(`calypso_a5.c`), la parole montante est convertie TI -> FR. Run de 20:22,
+constaté dans les journaux : LU, appel MO vers l'écho 600 (ACTIVE 20:22:55,
+DISCONNECT 20:23:27), SMS MO et MT dans les deux sens, appel MT depuis
+100102 (ACTIVE 20:24:28, release normal), A5/1 confirmé par la BTS sur les
+cinq établissements, parole audible dans les deux sens (décodage canal
+TCH/F descendant par la ROM TI, codec GAPK FR et codage montant sur l'hôte),
+29 513 trames avec un seul tick sauté (au boot, fn=0). Restent ouverts, par
+ordre d'importance :
+- **B_BFI sur toute la parole** : la ROM marque chaque trame TCH/F comme
+  mauvaise. Run de 20:32, sonde `[a_dd]` étendue (`src/montant.c`
+  `sonde_add`, non commitée) : `vues=2200 bfi=2200` ; `err` (a_dd_0[2],
+  erreurs rapportées par la ROM) vaut 0 sur 19 des 20 premières trames
+  après la bascule (`c214` ; la 18e, fn=5912, est `8084` à 58), puis 15 à
+  93. Les trames sont réellement dégradées ; le
+  FR reste intelligible parce que le firmware ne remonte pas le BFI
+  (`prim_tch.c:327` ne teste que B_BLUD). Signal (BSP, IQ, égalisation) ou
+  cœur C54x (Viterbi, recomptage) : à trancher par comparaison bit à bit
+  avec les trames de la BTS. Le `ko` de la sonde (B_FIRE1) ne dit rien sur
+  la parole ;
+- la SACCH en TCH : le correctif MVKD/MVDK (`qosmo` `c54x_exec.c`,
+  `CALYPSO_MVKD_DMAD_AVANT=1` = ancien ordre ; garde `[garde-3d89]` dans
+  `c54x_mem.c`) tient au run de 20:22 (deux appels complets, aucun bloc
+  SACCH/TF jeté par le mobile hors bascule et libérations, aucune LOS,
+  aucune ligne `[garde-3d89]`). Mais au run de 20:32
+  le premier appel tombe en LOS (20:32:45) : SACCH/TF FIRE KO à chaque bloc
+  dès fn=6095, `err` de la parole 63 à 93 de fn=6273 à 9306 contre 15 à 38
+  sur le troisième appel, sain ; le deuxième reste bloqué en attente
+  de la connexion MM (T3230). Garde muette : autre
+  cause, non localisée ;
+- le SDCCH/8 descendant : au run de 20:22 le mobile jette 27 trames sur
+  SDCCH/8 (4 à 7 par session dédiée), dont 15 SACCH (ligne « LOSS counter
+  for ACCH ») et 12 du canal principal ; suspect, le BSP sur le SDCCH/8
+  (table 45.002) ;
 - la fenêtre SB, rarement armée par la ROM (d'où
   `L23_SYNC_RETRIES_SELECTION=8`) : une synchro sur trois à cinq ;
-- la SACCH en TCH (LOS) : cause trouvée au rejeu, le pointeur `data[0x3d89]`
-  écrasé via MVKD/MVDK aux opérandes inversés dans `qosmo` `c54x_exec.c`
-  (`CALYPSO_MVKD_DMAD_AVANT=1` = ancien ordre ; garde `[garde-3d89]` dans
-  `c54x_mem.c`) ;
-  correctif à confirmer sur le banc ;
-- l'UA descendant perdu / SABM répétés, lié à l'avance d'horloge du pont
-  (`osmo-operator` `pont/dsp/clock.py`, `PONT_AVANCE_MIN=10`).
+- la marge temps réel : en TCH, `[chrono]` donne A 0.33 + go 0.40 + B 0.16
+  + après DONE 3.37-3.68 ms, soit 4.3 à 4.6 ms de travail DSP pour 4.62 ms.
+
+Ne sont pas des anomalies : les échecs CRC du moniteur TCH du pont tant que
+le RTP ne coule pas (décodage du pont, indépendant du DSP), et l'UA / SABM
+répétés, disparus au run de 20:22 avec `osmo-operator` `pont/dsp/clock.py`
+(`PONT_AVANCE_MIN=10`) : aucune ligne SABM dans les journaux osmocom (ni
+ERROR INDICATION au BSC), marge
+DL réelle min +0 au premier relevé (20:22:47), +9 ensuite, +13 à +15 à
+partir de 20:23:17.
 
 Le détail, jour par jour : `MAILBOX.md`.
 

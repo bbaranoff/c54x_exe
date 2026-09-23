@@ -168,14 +168,22 @@ gdb, QEMU, DSP) et efface `/dev/shm/calypso_api_ram`, `/tmp/calypso_dsp.sock`,
 `calypso_tch_*_ul`) et, en montage dsp, `calypso_tch_cfg`. La session est rangée dans
 `/tmp/c54x-pont/archives/<date>/` (`JOURNAUX_GARDES=10`).
 
-## Ce que ça donne aujourd'hui (23/09)
+## Ce que ça donne aujourd'hui (23/09, runs du banc DSP de 20:22 et 20:32)
 
-- Montage dsp avec la BTS (`PONT=1`) : SCH et BCCH décodés, LU ACCEPT, SMS MT livré,
-  appel jusqu'au TCH (ASSIGNMENT COMPLETE, CALL PROCEEDING).
-- En cours : la SACCH en TCH (LOS ; cause trouvée au rejeu, MVKD/MVDK dans le cœur
-  `qosmo`, correctif à confirmer sur le banc), les SABM répétés liés à l'avance
-  d'horloge du pont (`pont/dsp/clock.py`), la synchro SB qui ne passe qu'une fois sur
-  trois à cinq. Le détail : `MAILBOX.md`.
+- Montage dsp avec la BTS (`PONT=1`) : SCH et BCCH décodés, LU ACCEPT, SMS MO et MT
+  dans les deux sens, appel MO vers l'écho 600 et appel MT depuis 100102 complets
+  (ACTIVE, DISCONNECT, TCH fermé), A5/1 confirmé par la BTS sur les cinq
+  établissements, parole audible dans les deux sens (run de 20:22). Aucune LOS, aucune
+  ligne `[garde-3d89]` : le correctif MVKD/MVDK du cœur `qosmo` tient sur ce run. Plus
+  de SABM répétés depuis `pont/dsp/clock.py` (aucune ligne SABM dans les journaux
+  osmocom).
+- Ouvert, par ordre d'importance : B_BFI sur toute la parole (run de 20:32, sonde
+  `[a_dd]` étendue, non commitée : `bfi=2200` sur `vues=2200`, `err` 0 sur 19 des
+  20 premières trames, puis 15 à 93) ; une LOS en TCH au run de 20:32 (premier appel,
+  20:32:45, SACCH/TF FIRE KO à chaque bloc, garde muette ; l'appel suivant reste en
+  T3230, le troisième est sain) ; le SDCCH/8 (27 trames jetées à 20:22, dont 15 SACCH) ; la
+  synchro SB qui ne passe qu'une fois sur trois à cinq ; la marge temps réel en TCH
+  (4.3 à 4.6 ms de travail DSP pour 4.62 ms, `[chrono]`). Le détail : `MAILBOX.md`.
 
 Historique (17/09) :
 

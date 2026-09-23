@@ -2606,3 +2606,95 @@ recevait une parole melangee, l'echo la renvoyait en bruit sature.
    BTS).
 3. Chiffre de vitesse du coeur avec les sondes coupees, a remesurer avant de
    l'ecrire dans le README.
+
+## 2026-09-23 20:40 — Runs du banc DSP de 20:22 et 20:32 : tout passe a 20:22, mais chaque trame de parole est BFI
+
+Sources : archives `/tmp/c54x-pont/archives/20260923-202448` (run de 20:22) et
+`20260923-203413` (run de 20:32), journaux osmocom du run de 20:22 (20:22:09 ->
+20:24:56 ; pas de journaux reseau pour 20:32). Mobile DSP = MS 1, MSISDN 100101 ;
+l'autre mobile = 100102. Banc relance par l'utilisateur, pas par cette mise a jour.
+
+### Ce qui marche (constate, run de 20:22)
+
+* LU : IMMEDIATE ASSIGNMENT 20:22:41, U1_UPDATED 20:22:45, liberation 20:22:47.
+* Appel MO 100101 -> 600 (echo Asterisk) : ASSIGNMENT COMPLETE 20:22:54 (TCH/F TN=2,
+  bascule du BSP par la tache firmware), ACTIVE 20:22:55, DISCONNECT 20:23:27, TCH ferme
+  20:23:28. STATS du pont a 20:23:30 (cumuls de la session) : TCH dl=1607 ul=1601
+  perdus=11, FACCH ul=14, SACCH ul=87.
+  Parole audible dans les deux sens ; GAPK monte la chaine au decrochage (FR, ti-fr).
+* SMS : 100102 -> 100101 (MT 20:23:53-55) et 100101 -> 100102 (MO 20:24:05, SAPI 3 sur
+  DCCH), CP-ACK et RP-ACK recus.
+* Appel MT 100102 -> 100101 (osmo-sip-connector) : ASSIGNMENT COMPLETE 20:24:25, ACTIVE
+  20:24:28, release normal, TCH ferme 20:24:34.
+* A5/1 : « chiffrement descendant confirme par la BTS » a 20:22:45, 20:22:53, 20:23:53,
+  20:24:04, 20:24:24 (LU, appel 600, SMS MT, SMS MO, appel MT).
+* Correctif MVKD/MVDK (A mesurer 1 de l'entree de 18:45) : sur ce run, SACCH/TF `a_cd`
+  KO a fn=4746 et 4954 (bascule), puis ok jusqu'au dernier bloc journalise, fn=9426
+  (ok 9 -> 51, ko fige a 9) ; cote mobile, aucun bloc SACCH jete entre la bascule
+  (20:22:55) et la liberation (20:23:28). Aucune LOS, aucune ligne `[garde-3d89]`, et
+  l'appel MT qui suit l'appel 600 aboutit. Confirme pour 20:22 (voir la LOS de 20:32 plus bas).
+* clock.py (A mesurer 2) : aucune ligne SABM dans les journaux osmocom. Marge DL reelle
+  min +0 (20:22:47), +9 (20:22:57, 20:23:07), puis +13 a +15, moyenne 22.3 a 38.9.
+  L'avance visee monte a 40 a 20:22:37 et 20:22:56 (38 a 20:23:02). BSC : aucune
+  ERROR INDICATION « SABM frame with information not allowed ».
+* BSP dedie : `stockes=1751 joues=1752 manques=0 perdues=0 recales=0 silences=0`.
+* Temps reel : 29 513 trames, un seul tick saute, au boot (fn=0).
+
+### Anomalies ouvertes, par ordre d'importance
+
+1. **B_BFI sur toute la parole descendante.** Run de 20:22 : les 40 etats `[a_dd]`
+   (21 x c214, 18 x c204, 1 x 8084) ont le bit 2 = B_BFI (l1_environment.h:272) ; le
+   `ko=0` d'alors comptait 0x0040 = B_FIRE1, sans objet sur la parole. Sonde etendue
+   (`src/montant.c` `sonde_add` : `BFI=`, `err=` a_dd_0[2], compteur `bfi=` ; non
+   commitee), passee au run de 20:32 : `vues=2200 ko=376 bfi=2200`. Sur les 42 lignes :
+   19 x c214 err=0 (19 des 20 premieres, fn 5839-5921, juste apres la bascule ; la
+   18e, fn=5912, est le 8084), 17 x c204 err=15..80,
+   5 x 80c4 err=81..93, 1 x 8084 err=58. On entend quand meme : prim_tch.c:327 ne teste
+   que B_BLUD et ne remonte pas le BFI, GAPK decode les 33 octets tels quels. Ce n'est
+   donc pas « bits bons, BFI faux » : la ROM compte 15 a 93 erreurs par trame. Reste a
+   separer signal (BSP, IQ, egalisation) et coeur C54x (Viterbi, recomptage) : comparer
+   bit a bit les 33 octets livres par la ROM aux trames de la BTS (RTP du MGW ou pont).
+   Le `ko` (B_FIRE1, 376/2200) n'a pas de sens defini sur la parole.
+2. **LOS en TCH au run de 20:32.** Appel MO ACTIVE 20:32:30 ; SACCH/TF `a_cd` ok a
+   fn=5991 puis FIRE KO a chaque bloc des fn=6095 (ko 8 -> 40) ; « LOSS counter for
+   ACCH » descend de 31 a 0 et « LOS during dedicated mode » a 20:32:45. Aucune ligne
+   `[garde-3d89]` : ce n'est pas l'ecrasement du pointeur 0x3d89 corrige. Appel suivant
+   (20:32:57) : IMMEDIATE ASSIGNMENT puis T3230 a 20:33:13. Troisieme (20:33:35) :
+   ASSIGNMENT COMPLETE 20:33:38, ACTIVE 20:33:39, DISCONNECT 20:34:06, SACCH/TF ok
+   (ok 14 -> 54, ko fige a 46). Correlation : `err` de la parole 63 a 93 sur l'appel en
+   LOS a partir de fn=6273 (jusqu'a 9306 ; ses 20 premieres trames, fn 5839-5921, a 0
+   sauf une a 58), 15 a 38 sur le troisieme (fn 21248-26881). Non localise.
+3. **SDCCH/8 descendant** (run de 20:22) : 30 « Dropping frame with N bit errors »
+   (l1ctl.c:278, toute trame a fire_crc >= 2), dont 18 precedees de « LOSS counter for
+   ACCH » (l1ctl.c:268, SACCH seulement). Sur SDCCH/8 : 27 trames jetees (84 a 114 bit
+   errors), 4 a 7 par session dediee, 7 sur le LU entre 20:22:42 et 20:22:47 ; 15 SACCH,
+   12 du canal principal. Sur TCH/F, une perte SACCH a la bascule (20:22:55, 54 bit
+   errors) et une a chaque liberation (20:23:28, 20:24:33).
+   Suspect : la table 45.002 du BSP pour la SACCH/8 (alternance sur 102 trames), mais le
+   canal principal est touche aussi. Mesure a faire : fn % 102 des blocs jetes contre
+   ceux acceptes.
+4. **Marge temps reel en TCH** : `[chrono]` fn 5997-11997 (20:22) = A 0.33 + go 0.40 +
+   B 0.16 + apres DONE 3.37-3.68 ms ; qemu 0.04-0.32 ms. Meme profil a 20:32
+   (fn 6997-8997, 21997-26997). Hors TCH, apres DONE 0.07-0.95 ms. Tenu, sans reserve.
+5. UI SAPI 0 sur le TCH : BSC 20:22:54 lchan(0-0-2-TCH_F-0){WAIT_RLL_RTP_ESTABLISH}
+   « SAPI=0 UNIT DATA INDICATION: unimplemented Abis RLL message type », juste apres
+   l'ASSIGNMENT COMPLETE. Pas la trame de bourrage (UI de longueur 0, jetee par
+   libosmocore). Hypothese : un MEASUREMENT REPORT sur le lien principal. Non bloquant.
+6. Mineures : MM_EVENT_NO_CELL_FOUND transitoire a 20:24:08 apres le SMS sortant ;
+   MSC 20:24:26 « Duplicate DTAP » sur la reponse au paging, sans consequence.
+
+### Ce qui n'est PAS une anomalie
+
+* Les echecs CRC du moniteur TCH descendant du pont : meme profil sur les deux appels,
+  la BTS n'a rien a mettre sur le TCH tant que le RTP ne coule pas. Decodage du pont,
+  independant du DSP.
+* Le `ko` de `[a_dd]` sur la parole (B_FIRE1), voir 1.
+* Le tick saute au boot (fn=0), et l'arret de 20:24:52 (SIGINT volontaire).
+
+### A mesurer
+
+1. B_BFI : comparaison bit a bit ROM / BTS sur un appel sain, puis rejeu hors banc
+   (`tools/rejeu_banc`) pour isoler le coeur.
+2. LOS de 20:32 : rejouer l'enregistrement TCH de cet appel si `/dev/shm/calypso_rejeu_tch.bin`
+   le contient encore ; regarder ce qui change a fn=6095.
+3. SACCH/8 : fn % 102 des blocs jetes.
