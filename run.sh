@@ -46,7 +46,7 @@ GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (et
 GDB_STUB="${GDB_STUB:-1234}"
 GDB_TELNET="${GDB_TELNET:-44444}"
 GDB_TELNET_PY="${GDB_TELNET_PY:-/opt/GSM/qosmo-dsp/tools/gdb-telnet.py}"
-INSNS="${INSNS:-8000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
+INSNS="${INSNS:-16000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
