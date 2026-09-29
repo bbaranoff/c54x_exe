@@ -431,6 +431,35 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_NB_SYM"); a = (e && *e) ? atof(e) : 0.3; }
         gmsk_elargir(burst_iq, 148, a);
     }
+    /* [2026-09-29] CELLULE_SB_SYM=<a> : le meme elargissement sur le SCH. Mesure
+     * du banc (run de 23:50, 129 fenetres SB natives, TOA 23-24) : la ROM rend
+     * CRC OK sur la moitie des SCH et, sur la plupart des echecs, seuls les
+     * bits 0-2 du mot SB sont faux (...1b/1f/1d au lieu de ...1c) : les memes
+     * positions du burst basculent selon le contenu, le profil « fil du
+     * rasoir » des NB avant CELLULE_NB_SYM. 0 par defaut tant que le rejeu ne
+     * l'a pas mesure. */
+    if (type == 'S') {
+        static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_SB_SYM"); a = (e && *e) ? atof(e) : 0.0; }
+        if (a != 0.0) gmsk_elargir(burst_iq, 148, a);
+    }
+    /* [2026-09-30] CELLULE_SB_NOISE=<sigma> : le meme bruit gaussien sur le SCH
+     * (voir CELLULE_NB_NOISE ci-dessous : sans bruit, l'echelle des bits
+     * souples de la ROM s'effondre). 0 = inchange. */
+    if (type == 'S') {
+        static double sigma = -2; if (sigma == -2) { const char *e = calypso_getenv("CELLULE_SB_NOISE"); sigma = (e && *e) ? atof(e) : 0.0; }
+        if (sigma > 0) {
+            uint32_t seed = fn * 2654435761u + 777u;
+            for (int k = 0; k < 296; k++) {
+                seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
+                seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
+                double g = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+                double v = burst_iq[k] + sigma * g;
+                if (v > 32767) v = 32767;
+                if (v < -32768) v = -32768;
+                burst_iq[k] = (int16_t)lrint(v);
+            }
+        }
+    }
     /* [2026-09-21] CELLULE_NB_NOISE=<sigma> : Gaussian noise on the normal
      * bursts (deterministic seed per frame). Why: the ROM scales its soft bits
      * by a noise estimate before the 4-bit quantiser (0x8168 -> 0x82d0, a

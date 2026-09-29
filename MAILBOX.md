@@ -2801,3 +2801,38 @@ offset ARM-tick recale). Trace `[sbwin]` complete (avec le tick) pendant 60
 ticks apres chaque detection FB et 8 ticks apres chaque tache SB postee
 (calypso_bsp_sb_trace(), appelee par pont.c). A lire au prochain run :
 `RELIVRE au tick`, `CRC_OK` sur la page 0, ratio `=> SB`/`FBSB_REQ`.
+
+## 2026-09-30 00:15 — La fenetre SB etait bonne ; c'est la demodulation du SCH qui basculait. Mesure en rejeu, reglages portes au banc
+
+Trace complete (v3, `[sbwin]` a chaque SCH pendant 60 ticks apres un FB) :
+* tentative 1 (page 0) tombe TOUJOURS sur la trame FCCH (p51 = SCH - 1, burst
+  nul) : fenetre vide normale, pas un defaut ;
+* tentative 2 tombe sur le SCH, livre NATIVEMENT en fenetre SB one-shot 191 au
+  bon TOA (23-24) ; aucune relivraison n'est necessaire (v2/v3 inutiles ici,
+  gardees, inertes) ;
+* et pourtant : 129 fenetres SB natives comparees bit a bit au mot attendu (fn
+  BTS connu) -> CRC OK sur la moitie ; sur la plupart des echecs seuls les bits
+  0-2 du mot sont faux (...1b/1f/1d au lieu de ...1c). Les memes positions du
+  burst basculent selon le contenu : le « fil du rasoir » deja vu sur les NB.
+
+Mesure hors banc, `c54x_exe --rejouer` avec `REJEU_CONTINUER=1` (8000 trames,
+deterministe, 785 FB / 12000 trames), SCH decodes / SCH presentes :
+
+| reglage du SCH                                  | decodes |
+|-------------------------------------------------|---------|
+| tel quel (instant 0.5, sans elargir, sans bruit)|  34 %   |
+| elargissement 0.15 / 0.3 / 0.5 / 1.0 / 1.5      | 50 / 60 / 63 / 66 / 66 % |
+| + instant 0.35 (0.3 : 71 %, 0.4 : 72 %, 0.5 : 66 %) | 76 %  |
+| + bruit sigma 3000 (300 : 77 %, 1000 : 79 %, 6000 : 73 %) | **82 %** |
+| phase porteuse 10/22/45, marge 19-23            | sans effet |
+| amplitude 8000 / 15000 / 22000                  | 0 FB / 2 SB / 82 % |
+
+Zero faux positif dans tous les cas. Porte au banc : `sb_moduler()` dans
+calypso_bsp.c (trois sites : bsp_ts0_livrer, sb_cadrer, chemin deliver),
+defauts CALYPSO_BSP_SB_SYM=1.0, CALYPSO_BSP_SB_DEC=0.35,
+CALYPSO_BSP_SB_NOISE=3000 (0 / 0.5 / 0 = avant). Cote rejeu : CELLULE_SB_SYM,
+CELLULE_SB_NOISE (0 par defaut, le rejeu reste la reference).
+Attendu au prochain run : `=> SB` / `L1CTL_FBSB_REQ` de ~25 % a ~80 %, donc des
+pertes de cellule rares, et un RACH d'appel qui ne tombe plus en LOS. Le reste
+(18 %) est encore dans la demod SB de la ROM emulee ; a chercher avec
+REJEU_DUMP_SOUPLES sur les SCH qui echouent a ces reglages.
