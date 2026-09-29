@@ -2780,3 +2780,24 @@ l'offset ARM-tick sur le tick de livraison (bsp_ts0_service saute alors sa
 trame, rejouee au tick suivant : flux contigu). Le chemin « deux pages » est
 retire. A lire au prochain run : `RELIVRE au tick`, `CRC_OK` sur la page 0
 aussi, et le ratio `=> SB` / `L1CTL_FBSB_REQ` d'osmocon.log (24/90 a 23:37).
+
+## 2026-09-29 23:50 — v2 mesuree (run de 23:41) : le SCH part dans la fenetre PM ; v3 memorise toujours le dernier SCH
+
+* Mobile campe (C3, normal service) : la regression de la v1 est levee.
+* Mais SB 29/118 (osmocon), `[a_sch]` page 0 : 0 CRC_OK sur 215 (fenetre VIDE,
+  TOA=0 SNR=12), page 1 : 29 CRC_OK sur 214 (burst a TOA 24, le SCH une fois sur
+  sept, sinon la trame suivante). Une seule relivraison sur tout le run.
+* Cause : au depot du SCH la DMA est le plus souvent ARMEE, mais pour autre
+  chose -- fenetre PM de 64 echantillons (`armee=1 one_shot=1 page_prog=64`,
+  SB #2010-2090 a p51=31) : le SCH y est consomme, puis la fenetre SB s'arme et
+  ne trouve rien. La condition « DMA non armee » de la v2 ne voyait pas ce cas.
+* Ma trace `[sbwin]` n'echantillonnait qu'un SCH sur dix apres le 200e : le
+  depot exact autour des tentatives etait invisible.
+
+v3 : le dernier SCH depose est TOUJOURS memorise (fn, tick, bits, livre-en-
+fenetre-SB ou non) ; si une fenetre SB one-shot (>= 190) s'arme dans le tick ou
+le suivant sans qu'il y soit alle, il y est livre (residu RIF vide, marge 21,
+offset ARM-tick recale). Trace `[sbwin]` complete (avec le tick) pendant 60
+ticks apres chaque detection FB et 8 ticks apres chaque tache SB postee
+(calypso_bsp_sb_trace(), appelee par pont.c). A lire au prochain run :
+`RELIVRE au tick`, `CRC_OK` sur la page 0, ratio `=> SB`/`FBSB_REQ`.

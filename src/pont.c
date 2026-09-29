@@ -1533,8 +1533,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache FB postee par l'ARM\n", m.a); ncmd++; }
               { static int ncmd6; if (has6 && prev6 != 1 && ncmd6 < 60) { printf("  [cmd] fn=%u tache SB postee par l'ARM (W0 md=%d W1 md=%d)\n", m.a, md0, md1); ncmd6++; } }
               if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
+              if (has6 && prev6 != 1) calypso_bsp_sb_trace(8);   /* [2026-09-29] et autour de chaque tache SB */
               prev5 = has5; prev6 = has6; }
-            { static int fb_prev = 0; if (*d_fb_det && !fb_prev) printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs()); fb_prev = *d_fb_det != 0; }
+            { static int fb_prev = 0; if (*d_fb_det && !fb_prev) { printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs());
+                                                                  calypso_bsp_sb_trace(60); }   /* [2026-09-29] chaque SCH trace jusqu'aux tentatives SB */
+              fb_prev = *d_fb_det != 0; }
             /* [2026-09-19] ONE LINE PER SB ATTEMPT. Everything upstream of the SB
              * task is now measured correct — right frame, right window, right
              * sample offset — yet the CRC passes in 0.4% of attempts. A decode
