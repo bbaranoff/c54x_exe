@@ -2749,3 +2749,34 @@ et voix) ; 99-couverture.sh lit ses champs sur « ; » (les motifs « \| »
 cassaient SMS, SDCCH descendant, SACCH en TCH, retour BSP), calcule son bilan
 hors du sous-shell (le verdict disait 0/0/0/0) et cherche des motifs que le
 mobile ecrit vraiment (MMSMS_EST_REQ, « new state dedicated -> release pending »).
+
+## 2026-09-29 23:45 — Mesure du correctif SB (run de 23:33) : la fenetre SB existe, c'est l'ordre qui manque ; v2
+
+`[sbwin]` avec les nouveaux champs :
+```
+[sbwin] SB #7 fn=327 p51=21 : armee=1 one_shot=1 page_prog=191 ... -> FENETRE SB (one-shot)
+[a_sch] fn=994 page=1 : ... -> 8000 0720 001c 003d  TOA=24 PM=5516 SNR=16384 CRC_OK
+[sbwin] SB #8 fn=337 p51=31 : armee=0 one_shot=0 page_prog=191 ... -> DMA NON ARMEE
+[a_sch] page 0 : 8100 0016 f85d 01fb  TOA=0 PM=5521 SNR=12   (fenetre VIDE)
+[a_sch] page 1 : 8100 xxxx xxxx xxxx  TOA=24 PM=5516 SNR=16384 crc_ko  (burst de la trame SUIVANTE)
+```
+1. **La ROM arme bien une fenetre SB one-shot de 191 echantillons (ALGTH 764).**
+   Le MAILBOX du 22/09 (« la fenetre 382 mots n'existe jamais ») mesurait la
+   longueur au moment du depot, pas celle de la tache SB. Quand elle est armee
+   AVANT le depot, tout est natif : burst a 21, TOA 24, CRC OK.
+2. Le defaut est un defaut d'ORDRE dans le tick : la fenetre est le plus souvent
+   armee APRES le depot du SCH ; calypso_rif_rx_burst() jette le burst
+   (« n_muets »), la page 0 lit une fenetre vide (SNR=12, resultat constant), la
+   page 1 lit le burst de la trame suivante a TOA 24 (SNR sature, CRC faux).
+   Ce n'est ni le residu du RIF ni une « double page » (hypotheses du premier jet).
+3. **Le premier jet regressait** : la relivraison se faisait au premier armement
+   venu, y compris les fenetres NB de la lecture BCCH (`RELIVRE ... one_shot=0
+   page=151 marge=3`) ; le SCH remplacait le burst BCCH, plus aucune SI, mobile
+   en « C6 any cell selection », pytest mobile/reseau en echec.
+
+v2 (calypso_bsp.c) : le SCH depose sans DMA armee est garde UN tick et livre
+uniquement dans une fenetre SB one-shot (>= 190), cadre a 21, avec recalage de
+l'offset ARM-tick sur le tick de livraison (bsp_ts0_service saute alors sa
+trame, rejouee au tick suivant : flux contigu). Le chemin « deux pages » est
+retire. A lire au prochain run : `RELIVRE au tick`, `CRC_OK` sur la page 0
+aussi, et le ratio `=> SB` / `L1CTL_FBSB_REQ` d'osmocon.log (24/90 a 23:37).
