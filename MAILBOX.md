@@ -2836,3 +2836,51 @@ Attendu au prochain run : `=> SB` / `L1CTL_FBSB_REQ` de ~25 % a ~80 %, donc des
 pertes de cellule rares, et un RACH d'appel qui ne tombe plus en LOS. Le reste
 (18 %) est encore dans la demod SB de la ROM emulee ; a chercher avec
 REJEU_DUMP_SOUPLES sur les SCH qui echouent a ces reglages.
+
+## 2026-09-30 00:20 — Run banc-max de 00:07 (dsp, --restart) : l'appel s'etablit, 31 fonctions GERE sur 37
+
+Avec sb_moduler() (instant 0.35, elargissement 1.0, bruit 3000) : SB 33/69
+FBSB_REQ (etait 1/4), camp en 1 s, LU, SMS MO/MT, **appel CC ACTIVE en 1 s**
+(SETUP, CALL PROCEEDING, ASSIGNMENT COMMAND/COMPLETE, CONNECT), TCH/F decode
+(a_dd vues=3400 ko=0), FACCH/SACCH/parole montants vus par montant.c,
+liberation radio. Couverture : 31 gere, 1 degrade, 2 non gere, 3 non observe.
+Echelle 23/23, 2 echecs :
+* **voix** : le ton 1 kHz ne revient pas (raie 380 Hz, +0.3 dB) -- coherent avec
+  B_BFI=1 sur TOUTES les trames de parole descendantes (a_dd bfi=3400/3400,
+  Viterbi ko=0) : le point ouvert n°1 du README, inchange. C'est le prochain
+  verrou.
+* **ussd** : intermittent. Cause lue dans mobile.log : apres chaque liberation le
+  mobile resynchronise (FB+SB), la synchro echoue encore une fois sur deux, le
+  mobile passe 3-10 s « no cell », et le RACH lance pendant ce trou meurt en
+  « LOS during RACH request » ; 87-ussd.sh enchainait *#101# 2 s apres *#100#.
+  Correctif banc : attendre_service() (_lib.sh) avant chaque transaction (ussd,
+  sms-mo, appel, voix). Le fond (18 % de SCH non decodes) reste cote ROM emulee.
+* garde MVKD/MVDK non observee = la garde n'a pas eu a jouer ; retour BSP sur le
+  SDCCH non observe = la liberation s'est faite sur le TCH (FACCH), normal.
+
+## 2026-09-30 00:45 — Voix : la boucle est coupee en deux hors banc, c'est le MONTANT qui casse ; le BFI n'y est pour rien
+
+1. `tools/comparer_parole.py` sur l'appel de 00:14 : **1116 trames de parole
+   descendantes sur 1117 identiques au bit pres** entre a_dd (ROM) et
+   libosmocoding sur les bursts livres ; 12 FACCH identiques. La ROM rapporte
+   pourtant ~27 erreurs canal par trame (a_dd[2]) la ou le Viterbi de reference
+   en voit 0, et B_BFI=1 partout, y compris sur les trames a err=0. Le BFI ne
+   vient donc pas du decodage (compteur ou metrique de qualite, a voir en rejeu
+   avec bruit/amplitude) ; et le firmware l'ignore (prim_tch.c ne teste que
+   B_BLUD) : il ne casse pas la voix.
+2. Les memes trames a_dd, decodees par libgsm (RFC 3551, independant de la ROM
+   et du mobile) : RMS constant ~3300, raie 200-600 Hz mouvante, 0 % d'energie a
+   1 kHz sur 23 s. Or a_dd == ce que la BTS a emis == l'echo d'Asterisk. **Ce
+   qui est revenu du reseau etait deja du bruit : le montant envoie du bruit.**
+   Le descendant est sain jusqu'a a_dd ; pas besoin du test Playback().
+3. Verifie hors banc : parole_ti_vers_fr() est l'inverse exact de gapk
+   (ti_fr_from_canon o gsm_to_canon, aller-retour identique) ; le firmware
+   ecrit a_du avec dsp_memcpy_to_api(..., 1) = octet fort d'abord, comme
+   prendre_ul. Restent : la capture GAPK (gsm_in -> gsm_mic.monitor), le
+   firmware, le pont (codage, A5 montant).
+4. Pour trancher au prochain appel : montant.c note chaque trame montante dans
+   /dev/shm/calypso_add_ul.bin (type 1 brute TI, type 0 convertie FR) ;
+   `tools/decoder_add.py ul` (et `dl`) decode avec libgsm et cherche le ton.
+   Si le ton est dans add_ul : GAPK, firmware et montant.c sont bons, le defaut
+   est au pont ou au-dela (capturer le RTP au MGW). S'il n'y est pas : capture
+   GAPK ou firmware (a_du).

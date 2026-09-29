@@ -186,6 +186,39 @@ static void publier_l2(int *fdp, const char *chemin, uint32_t *seq,
     sb_ecrire(*fdp, buf, sizeof(buf), 0);
 }
 
+/* [2026-09-30] LA PAROLE MONTANTE, ENREGISTREE. Run banc-max de 00:07 : l'appel
+ * s'etablit, mais le ton 1 kHz injecte au micro ne revient pas ; les trames
+ * descendantes a_dd, bit-exactes avec ce que la BTS a emis
+ * (tools/comparer_parole.py, 1116/1117), decodees par libgsm ne le contiennent
+ * pas non plus : ce qu'Asterisk a renvoye etait deja du bruit, le defaut est
+ * MONTANT. La conversion TI -> FR ci-dessous est l'inverse exact de gapk
+ * (aller-retour identique au bit pres, verifie) et le firmware ecrit a_du en
+ * octet fort d'abord comme prendre_ul le lit. Reste : la capture GAPK, le
+ * firmware, ou le pont (codage, A5 montant). Pour trancher au prochain appel,
+ * chaque trame montante est notee ici, brute TI (type 1) et convertie FR
+ * (type 0), meme format de 48 octets que noter_dl : tools/decoder_add.py les
+ * decode avec libgsm et cherche le ton. */
+static void noter_ul(uint32_t fn, uint8_t type, uint16_t etat, const uint8_t *data, int n)
+{
+    static FILE *f;
+    static unsigned nrec;
+    static uint32_t fn_prec;
+    if (!f || (uint32_t)(fn - fn_prec) > 500u) {
+        if (f) fclose(f);
+        f = fopen("/dev/shm/calypso_add_ul.bin", "wb");
+        nrec = 0;
+    }
+    fn_prec = fn;
+    if (!f || nrec >= 16000) return;
+    uint8_t r[48];
+    memset(r, 0, sizeof r);
+    memcpy(r, &fn, 4);
+    r[4] = type; r[5] = (uint8_t)n;
+    memcpy(r + 6, &etat, 2);
+    memcpy(r + 12, data, n > 36 ? 36 : n);
+    fwrite(r, 1, sizeof r, f);
+    if ((++nrec % 32) == 0) fflush(f);
+}
 static void publier_parole(const uint8_t *fr, uint32_t fn)
 {
     static int fd = -2;
@@ -279,7 +312,9 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
                 printf("  [montant] FACCH UL fn=%u task=0x%04x\n", fn, task_u);
         }
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
+            noter_ul(fn, 1, task_u, fr, FR_BYTES);      /* brute, format TI (a_du) */
             parole_ti_vers_fr(fr);
+            noter_ul(fn, 0, task_u, fr, FR_BYTES);      /* convertie FR, ce que recoit le pont */
             publier_parole(fr, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u\n", fn);
