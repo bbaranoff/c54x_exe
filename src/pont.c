@@ -1406,6 +1406,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * pair is handed over, until the receiver holds less than a pair. A
              * 156.25-symbol frame is 3.25 pages, so this runs 1 or 2 times. */
             for (int k = 0; k < 40 && dsp->running; k++) {   /* 13 page pairs per 1250-symbol frame */
+                /* [2026-09-29] un SCH garde parce que la DMA n'etait pas armee au
+                 * depot est relivre ici, des que la ROM (phase B) l'a armee. */
+                calypso_bsp_sb_retenter();
                 if (!calypso_rhea_dma_pump(dsp)) break;
                 if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
                 uint32_t av2 = dsp->insn_count;
@@ -1596,13 +1599,19 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             { static uint16_t prev[2][5]; static int first = 1; static unsigned nch;
               for (int pg = 0; pg < 2; pg++) {
                   const uint16_t *a = a_sch_pg[pg];
-                  if (!first && nch < 60 &&
+                  /* [2026-09-29] plafond 60 -> 600 et TOA de la page R : c'est la
+                   * mesure du cadrage SB (un SCH bien pose lit TOA=23). */
+                  if (!first && nch < 600 &&
                       (a[0] != prev[pg][0] || a[3] != prev[pg][3] || a[4] != prev[pg][4])) {
+                      const uint16_t *rp = &api_ram[API_R_PAGE(pg) / 2];
                       printf("  [a_sch] fn=%u page=%d : %04x %04x %04x %04x -> "
-                             "%04x %04x %04x %04x  (d_dsp_page=%04x)\n",
+                             "%04x %04x %04x %04x  (d_dsp_page=%04x) TOA=%d PM=%d SNR=%u %s\n",
                              m.a, pg, prev[pg][0], prev[pg][1], prev[pg][3], prev[pg][4],
                              a[0], a[1], a[3], a[4],
-                             api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2]);
+                             api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2],
+                             (int16_t)rp[RP_A_SERV_DEMOD/2 + D_TOA], (int16_t)rp[RP_A_SERV_DEMOD/2 + D_PM],
+                             rp[RP_A_SERV_DEMOD/2 + D_SNR],
+                             ((a[0] & 0x8100) == 0x8000) ? "CRC_OK" : (a[0] & 0x0100) ? "crc_ko" : "");
                       nch++;
                   }
                   prev[pg][0]=a[0]; prev[pg][1]=a[1]; prev[pg][3]=a[3]; prev[pg][4]=a[4];

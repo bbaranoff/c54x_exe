@@ -2698,3 +2698,54 @@ l'autre mobile = 100102. Banc relance par l'utilisateur, pas par cette mise a jo
 2. LOS de 20:32 : rejouer l'enregistrement TCH de cet appel si `/dev/shm/calypso_rejeu_tch.bin`
    le contient encore ; regarder ce qui change a fn=6095.
 3. SACCH/8 : fn % 102 des blocs jetes.
+
+## 2026-09-29 23:30 — Le verrou SB, mesure et correctif : le SCH n'etait jamais cadre pour la tache SB
+
+Run dsp de 22:38 (banc-max), 600 tentatives SB dans dsp.log, 540 FBSB_REQ dans
+osmocon.log : 577 FB trouves, 130 SB. Cote mobile, chaque SB manquee est un
+« FBSB RESP: result=255 », une perte de cellule, 10 a 30 s de recherche PLMN ;
+l'appel de 23:06:35 est tombe dedans (« LOS during RACH request »), les SMS et
+l'USSD passent quand ils tombent dans une fenetre « normal service ».
+
+### Ce que les traces etablissent
+
+1. Le TOA du FB est IDENTIQUE a chaque tentative (8743, ou 9995 = une trame
+   plus loin) : le cadencement est deterministe.
+2. La tache SB est postee a la bonne phase de multitrame dans 94 % des cas
+   (`[cmd] tache SB postee`, fn mod 51 = 6/17/27/37/47, toujours la meme
+   famille).
+3. `[a_sch]` : a CHAQUE paire de tentatives, la page 0 recoit le meme resultat
+   `8100 0016 f85d 01fb` (CRC faux, contenu constant = tampon sans burst) ; la
+   page 1 recoit un contenu variable et decode 131 fois sur 600 (`8000 xxxx
+   001c yyyy`, BSIC 7).
+4. `[sbwin]` : 100 % des SCH sont livres avec `one_shot=0 nwin=0 marge=0`, donc
+   a l'offset zero d'une trame de 1250 echantillons suivie de sept intervalles
+   de bourrage -- le cadrage de la recherche FB, pas celui d'une fenetre SB
+   (burst a 23 symboles, tpu_window.c L1_SB_MARGIN_Q).
+
+Donc : le temps est juste, c'est le CONTENU que la ROM lit qui varie -- residu
+du RIF (4 mots par trame de recherche FB) et instant d'armement de la DMA par
+rapport au depot. Quand la DMA n'est pas armee au depot, calypso_rif_rx_burst()
+jette le burst (« n_muets ») et la tache SB lit du perime : la page 0.
+
+### Correctif (calypso_bsp.c, bsp_ts0_livrer ; pont.c)
+
+Derriere CALYPSO_BSP_SB_FENETRE (1 par defaut) :
+* un SCH livre alors que la ROM a programme une page de tache (ALGTH/2 >= 150
+  echantillons) sans ONE_SHOT est cadre comme une fenetre SB : residu RIF vide,
+  CALYPSO_BSP_SB_MARGE (21) echantillons de silence en tete, bloc de DEUX pages
+  exactement (la pompe ne transfere qu'a deux pages pleines), sans bourrage ;
+* DMA non armee au depot : le bloc est garde et relivre des l'armement
+  (calypso_bsp_sb_retenter(), appelee dans la boucle de pompe de pont.c et au
+  tick suivant) ;
+* `[sbwin]` dit armee/one_shot/page_prog/rif_avant et l'action ; `[a_sch]`
+  porte le TOA, PM, SNR de la page R (plafond 600). Un SB bien pose lit TOA=23.
+La recherche FB (page de 48 echantillons) et les fenetres ONE_SHOT ne changent
+pas. Non mesure : a lire sur le prochain run dans `[sbwin]` (page_prog reel de
+la tache SB) et `[a_sch]` (TOA, taux de CRC_OK sur la page 0 comme sur la 1).
+
+A cote, banc-max : 87-ussd.sh est optionnel (un echec USSD ne saute plus appel
+et voix) ; 99-couverture.sh lit ses champs sur « ; » (les motifs « \| »
+cassaient SMS, SDCCH descendant, SACCH en TCH, retour BSP), calcule son bilan
+hors du sous-shell (le verdict disait 0/0/0/0) et cherche des motifs que le
+mobile ecrit vraiment (MMSMS_EST_REQ, « new state dedicated -> release pending »).
