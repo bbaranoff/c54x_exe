@@ -3040,3 +3040,43 @@ burst ») : D remplacait A au lieu de s'y ajouter. Correctif : offset sauve et
 restaure autour de la livraison de seconde chance ; le recalage n'a lieu qu'au
 tick suivant sur CRC OK lu dans l'API RAM (deja code). Attendu : ~30 + 13 x 0.8
 = ~40 SB sur 43 cycles avec seconde chance.
+
+## 2026-09-30 11:55 — Run de 11:37 : plus aucun LOS pendant le RACH ; un appel sur trois perd la FACCH descendante ; garde-fou de temps dans le banc
+
+* Seconde chance corrigee (offset restaure) : 34 declenchements, 28 decodes en
+  tentative 1, 6 replis ; osmocon SB1 25 / SB2 6 ; TOUS les CHANNEL REQUEST du run
+  (SMS, paging, USSD x2, appels) ont eu leur IMMEDIATE ASSIGNMENT, zero « LOS
+  during RACH request ». Le trou de resynchro avant RACH est ferme en pratique.
+* Appel de 11:42:46 rate : SETUP recu par le MSC, ASSIGNMENT COMMAND vers TCH TS2,
+  le mobile bascule et envoie SABM sur la FACCH (ASSIGNMENT COMPLETE en attente
+  de l'etablissement) ; SABM repete 5 fois, jamais de UA : MDL-Error T200 a
+  11:42:55, ASSIGNMENT FAILURE, retour SDCCH, puis LOS dedie a 11:43:10. La BTS
+  a bien repondu (le moniteur du pont decode 4 FACCH descendantes = les UA) ; la
+  ROM n'a leve aucun a_fd pendant l'appel, alors que la SACCH du meme TCH passait
+  a chaque bloc (donc fn et COUNT A5 justes : l'horloge n'est pas en cause).
+  Les deux appels suivants (11:48, 11:49) passent : intermittent, c'est la FACCH
+  descendante sur TCH du 23/09 20:40. A chercher dans le decodage TCH de la ROM
+  (a_fd / stealing flags), pas dans la synchro.
+* banc-max.sh : chaque barreau tourne sous surveillance (MOD_TIMEOUT, defaut
+  240 s, verdict ECHEC « timeout » au-dela) ; 90-appel.sh borne sa boucle en
+  secondes (CALL_MAX) et non en tours de VTY.
+
+## 2026-09-30 12:05 — Seconde chance : desactivee par defaut ; les appels de plus de 30 s tombaient
+
+Run de 11:37 (binaire 11:36, seconde chance active) : zero « LOS during RACH » sur
+tout le run (SMS, paging, USSD x2, appels : tous les CHANNEL REQUEST servis), mais
+les deux appels de la voix tombent a ~30 s en « LOS during dedicated mode »
+(compteur SACCH 31 -> 0 en 15 s) avec un TCH descendant qui se degrade
+progressivement (a_dd err 19 -> 65 -> 91, FIRE=1, ko 0 -> 370). Le pont, lui,
+decode SACCH et TCH descendants et garde une marge DL >= 11 trames. Tous les
+appels des runs SANS seconde chance (00:14, 10:54) tenaient 40 s et plus avec
+le compteur a 31.
+Mecanisme suspecte : chaque decode en tentative 1 avance d'une trame l'index que
+le DSP reclame a la BTS (offset ARM-tick -673 -> -638 sur le run, 35 fois) ; la
+marge du pont ne se refait pas (la BTS ne va pas plus vite que le temps reel) et
+la boucle d'horloge pousse la BTS (avance visee 14 -> 27). Non prouve : a
+confirmer par A/B (CALYPSO_BSP_SB_DOUBLE=1). En attendant : defaut 0, et jamais
+en canal dedie (g_dedie_tn > 0). Le taux SB revient a ~74-80 % par SCH et le
+RACH retombe a ~1 echec sur 5, absorbe par --essais 2 et attendre_service().
+L'echec de l'appel de 11:42 (FACCH descendante non decodee par la ROM, SABM
+repete, UA emis par la BTS) est independant : intermittent, point du 23/09.
