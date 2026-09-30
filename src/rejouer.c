@@ -506,8 +506,13 @@ static void sbdet_resp(int attempt)
         }
     }
     if (trace) { unsigned p = fn_cur % 51;
-        printf("  SBresp att=%d fn=%u p51=%u crc=%s\n", attempt, fn_cur, p,
-               (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "FAUX" : "OK"); }
+        /* [2026-09-30] mot decode MEME en CRC faux, et les mesures de la ROM sur le
+         * burst (a_serv_demod : TOA, PM, ANGLE, SNR) : c'est la matiere pour
+         * comparer les SCH decodes aux rates (voir MAILBOX 2026-09-30). */
+        printf("  SBresp att=%d fn=%u p51=%u crc=%s a_sch=%04x %04x %04x %04x %04x toa=%d pm=%d angle=%d snr=%d sb_cmd_fn=%u\n", attempt, fn_cur, p,
+               (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "FAUX" : "OK",
+               dbr()[R_SCH + 0], dbr()[R_SCH + 1], dbr()[R_SCH + 2], dbr()[R_SCH + 3], dbr()[R_SCH + 4],
+               (int16_t)dbr()[R_SERV + 0], (int16_t)dbr()[R_SERV + 1], (int16_t)dbr()[R_SERV + 2], (int16_t)dbr()[R_SERV + 3], g_sb_cmd_fn); }
     if (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) {
         n_sb_crcfail++;
         if (attempt == sb_dernier_essai()) { sched_reset(); plan_fb_set(1, 0); }

@@ -372,15 +372,52 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         } else *n_iq = 2 * 148;
         return type;
     }
+    /* [2026-09-30] CELLULE_SB_AMP=<n> : amplitude du seul SCH (FCCH et NB gardent
+     * amp). Le SNR de la ROM sur le SCH sature a 16384 ; le seul cas de banc a
+     * SNR non sature (6974) avait decode. A mesurer. */
+    if (type == 'S') { static int sba = -2; if (sba == -2) sba = env_int("CELLULE_SB_AMP", -1); if (sba > 0) amp = sba; }
     /* CELLULE_SB_PHASE=<deg> : carrier phase of the SCH burst */
     if (type == 'S') { static int sp = -2; if (sp == -2) sp = env_int("CELLULE_SB_PHASE", 0); phase0 = sp * M_PI / 180.0; }
     int16_t *burst_iq = iq;
+    int fen_n = 148;              /* echantillons sur lesquels portent elargissement et bruit du SCH */
+    /* [2026-09-30] CELLULE_SB_GARDE=<mode> : LA GARDE N'EST PAS DU SILENCE. En
+     * descendant GSM la BTS emet en continu : le SCH est precede du signal de TS7
+     * et suivi de TS1, pas de 21 echantillons nuls. Mesure en rejeu (SYM 1.0, DEC
+     * 0.35, bruit 3000) : les 20 % de SCH que la ROM rate le sont a burst bien
+     * place (TOA 23, SNR sature), et les bits faux se concentrent sur les
+     * PREMIERS bits d'information (bits 5-15 du mot, 65-84 %), c'est-a-dire le
+     * debut du burst : l'egaliseur demarre sur un front silence -> signal qu'il
+     * ne voit jamais sur silicium. Ici la fenetre entiere (marge, burst, marge)
+     * est modulee d'un seul trait, les marges portant des bits de garde :
+     * 1 = zeros, 2 = pseudo-aleatoires (graine = fn), 3 = uns. 0 = comme avant. */
     if (m_tete >= 0) {
-        memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));
-        gmsk_moduler(bits, 148, amp, phase0, decalage, iq + 2 * m_tete);
-        memset(iq + 2 * (m_tete + 148), 0, (size_t)m_fin * 2 * sizeof(int16_t));
-        *n_iq = 2 * (148 + m_tete + m_fin);
-        burst_iq = iq + 2 * m_tete;
+        static int garde = -2; if (garde == -2) garde = env_int("CELLULE_SB_GARDE", 0);
+        int tot = m_tete + 148 + m_fin;
+        if (type == 'S' && garde > 0 && tot <= 512) {
+            uint8_t ext[512]; uint32_t seed = fn * 2654435761u + 99u;
+            for (int k = 0; k < tot; k++) {
+                int i = k - m_tete;
+                if (i >= 0 && i < 148) ext[k] = bits[i];
+                else if (garde == 1) ext[k] = 0;
+                else if (garde == 3) ext[k] = 1;
+                else { seed = seed * 1103515245u + 12345u; ext[k] = (uint8_t)((seed >> 16) & 1); }
+            }
+            { static double fc = -2; if (fc == -2) { const char *e = calypso_getenv("CELLULE_SB_FC"); fc = (e && *e) ? atof(e) : 0; }
+              if (fc > 0) gmsk_moduler_filtre(ext, tot, amp, phase0, decalage, fc, iq);
+              else gmsk_moduler(ext, tot, amp, phase0, decalage, iq); }
+            *n_iq = 2 * tot;
+            burst_iq = iq;            /* elargissement et bruit sur toute la fenetre */
+            fen_n = tot;
+        } else {
+            memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));
+            { static double fc = -2; if (fc == -2) { const char *e = calypso_getenv("CELLULE_SB_FC"); fc = (e && *e) ? atof(e) : 0; }
+              /* [2026-09-30] CELLULE_SB_FC=<kHz> : chaine de reception modelisee (voir gmsk_moduler_filtre) */
+              if (type == 'S' && fc > 0) gmsk_moduler_filtre(bits, 148, amp, phase0, decalage, fc, iq + 2 * m_tete);
+              else gmsk_moduler(bits, 148, amp, phase0, decalage, iq + 2 * m_tete); }
+            memset(iq + 2 * (m_tete + 148), 0, (size_t)m_fin * 2 * sizeof(int16_t));
+            *n_iq = 2 * (148 + m_tete + m_fin);
+            burst_iq = iq + 2 * m_tete;
+        }
     } else {
         gmsk_moduler(bits, 148, amp, phase0, decalage, iq);
         *n_iq = 2 * 148;
@@ -440,7 +477,32 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
      * l'a pas mesure. */
     if (type == 'S') {
         static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_SB_SYM"); a = (e && *e) ? atof(e) : 0.0; }
-        if (a != 0.0) gmsk_elargir(burst_iq, 148, a);
+        if (a != 0.0) gmsk_elargir(burst_iq, fen_n, a);
+    }
+    /* [2026-09-30] CELLULE_SB_ISI=<h1>[,<h2>[,<h3>]] : la traine CAUSALE de
+     * CELLULE_NB_ISI, sur le SCH. Mesure : les 20 % de SCH rates le sont sur
+     * la moitie AVANT la sequence d'apprentissage, et l'ensemble des rates est
+     * fixe par le contenu (31/33 communs entre deux instants d'echantillonnage).
+     * C'est le mecanisme decrit pour les NB : la ROM choisit la fenetre de son
+     * estimation de canal au maximum d'energie sur des lags, notre GMSK a
+     * 1 ech/symbole met les fenetres a egalite et les donnees voisines
+     * tranchent. Une traine causale (comme le filtre analogique d'un vrai
+     * recepteur) leve l'egalite. Normalisee par 1+sum(h) pour rester en 16 bits. */
+    if (type == 'S') {
+        static int isi_n = -2; static double h[4];
+        if (isi_n == -2) { isi_n = 0; const char *e = calypso_getenv("CELLULE_SB_ISI");
+            if (e && *e) { char tmp[64]; strncpy(tmp, e, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
+                for (char *t = strtok(tmp, ","); t && isi_n < 3; t = strtok(NULL, ",")) h[++isi_n] = atof(t); } }
+        if (isi_n > 0) {
+            double norm = 1.0; for (int d = 1; d <= isi_n; d++) norm += fabs(h[d]);
+            double xi[512], xq[512];
+            for (int k = 0; k < fen_n; k++) { xi[k] = burst_iq[2*k]; xq[k] = burst_iq[2*k+1]; }
+            for (int k = 0; k < fen_n; k++) {
+                double yi = xi[k], yq = xq[k];
+                for (int d = 1; d <= isi_n; d++) if (k - d >= 0) { yi += h[d] * xi[k-d]; yq += h[d] * xq[k-d]; }
+                burst_iq[2*k] = (int16_t)lrint(yi / norm); burst_iq[2*k+1] = (int16_t)lrint(yq / norm);
+            }
+        }
     }
     /* [2026-09-30] CELLULE_SB_NOISE=<sigma> : le meme bruit gaussien sur le SCH
      * (voir CELLULE_NB_NOISE ci-dessous : sans bruit, l'echelle des bits
@@ -449,7 +511,7 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         static double sigma = -2; if (sigma == -2) { const char *e = calypso_getenv("CELLULE_SB_NOISE"); sigma = (e && *e) ? atof(e) : 0.0; }
         if (sigma > 0) {
             uint32_t seed = fn * 2654435761u + 777u;
-            for (int k = 0; k < 296; k++) {
+            for (int k = 0; k < 2 * fen_n; k++) {
                 seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
                 seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;
                 double g = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);

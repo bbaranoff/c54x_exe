@@ -2884,3 +2884,102 @@ Echelle 23/23, 2 echecs :
    Si le ton est dans add_ul : GAPK, firmware et montant.c sont bons, le defaut
    est au pont ou au-dela (capturer le RTP au MGW). S'il n'y est pas : capture
    GAPK ou firmware (a_du).
+
+## 2026-09-30 00:50 — Pourquoi l'USSD (et tout RACH) passe une fois sur trois : la resynchro de gsm322 avant chaque RACH
+
+Run de 00:36 : 10 CHANNEL REQUEST, 3 « LOS during RACH request » ; 7 liberations,
+3 LOST_COVERAGE. Dans chaque cas rate, le RACH n'est pas emis : pas de ligne
+« RANDOM ACCESS », mais deux « FBSB RESP: result=255 » dans la seconde qui suit
+le CHANNEL REQUEST, puis le LOS.
+
+Mecanisme, lu dans osmocom-bb gsm322.c : a chaque sortie de veille
+(GSM322_EVENT_LEAVE_IDLE -> gsm322_c_conn_mode_1/2), la selection de cellule
+refait une synchro FB+SB complete sur la cellule serveuse
+(gsm322_sync_to_cell(cs, NULL, 1)) AVANT le RACH, avec SYNC_RETRIES = 1 essai.
+Idem au retour en veille apres une liberation. Sur silicium c'est instantane
+et sur ; ici la ROM emulee decode le SB ~80 % du temps (apres sb_moduler), donc
+~1 RACH sur 3 tombe en FBSB_ERR -> gsm48_rr_los -> « LOS during RACH », et
+~1 liberation sur 2 laisse le mobile 3-10 s sans cellule. Le `ber= 47-49` des
+lignes MON et le `err~27`/BFI de la parole sont le meme artefact de compteur
+d'erreurs de la ROM sur nos echantillons, sans lien avec ces pertes.
+
+Decision : NE PAS toucher a osmocom-bb (un patch de SYNC_RETRIES par variable
+d'environnement a ete essaye puis retire, aucun binaire installe). Le levier
+est du cote emulation : les 18 % de SCH que la ROM ne decode toujours pas
+(REJEU_DUMP_SOUPLES sur les echecs a SYM=1.0 DEC=0.35 NOISE=3000). Cote banc,
+attendre_service() + le rejeu du barreau (--essais 2) absorbent l'intermittence
+tant qu'elle dure ; le run de 00:36 l'a montre (USSD OK au 2e essai).
+
+## 2026-09-30 01:30 — Les 20 % de SCH restants : ce qui a ete mesure, ce qui ne marche pas, ou chercher
+
+Outils ajoutes au rejeu (tous a 0 par defaut, le rejeu reste la reference) :
+`SBresp` imprime le mot decode meme en CRC faux + TOA/PM/ANGLE/SNR ;
+CELLULE_SB_GARDE (garde continue au lieu du silence), CELLULE_SB_ISI (traine
+causale), CELLULE_SB_AMP (amplitude du seul SCH), CELLULE_SB_FC (GMSK
+sur-echantillonnee + Butterworth ordre 3 + decimation, gmsk_moduler_filtre()).
+Analyse : scratchpad analyse_sb.py (a recopier dans tools/ si utile).
+
+Ce que les traces etablissent (rejeu SYM 1.0, DEC 0.35, bruit 3000, 12000 trames) :
+* les tentatives « fenetre vide » (TOA 43, SNR ~10) sont les tentatives 1, sur
+  la trame FCCH : normal ;
+* les vrais rates (20 %) ont TOA 23, SNR sature ; le mot lu est faux sur ses
+  ~14 premiers bits d'information et juste ensuite : c'est la MOITIE AVANT la
+  sequence d'apprentissage qui est demodulee en garbage, la seconde tient ;
+* l'ensemble des rates est fixe par le CONTENU (31/33 communs entre deux
+  instants d'echantillonnage, 24/33 avec un autre elargissement) ;
+* ce qui discrimine : les bits codes qui BORDENT la sequence (c38 juste avant :
+  P(KO)=10 % si 0, 32 % si 1 ; c40 juste apres : 11 % / 31 %). L'ISI aux bords
+  contamine l'estimation de canal de la ROM, qui equalise la premiere moitie a
+  reculons depuis la sequence ;
+* l'angle (frequence estimee par la ROM, +70 Hz sur un signal a 0 Hz) bouge avec
+  les reglages (+82 a +4 Hz) sans que le taux suive : pas la cause.
+
+Ce qui ne change RIEN (a +-3 %) : amplitude du SCH (3000 a 30000), inversion
+d'un bit code quelconque, garde continue (zeros / aleatoire / uns), instant
+0.2-0.8, elargissement 0.3-2.0, traine causale. Le filtre « realiste »
+(Butterworth 60-220 kHz) fait MOINS bien (44-65 %) : la ROM prefere une ISI
+forte et nette a trois coefficients. Meilleurs jeux sur 12000 trames :
+SYM 0.3 + ISI 0.3,0.1 -> 81 % ; SYM 1.0 + ISI 0.8,0.4 -> 80 % ; SYM 1.0 seul
+-> 77 %. Au banc (run de 00:36), 77 CRC_OK / 104 fenetres SB natives = 74 %.
+
+Ou chercher ensuite : (a) la RE de l'estimation de canal SB de la ROM (quelle
+portion de la sequence elle correlle, sur quels lags, comment elle choisit sa
+fenetre : meme mecanique que le NB, 0x8551) — c'est la ou le contenu decide ;
+(b) cote emulation, une seconde chance : la tentative 1 du firmware tombe sur la
+trame FCCH et ne sert a rien ; le BSP a deja le SCH de la trame suivante dans
+son anneau et pourrait le livrer dans cette fenetre-la aussi (l'offset ARM-tick
+se recale sur la trame ou le SB est reellement livre, comme le fait deja
+calypso_bsp_sb_retenter()) — deux essais par cycle au lieu d'un, si possible
+avec deux formes d'onde dont les ensembles de rates se recouvrent peu.
+REJEU_FN_DEBUT (demarrer a un fn realiste) a ete essaye et retire : la
+recherche FB du rejeu suppose fn depuis 0 (0 FB accepte a fn=100000).
+
+## 2026-09-30 10:45 — « (MO) SMS rejected » : meme cause que l'USSD
+
+Run de 10:33, essai 1 du SMS MO a 10:37:03 : CM SERVICE REQUEST, CHANNEL
+REQUEST, puis « LOS during RACH request », MM avorte (cause 47), le mobile
+affiche « SMS to 100102 failed: (MO) SMS rejected » ; rien n'atteint le MSC.
+Essai 2 a 10:38:30 : RACH, IMMEDIATE ASSIGNMENT, SMS remis. C'est la resynchro
+FB+SB de gsm322 avant chaque RACH (1 essai) qui echoue une fois sur cinq avec
+un SB a ~80 % : le SMS, l'USSD et l'appel y passent tous, le rejeu du barreau
+(--essais 2) l'absorbe. Le fond reste le taux SB (voir 01:30). 80-sms-mo.sh
+garde desormais la sortie VTY de chaque essai (>>).
+
+## 2026-09-30 10:55 — Voix : le ton EST dans le montant, 10 s trop tard ; le test regardait 12 s
+
+Run de 10:33, calypso_add_ul.bin decode par tools/decoder_add.py ul : silence
+(RMS 13-90) pendant 13 s, puis le ton 1 kHz propre (RMS ~13000, 100 % de
+l'energie a 1000 Hz) de t=13 a t=17 s de l'appel. Recale sur l'heure murale
+(pont STATS fn=103984 <-> 10:42:23), le ton monte vers 10:42:21-10:42:28 alors
+qu'il a ete joue de 10:42:11 a 10:42:15 et que l'enregistrement du retour
+s'arretait a 10:42:20 : l'echo ne pouvait pas y etre. Le descendant vu dans la
+fenetre etait l'echo du silence tamponne, reencode.
+Donc : capture GAPK, firmware, a_du, conversion TI -> FR, pont, BTS, echo : tous
+BONS. Le defaut est une LATENCE d'environ 10 s sur le montant : les trames de
+parole montantes ont des trous (ecarts fn de 9 et 13 au lieu de 4-5, ~20 % des
+trames non produites), le codeur consomme l'audio moins vite que le temps reel
+et le tampon de capture grossit. La MGW le voit aussi (« input timestamp
+alignment error » a 10:42:27).
+92-voix.sh : enregistrement 30 s (VOIX_REC_S), recherche du ton sur toute la
+duree, latence dans le verdict. A chercher ensuite : pourquoi ~20 % des trames
+TCH montantes manquent (prendre_ul/a_du vs cadence du firmware, B_PLAY_UL).
