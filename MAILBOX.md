@@ -3027,3 +3027,16 @@ RACH qui ne tombent presque plus en LOS. CALYPSO_BSP_SB_DOUBLE=0 coupe.
 A lire au prochain run : lignes « [sbwin] SECONDE CHANCE ... DECODE / rate »,
 ratio « => SB » / FBSB_REQ dans osmocon.log, « LOS during RACH » dans mobile.log.
 Non teste hors banc : le rejeu ne passe pas par bsp_ts0_service.
+
+## 2026-09-30 11:40 — Seconde chance, run de 11:34 : elle se declenche (43 fois, 30 decodes en tentative 1) mais ne gagnait rien
+
+osmocon : 31 SB / 55 FBSB_REQ, comme avant ; SB1 27, SB2 4. Cause lue dans
+dsp.log : bsp_ts0_livrer() recale l'offset ARM-tick des qu'un SCH part dans
+une fenetre SB ; la livraison de seconde chance (SCH fn+1 au tick de la trame
+FCCH fn) le faisait donc avancer d'une trame AVANT le verdict de la ROM. Quand
+la forme D ratait (13 fois), le tick suivant livrait fn+2 et la tentative 2
+voyait un burst normal (a_sch 8100 0172 86be 0060, TOA 23 SNR 427 = « pas de
+burst ») : D remplacait A au lieu de s'y ajouter. Correctif : offset sauve et
+restaure autour de la livraison de seconde chance ; le recalage n'a lieu qu'au
+tick suivant sur CRC OK lu dans l'API RAM (deja code). Attendu : ~30 + 13 x 0.8
+= ~40 SB sur 43 cycles avec seconde chance.
