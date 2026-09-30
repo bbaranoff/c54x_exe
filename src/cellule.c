@@ -510,7 +510,9 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
     if (type == 'S') {
         static double sigma = -2; if (sigma == -2) { const char *e = calypso_getenv("CELLULE_SB_NOISE"); sigma = (e && *e) ? atof(e) : 0.0; }
         if (sigma > 0) {
-            uint32_t seed = fn * 2654435761u + 777u;
+            static uint32_t graine = 0xffffffffu;   /* CELLULE_SB_NOISE_SEED : autre realisation du bruit */
+            if (graine == 0xffffffffu) graine = (uint32_t)env_int("CELLULE_SB_NOISE_SEED", 0);
+            uint32_t seed = fn * 2654435761u + 777u + graine * 7919u;
             for (int k = 0; k < 2 * fen_n; k++) {
                 seed = seed * 1103515245u + 12345u; double u1 = ((seed >> 8) & 0xffff) / 65536.0 + 1e-6;
                 seed = seed * 1103515245u + 12345u; double u2 = ((seed >> 8) & 0xffff) / 65536.0;

@@ -2983,3 +2983,47 @@ alignment error » a 10:42:27).
 92-voix.sh : enregistrement 30 s (VOIX_REC_S), recherche du ton sur toute la
 duree, latence dans le verdict. A chercher ensuite : pourquoi ~20 % des trames
 TCH montantes manquent (prendre_ul/a_du vs cadence du firmware, B_PLAY_UL).
+
+## 2026-09-30 11:20 — Voix : la boucle marche, echo compris ; le test injectait le ton pendant l'annonce d'Asterisk
+
+Appel de 10:54 (run 10:45), trois chronologies recalees sur l'heure murale
+(pont STATS fn=107288 <-> 10:55:00) :
+* descendant a_dd : 10:54:47 -> 10:55:09, RMS ~3300, raies 200-400 Hz = la VOIX
+  de l'annonce demo-echotest (22 s, /usr/share/asterisk/sounds/en/demo-echotest.gsm),
+  jouee par l'extension 600 (extensions.conf:291-294 : Answer, Playback,
+  Echo(), Playback) ; puis silence quand le montant est silencieux ; puis ce
+  que le micro a capte a 10:55:13-14 revient a 10:55:11-14 + 1-2 s (DL 24 s, 27 s) ;
+* montant a_du : ton 1 kHz propre 10:55:01 -> 10:55:05 pour un paplay
+  10:54:59 -> 10:55:03 : latence montant ~2 s sur ce run (2000 trames UL pour
+  1880 attendues, aucun trou). Les 10 s de 10:42 venaient des ~20 % de trames
+  UL manquantes de ce run-la (file de capture qui grossit) : intermittent, a
+  garder a l'oeil, pas bloquant ;
+* le « ton retrouve a t=8 s, 19 % » du verdict etait la voix de l'annonce.
+Donc micro, GAPK, firmware, montant.c, pont, BTS, MGW, Asterisk, echo, ROM,
+mobile, sortie audio : TOUS bons. Le banc tirait 19 s trop tot.
+92-voix.sh : attend le silence descendant (fin d'annonce, VOIX_ATTENTE_ANNONCE_S,
+30 s max) avant la reference et le ton ; enregistrement 15 s (VOIX_REC_S).
+Le BFI a 100 % reste un artefact de compteur (a_dd bit-exact, firmware ne le lit pas).
+
+## 2026-09-30 11:05 — SB : deux formes d'onde, deux tentatives ; la « seconde chance » est codee
+
+Rejeu, 8000 trames, 209 SCH, neuf variantes de forme d'onde comparees par
+l'ensemble de leurs SCH rates (SBresp, snr > 1000) :
+* A (SYM 1.0, DEC 0.35, bruit 3000) : 42 rates (20 %) ; D (A + traine causale
+  0.8, 0.4) : 35 (17 %) ; E (SYM 0.3 + traine 0.3, 0.1) : 35 ;
+* la meme forme A avec une autre graine de bruit : 61 et 57 rates, dont
+  seulement 19-22 communs avec A -> les rates sont en bonne partie MARGINAUX ;
+* rates communs des meilleures paires : A+D 15 (7 %), C+D 16, A3+C 17 ;
+  triplets : 8-10 (4-5 %).
+Le firmware poste deja deux taches SB sur deux trames consecutives, mais la
+premiere tombe sur la trame FCCH. calypso_bsp.c (bsp_ts0_service) : quand la
+trame a jouer est un FCCH et que la DMA est armee en one-shot >= 190 (fenetre
+SB de la tentative 1), on livre le SCH de la trame suivante (deja dans
+l'anneau) en forme D ; au tick suivant on lit a_sch dans l'API RAM (B_BLUD sans
+CRC, T2 <= 25, T3' <= 4) : decode -> offset ARM-tick recale d'une trame
+(fn_sch - tick), flux contigu ; rate -> le SCH natif part en tentative 2 en
+forme A. Attendu : ~93 % de cycles FBSB reussis au lieu de ~80 %, donc des
+RACH qui ne tombent presque plus en LOS. CALYPSO_BSP_SB_DOUBLE=0 coupe.
+A lire au prochain run : lignes « [sbwin] SECONDE CHANCE ... DECODE / rate »,
+ratio « => SB » / FBSB_REQ dans osmocon.log, « LOS during RACH » dans mobile.log.
+Non teste hors banc : le rejeu ne passe pas par bsp_ts0_service.
