@@ -316,6 +316,7 @@ fini:
 
     uint16_t prec_cd = 0xffff, prec_fd = 0xffff;
     int sacch_ok = 0, sacch_ko = 0;
+    uint16_t prec_dd = 0; unsigned long parole_n = 0, parole_bfi = 0, parole_err = 0;
     for (int it = 0; it < nt && it < max_ticks; it++) {
         Tick *t = &ticks[it];
         g_c54x_exe_fn = t->tick;
@@ -375,6 +376,7 @@ fini:
             if (!dsp->idle) courir(budget / 4);
         }
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2];
+        uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0 : parole descendante */
         {   static int dit;
             if (!dsp->idle && dit < 5) { dit++; printf("tick=%u : DSP PAS A L'IDLE en fin de tick, pc=%04x sp=%04x\n", t->tick, dsp->pc & 0xffff, dsp->sp); } }
         {   /* REJEU_DUMP=t1-t2,dossier : memoire de donnees du DSP en fin de tick */
@@ -400,8 +402,17 @@ fini:
         if (fd[0] != prec_fd && (fd[0] & 0x8000))
             printf("tick=%u FACCH a_fd0=%04x %s L2=%02x %02x %02x\n", t->tick, fd[0],
                    (fd[0] & (1u << 6)) ? "FIRE KO" : "ok", fd[3] & 0xff, fd[3] >> 8, fd[4] & 0xff);
-        prec_cd = cd[0]; prec_fd = fd[0];
+        /* [2026-09-30] a_dd_0 : B_BLUD (bit 15), B_BFI (bit 2), mot 2 = erreurs
+         * rapportees par la ROM. Une ligne par trame de parole (REJEU_PAROLE=1)
+         * et un bilan ; sert a etudier le B_BFI hors banc. */
+        if (dd[0] != prec_dd && (dd[0] & 0x8000)) {
+            parole_n++; if (dd[0] & 0x4) parole_bfi++; parole_err += dd[2];
+            if (getenv("REJEU_PAROLE"))
+                printf("tick=%u PAROLE a_dd0=%04x BFI=%d err=%u\n", t->tick, dd[0], (dd[0] & 0x4) ? 1 : 0, dd[2]);
+        }
+        prec_cd = cd[0]; prec_fd = fd[0]; prec_dd = dd[0];
     }
     printf("SACCH : %d bonnes, %d Fire KO\n", sacch_ok, sacch_ko);
+    if (parole_n) printf("PAROLE : %lu trames, %lu BFI, %.1f erreurs/trame\n", parole_n, parole_bfi, (double)parole_err / parole_n);
     return 0;
 }

@@ -3080,3 +3080,72 @@ en canal dedie (g_dedie_tn > 0). Le taux SB revient a ~74-80 % par SCH et le
 RACH retombe a ~1 echec sur 5, absorbe par --essais 2 et attendre_service().
 L'echec de l'appel de 11:42 (FACCH descendante non decodee par la ROM, SABM
 repete, UA emis par la BTS) est independant : intermittent, point du 23/09.
+
+## 2026-09-30 12:45 — Le ton casse le son : IT trame perdue, compteur TDMA du firmware decale d'une trame ; correctif dans qosmo (INTH + pont QEMU)
+
+Symptome (appels de 12:09, run 11:57, et de 12:26, manuel) : des que le ton est
+injecte dans gsm_mic, la parole descendante devient du bruit (a_dd err 20-30 ->
+70-95, FIRE), la ROM leve des FACCH a faux (a_fd BLUD=1 FIRE=1 a chaque bloc),
+la SACCH/TF ne passe plus (LOSS 31 -> 0), LOS ~15 s plus tard. Le montant
+s'effondre en meme temps (a_du une trame sur trois). Le pont, lui, garde sa
+marge DL (min +13) et le DSP tient 4,62 ms/trame.
+Preuve : la trace [a5] passe de « ecart +1 » (COUNT = dernier depot + 1, regime
+de tous les appels reussis) a « ecart 0 » exactement au moment de la bascule
+(#20500 fn=53467 le 12:26 ; #30500 fn=153420 le 12:09, avec alternance 0/+1
+pendant ~1000 trames puis 0 pour de bon). Ecart 0 = la ROM lit une page W dont
+a_a5fn vaut fn-1 : le firmware est UNE TRAME EN RETARD sur l'interface radio.
+Il n'y a pas de correction possible de son cote : osmocom-bb ne detecte pas une
+IT trame manquee, l1s.next_time avance d'une unite par l1_sync(). Une IT trame
+perdue = glissement permanent jusqu'a la fin du canal.
+Comment on la perdait : calypso_trx.c leve l'IT trame TPU (IRQ 4) en impulsion
+de 1 ms (FRAME_IRQ_PULSE_NS) ; le firmware la configure sur FRONT
+(irq_config(IRQ_TPU_FRAME, 1, 1, 0)), mais le modele INTH (hw/intc/
+calypso_inth.c) effacait le bit IT_REG a la retombee de la ligne, comme une
+source de niveau. Si l'ARM etait dans un traitement de plus d'1 ms sous IRQ
+masquees -- la reception UART/L1CTL des TRAFFIC_REQ, en rafales quand paplay
+alimente le puits nul --, l'IT etait perdue ; au bout de 256 attentes (74 ms,
+la creux de -12 trames que le pont voit a 12:10:07) le GO etait envoye « quand
+meme » et la cible d'EOI recalee : le glissement s'installait sans une ligne
+de plus (le message n'etait imprime qu'une fois par run).
+Correctif (qosmo, l'ARM et la ROM ne bougent pas) :
+* calypso_inth.c : une source configuree sur front (ILR bit 1) parmi 4/5/15
+  reste memorisee jusqu'a la lecture d'IRQ_NUM. Plus d'IT trame perdue.
+  Accesseur calypso_inth_irq_pending().
+* calypso_trx.c : au-dela de 256 attentes, on n'envoie plus le GO avec une
+  page perimee ; on attend l1_sync jusqu'a 32 x 256 essais (~2,4 s) en servant
+  les UART, avec trace « on attend au lieu de forcer le GO » puis « finie apres
+  N attentes » (20 premieres). Le temps mural perdu se paye en trames BTS trop
+  tardives chez le BSP (perte radio, que le firmware sait absorber), pas en
+  glissement TDMA. Le forcage ne reste que pour un ARM mort (message aux 20
+  premieres puis toutes les 2170).
+A verifier au prochain run (redemarrage de la pile : barreau 1) : [a5] ecart +1
+sur tout l'appel voix, qemu.log sans « GO envoye quand meme », et le ton qui
+revient (92-voix). Si des « on attend » apparaissent dans qemu.log, leur duree
+dit combien l'ARM est en retard a l'injection du ton.
+Note : le modele INTH decode ILR a l'envers du firmware (FIQ lu au bit 8, prio
+aux bits 0-4, alors que le firmware ecrit prio<<2 | edge<<1 | fiq) : l'IT trame
+est servie comme IRQ et non comme FIQ, donc elle ne preempte pas le traitement
+UART -- c'est ce qui rend le retard possible. Pas touche : la comptabilite EOI
+(frame_eoi sur IRQ_NUM) en depend. A reprendre si le retard reste visible.
+
+Reponses aux points de couverture demandes :
+* « retour BSP sur le SDCCH : NON OBSERVE » : normal. montant.c ne rend le
+  SDCCH au BSP que si le firmware reposte une tache ALLC pendant un TCH, ce
+  qui n'arrive que sur ASSIGNMENT FAILURE (retour a l'ancien canal, 04.08
+  3.4.3.3, vu une fois le 11:42). Un appel normal finit par CHANNEL RELEASE.
+  Ligne de 99-couverture.sh annotee « attendu absent ».
+* « TCH/F descendant : qualite (B_BFI) NON GERE » : la sonde [a_dd] montre
+  BFI=1 sur 100 % des trames, y compris err=0, et err ~28 en regime normal
+  (~6 % de 456, soit un burst sur huit a moitie faux ou 3-4 bits en bord de
+  chaque burst) alors que les 260 bits sont exacts. Le BFI est donc une
+  metrique de qualite de la ROM sur des bursts synthetiques trop propres ou
+  mal bordes, pas une erreur de donnees. Outillage pose pour l'etudier hors
+  banc : tools/rejeu_banc (recompile, sans cible Makefile : commande dans
+  README) imprime desormais a_dd (BFI, erreurs ; REJEU_PAROLE=1 par trame) ;
+  l'enregistrement /dev/shm/calypso_rejeu_tch.bin peut se limiter au TCH
+  (CALYPSO_REJEU_ENREG=tch) et son plafond se regler (CALYPSO_REJEU_ENREG_MAX)
+  -- le run de 11:57 avait rempli ses 60000 livraisons avec les SDCCH du debut
+  (fn 1376..34942), aucun TCH dedans. Le rejeu de cet enregistrement donne
+  23 SACCH/8 toutes Fire KO avec err 79-100 la ou le banc les decodait : le
+  rejeu n'est pas encore fidele sur le SDCCH (Kc / etat 'D' ?), a regarder
+  avant de s'en servir pour le BFI.
