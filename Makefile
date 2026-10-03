@@ -60,7 +60,37 @@ tools/isa_tests.txt: tools/isa_examples.py
 isa_test: tools/isa_test.c src/pcb-minimal.c $(COEUR) tools/isa_tests.txt
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ tools/isa_test.c src/pcb-minimal.c $(COEUR) $(LDLIBS)
 
-clean:
-	rm -f c54x_exe isa_test
+# layer1_tester : adresses et fonctions de l'interface layer1 <-> ROM, carte
+# docs/carte-memoire.md. Ne reconstruit PAS c54x_exe. Le coeur est lie SANS
+# calypso_mailbox.c : tools/layer1_tester.c fournit calypso_mbx_evt, le crochet
+# de chaque acces DSP ; fopen/open/socket/sendto sont enveloppes (rien n'est
+# ecrit hors du fichier de sortie, aucune socket).
+#   make layer1_tester && python3 tools/layer1_tester.py [--rejeu FICHIER] [--md docs/carte-memoire.md]
+#   make api_carte [REJEU=FICHIER]      (alias : regenere docs/carte-memoire.md)
+L1T_COEUR := $(filter-out $(L1DSP)/calypso_mailbox.c,$(COEUR))
+L1T_WRAP  := -Wl,--wrap=fopen,--wrap=open,--wrap=socket,--wrap=sendto,--wrap=calypso_a5_portw,--wrap=calypso_a5_portr
+REJEU     ?=
+tools/layer1_tester: tools/layer1_tester.c src/pcb-minimal.c $(L1T_COEUR) $(HDR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ tools/layer1_tester.c src/pcb-minimal.c $(L1T_COEUR) $(LDLIBS) $(L1T_WRAP)
 
-.PHONY: all clean
+layer1_tester: tools/layer1_tester
+
+api_carte: tools/layer1_tester
+	python3 tools/layer1_tester.py $(if $(REJEU),--rejeu $(REJEU)) --md docs/carte-memoire.md
+
+# Testeur de fonctions du DSP (tools/dsp_tester.c) : l'ARM osmocom-bb et la BTS
+# sont simules (tools/dsp_banc_commun.c), une ligne PASS/FAIL/NON-IMPL par
+# tache DSP. Ne reconstruit PAS c54x_exe.
+#   make dsp_tester && ./dsp_tester --all
+# Les structures de l'API RAM et la table de parametres sont celles du firmware
+# osmocom-bb (dsp_api.h, dsp_params.c), lues dans son arbre.
+OSMOBB  ?= /opt/GSM/osmocom-bb/src/target/firmware
+BANC_CPPFLAGS := -idirafter $(OSMOBB)/include/calypso -idirafter $(OSMOBB)/calypso
+BANC    := tools/dsp_banc_commun.c src/pcb-minimal.c src/verbosite.c
+dsp_tester: tools/dsp_tester.c $(BANC) tools/dsp_banc_commun.h $(COEUR) $(HDR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc $(BANC_CPPFLAGS) -o $@ tools/dsp_tester.c $(BANC) $(COEUR) $(LDLIBS)
+
+clean:
+	rm -f c54x_exe isa_test tools/layer1_tester dsp_tester
+
+.PHONY: all clean layer1_tester api_carte

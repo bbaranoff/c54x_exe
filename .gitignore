@@ -1,6 +1,7 @@
 # build products (make) — never commit binaries
 /c54x_exe
 /isa_test
+/dsp_tester
 /tch_now
 /tools/rejeu_banc
 /tools/sacch_tf_decode
