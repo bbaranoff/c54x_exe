@@ -99,6 +99,21 @@ LOCATION UPDATING ACCEPT. Reglages : `MONTANT=0` coupe la publication,
 `MONTANT_RACH_SUR_DRACH=1` revient a l'ancien declencheur (transition de
 `d_rach` au lieu de `d_task_ra`).
 
+[2026-10-03] **Le codage canal SDCCH/SACCH montant est celui de la ROM.** La ROM
+code le bloc posé dans `a_cu` (parité FIRE en PROM0 `0x9013`, convolutif,
+entrelacement dans `0x4280`) et, à chaque trame d'émission, copie le burst courant
+dans `data[0x3f8a..0x3f91]` (114 bits + hl/hu ; en mode chiffré, le flux A5 de
+`0x3f9b..` y est XORé). `src/pont.c` (`tx_rom_publier`) suit le pointeur
+`data[0x3d9b]` et publie les 4 bursts d'un bloc, avec le flux de clé, dans
+`/dev/shm/calypso_xcch_ul_rom`. Le pont (`pont/dsp/uplink.py`) les redécode, défait
+le XOR de la ROM (elle chiffre à l'heure du DSP) et les émet rechiffrés au fn de
+l'air ; sans bursts ROM au bout de 120 ms, il code le bloc lui-même. Banc du
+2026-10-03 17:11 : `xCCH ul rom=134 hote=1`, échelle 25/25. Il a fallu corriger
+quatre bugs du cœur C54x (qosmo `c54x_exec.c`, voir README anglais). Restent sur
+l'hôte : RACH, FACCH, SACCH en TCH, parole et A5 montants. `MONTANT_ROM_UL=0` /
+`PONT_UL_ROM=0` reviennent au codage hôte. Le barreau couverture du banc imprime,
+traitement par traitement, le chemin ROM ou hôte du run.
+
 [2026-09-23] Aussi dans `montant.c` :
 - le Kc, publie dans `/dev/shm/calypso_kc_l1` (`MONTANT_KC=0` coupe) ;
 - la parole montante, au format TI (`io-tch-format ti`), est convertie en FR
@@ -297,6 +312,28 @@ refaire la divergence que `qosmo` vient de supprimer. La seule copie est
 signalée comme telle dans le fichier.
 
 ## Ce que ça mesure, et ce que ça ne mesure pas encore
+
+**État au 2026-10-03 (bancs DSP de 16:49, 17:04 et 17:11, échelle camp → voix
+25/25).** Chemin vérifié dans le code et les journaux : **tout le décodage
+descendant est fait par la ROM** (`a_cd`, `a_fd`, `a_dd` lus tels quels par le
+firmware ; en dsp le décodage du pont ne sert qu'à ses STATS, `pont/dsp/downlink.py`),
+la seule retouche hôte est la référence de requête des IMMEDIATE ASSIGNMENT
+(qosmo `calypso_trx.c`). Le montant SDCCH/SACCH est codé par la ROM (ci-dessus).
+Mises à jour des points ouverts ci-dessous :
+- **B_BFI** : toujours posé sur 100 % de la parole (`bfi=2600/2600`), mais
+  `err` vaut désormais **0 partout** (46 lignes du run, 7 archives du jour) —
+  les « 15 à 93 » du 2026-09-23 sont périmés. Dès le premier bloc après la
+  bascule (incomplet, le TCH/F s'entrelace sur 8 bursts) on lit déjà
+  `BFI=1 err=0` : le BFI ne suit pas la qualité réelle. Parole exacte
+  (+59 dB à 1 kHz au test voix ; bit-exactitude mesurée le 2026-09-30, à
+  re-mesurer avec le cœur corrigé). États `c214`/`c204`, bit 9 (B_ECRC) posé
+  en FR V1 : à suivre ;
+- SACCH en TCH : aucune LOS, aucune `[garde-3d89]` sur les runs du jour ;
+- SDCCH/8 descendant : la SACCH/8 échoue au FIRE ~80 % du temps
+  (`[a_cd] ok=113 ko=37`, 95 trames jetées par le mobile) ;
+- fenêtre SB : `44/3630` fenêtres SB réellement armées ;
+- marge temps réel : en TCH, A 0.19 + go 0.30 + B 0.07 + après DONE 2.09 ms.
+
 
 **État au 2026-09-23 (runs du banc DSP de 20:22 et 20:32).** En montage dsp
 avec la BTS (`PONT=1`), le DSP détecte FB et SB, décode les BCCH (SI1-4), le

@@ -3149,3 +3149,30 @@ Reponses aux points de couverture demandes :
   23 SACCH/8 toutes Fire KO avec err 79-100 la ou le banc les decodait : le
   rejeu n'est pas encore fidele sur le SDCCH (Kc / etat 'D' ?), a regarder
   avant de s'en servir pour le BFI.
+
+## 2026-10-03 — Montant : la ROM code tout le SDCCH ; 4e bug du cœur ; bursts 0x3f8a branchés sur le pont ; chemin ROM/hôte
+
+* Les 56 bits « non matérialisés » de la parité FIRE montante étaient faux, pas
+  absents : la sortie ROM est un code convolutif auto-cohérent, la parité avait
+  ses 24 bits hauts à 0. La routine FIRE (PROM0 0x9013) rend la bonne parité
+  dans A ; le rangement `0x8bc6 f1b0 = OR A,-16,B` était volé par un faux
+  décodage « F0Bx/F1Bx = RSBX/SSBX » (vrais : F4B0/F5B0). Corrigé dans qosmo
+  (1e47cd72, gate CALYPSO_F0BX_SBIT=1 = ancien). Banc : camp→voix 25/25.
+* Les 2 bits « faux » restants (burst 0, bits 112-113) : la sérialisation TX
+  de la ROM (0x890e-0x891b) copie chaque trame le burst courant vers
+  data[0x3f8a..0x3f91] puis met à 0 son mot 7 dans 0x4280. 0x3f8a = burst
+  émis ; trace d'un bloc ff×23 : 4 bursts = gsm0503_xcch_encode bit à bit.
+* Branché : c54x_exe 44b1ec8 (tx_rom_publier, /dev/shm/calypso_xcch_ul_rom,
+  avec le flux A5 montant que la ROM XORe sur 0x3f8a en chiffré), pont
+  78c6de6 (UplinkDsp._bursts_xcch : redécode, défait le XOR, rechiffre au fn
+  de l'air, repli hôte après 120 ms). Banc 17:11 : xCCH ul rom=134 hote=1,
+  25/25. Le premier essai sans flux A5 : rom=33 hote=79 (tout bloc chiffré
+  refusé).
+* Tests 77b0baf : section « chemin ROM / hôte » dans 99-couverture.sh.
+  Run 17:11 : 6 ROM (FB, SCH, a_cd, a_fd, a_dd, A5 DL), 7 hôte (IMM ASS
+  retouché, RACH, A5 UL, FACCH UL, SACCH TCH UL, parole UL, vocodage),
+  1 mixte (SDCCH UL, 1 bloc sur 135 codé hôte).
+* Descendant vérifié (lecture des sources + journaux) : tout décodé par la
+  ROM ; le BFI de la parole est posé à tort (err=0 partout, BFI=1 dès le 1er
+  bloc incomplet) ; SACCH/8 DL ~80 % FIRE KO. Prochaine cible : l'instruction
+  ROM qui pose B_BFI dans a_dd_0.
