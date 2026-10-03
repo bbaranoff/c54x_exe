@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include "hw/arm/calypso/calypso_api.h"
@@ -488,10 +489,13 @@ static void scruter_dcch(uint32_t fn)
 {
     static int fd = -2;
     static uint32_t seq;
-    static uint32_t prochain_essai;
+    static uint32_t dernier_essai = UINT32_MAX;
 
     if (fd < 0) {
-        if (fn < prochain_essai) {
+        /* [2026-10-03] Un essai d'ouverture par trame au plus. L'ancienne garde `fn < prochain_essai`
+         * n'etait pas modulaire : apres le bouclage de l'hypertrame (~3 h 29) elle bloquait toute
+         * reouverture jusqu'a ce que fn rattrape l'ancienne valeur (revue de code 2026-10-03). */
+        if (fn == dernier_essai) {
             return;
         }
         /* [2026-09-23] A CHAQUE TRAME, plus toutes les 200. run.sh efface les
@@ -502,7 +506,7 @@ static void scruter_dcch(uint32_t fn)
          * 113 a 164 trames avant que l'annonce soit lue (« sans annonce du
          * pont »), l'UA de l'assignation se perdait, ASSIGNMENT FAILURE. Un
          * open() qui echoue coute une microseconde. */
-        prochain_essai = fn + 1;
+        dernier_essai = fn;
         fd = open("/dev/shm/calypso_dcch_cfg", O_RDONLY);
         if (fd < 0) {
             return;
@@ -630,7 +634,7 @@ static bool tch_sur_tache(void)
 static void scruter_tch(uint32_t fn)
 {
     static int fd = -1, coupe = -1;
-    static uint32_t seq, prochain_essai;
+    static uint32_t seq, dernier_essai = UINT32_MAX;
 
     if (coupe < 0) {
         const char *e = calypso_getenv("MONTANT_TCH");
@@ -640,10 +644,10 @@ static void scruter_tch(uint32_t fn)
         return;
     }
     if (fd < 0) {
-        if (fn < prochain_essai) {
+        if (fn == dernier_essai) {          /* voir scruter_dcch */
             return;
         }
-        prochain_essai = fn + 1;            /* voir scruter_dcch */
+        dernier_essai = fn;
         fd = open("/dev/shm/calypso_tch_cfg", O_RDONLY);
         if (fd < 0) {
             return;
@@ -1226,7 +1230,17 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             api_ram[(API_NDB + NDB_D_RACH) / 2] = 0;
             g.prev_rach = 0;
         }
-        if (task_ra) {
+        /* [2026-10-03] Effacement de d_task_ra dans la page W : la ROM ne voit donc jamais la tache RACH
+         * (elle la lirait a la trame suivante) et n'execute pas le RACH ; c'est le pont qui emet
+         * l'access-burst (side-band calypso_rach). Ecart assume, desormais reglable :
+         * MONTANT_EFFACE_TASK_RA=0 laisse la tache a la ROM (comportement d'un vrai Calypso, a valider). */
+        static int efface_ra = -1;
+        if (efface_ra < 0) {
+            const char *e = calypso_getenv("MONTANT_EFFACE_TASK_RA");
+            efface_ra = (e && *e == '0') ? 0 : 1;
+            if (!efface_ra) printf("  [montant] MONTANT_EFFACE_TASK_RA=0 : d_task_ra laisse a la ROM\n");
+        }
+        if (task_ra && efface_ra) {
             wp[WP_D_TASK_RA / 2] = 0;   /* comme qosmo-dsp/calypso_trx.c:1955 */
         }
     }
