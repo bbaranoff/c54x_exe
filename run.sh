@@ -45,7 +45,7 @@ MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
 GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (etape 2)
 GDB_STUB="${GDB_STUB:-1234}"
 GDB_TELNET="${GDB_TELNET:-44444}"
-GDB_TELNET_PY="${GDB_TELNET_PY:-/opt/GSM/qosmo-dsp/tools/gdb-telnet.py}"
+GDB_TELNET_PY="${GDB_TELNET_PY:-$QOSMO/tools/gdb-telnet.py}"   # [2026-10-03] etait /opt/GSM/qosmo-dsp/... (depot disparu)
 INSNS="${INSNS:-16000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
