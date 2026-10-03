@@ -550,6 +550,79 @@ static void tx_ombre_compare(const C54xState *dsp, uint32_t fn)
     fflush(stdout);
 }
 
+/* [2026-10-03] BURSTS MONTANTS xCCH EMIS PAR LA ROM -> pont.py.
+ * A chaque trame d'emission, la ROM (PROM0 0x890e-0x891b) copie le burst courant du tampon circulaire
+ * 0x4280..0x429f (BK=32, 4 bursts de 8 mots) vers data[0x3f8a..0x3f91] : 114 bits + hl/hu dans les 2 bits
+ * bas du mot 7, MSB d'abord ; puis remet a 0 le mot 7 du burst dans 0x4280 et range le pointeur avance de
+ * 8 dans data[0x3d9b] (mvkd ar2,@0x1b, DP=0x7b). Le codage d'un bloc remet ce pointeur a 0x4280
+ * (0x8820). Un changement de data[0x3d9b] en fin de trame = un burst vient de partir ; son rang est
+ * ((p - 0x4280)/8 + 3) & 3. Mesure (trace du bloc ff x23) : les 4 copies dans 0x3f8a sont
+ * gsm0503_xcch_encode bit a bit.
+ * Les 4 bursts d'un bloc sont publies ensemble dans /dev/shm/calypso_xcch_ul_rom (anneau, format :
+ * pont/dsp/uplink.py), avec le L2 pose dans a_cu juste avant le burst 0 (pour le journal ; le pont
+ * ne s'y fie pas, il redecode les bursts). En mode chiffre la ROM XORe le flux de cle A5 montant
+ * (data[0x3f9b..0x3fa2], calypso_a5.c) sur 0x3f8a meme : on publie ce flux a cote des bits, le pont
+ * defait le XOR (la ROM chiffre a l'heure du DSP, pas au fn ou le pont emet) et rechiffre au fn de
+ * l'air. MONTANT_ROM_UL=0 coupe la publication. */
+#define ROM_UL_SHM      "/dev/shm/calypso_xcch_ul_rom"
+#define ROM_UL_SLOTS    8
+#define ROM_UL_SLOT_SZ  1024    /* seq(4) fn(4) l2(23) .(1) bits(4 x 116 ubits) flux(4 x 116 ubits) */
+#define ROM_UL_FLUX     0x3f9b  /* flux de cle A5 montant que la ROM XORe sur 0x3f8a (PROM0 0x85d1) */
+#define ROM_UL_PTR      0x3d9b
+#define ROM_UL_BURST    0x3f8a
+static uint8_t g_romul_l2_pose[23];     /* dernier L2 pose dans a_cu (tx_rom_pose) */
+static void tx_rom_pose(const uint16_t *api_ram, int blud_avant)
+{
+    if (!blud_avant) return;
+    const uint16_t *w = &api_ram[(API_NDB + NDB_A_CU) / 2];
+    for (int i = 0; i < 23; i++)
+        g_romul_l2_pose[i] = (uint8_t)(i & 1 ? w[3 + i / 2] >> 8 : w[3 + i / 2] & 0xff);
+}
+static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
+{
+    static int actif = -1, fd = -1;
+    static uint16_t prev;
+    static unsigned masque;
+    static uint8_t l2[23], bits[4 * 116], flux[4 * 116];
+    static uint32_t w_compte, fn0;
+    if (actif < 0) {
+        const char *e = calypso_getenv("MONTANT_ROM_UL"); actif = !(e && *e == '0');
+        prev = dsp->data[ROM_UL_PTR];
+        printf("  [rom-ul] bursts xCCH montants de la ROM (0x3f8a) -> %s : %s\n", ROM_UL_SHM, actif ? "actif" : "coupe (MONTANT_ROM_UL=0)");
+    }
+    if (!actif) return;
+    uint16_t p = dsp->data[ROM_UL_PTR];
+    if (p == prev) return;
+    prev = p;
+    if (p < 0x4280 || p >= 0x42a0 || (p - 0x4280) % 8) { masque = 0; return; }
+    unsigned b = ((p - 0x4280) / 8 + 3) & 3;
+    if (b == 0) { masque = 0; memcpy(l2, g_romul_l2_pose, 23); fn0 = fn; }
+    uint8_t *o = &bits[b * 116], *x = &flux[b * 116];
+    for (int i = 0; i < 116; i++) {
+        int k = i < 57 ? i : (i < 59 ? 114 + (i - 57) : i - 2);   /* 57 donnees, hl, hu, 57 donnees */
+        o[i] = (dsp->data[ROM_UL_BURST + k / 16] >> (15 - k % 16)) & 1;
+        x[i] = (dsp->data[ROM_UL_FLUX + k / 16] >> (15 - k % 16)) & 1;
+    }
+    masque |= 1u << b;
+    if (b != 3) return;
+    if (masque != 0xf) { masque = 0; return; }
+    masque = 0;
+    if (fd < 0) {
+        fd = open(ROM_UL_SHM, O_RDWR | O_CREAT, 0666);
+        if (fd < 0 || ftruncate(fd, 8 + ROM_UL_SLOTS * ROM_UL_SLOT_SZ) < 0) { actif = 0; return; }
+        uint32_t h[2] = { 0, ROM_UL_SLOTS };
+        if (pwrite(fd, h, sizeof h, 0) < 0) { actif = 0; return; }
+    }
+    uint8_t slot[ROM_UL_SLOT_SZ] = {0};
+    w_compte++;
+    memcpy(slot, &w_compte, 4); memcpy(slot + 4, &fn0, 4);
+    memcpy(slot + 8, l2, 23); memcpy(slot + 32, bits, sizeof bits); memcpy(slot + 32 + sizeof bits, flux, sizeof flux);
+    off_t off = 8 + (off_t)((w_compte - 1) % ROM_UL_SLOTS) * ROM_UL_SLOT_SZ;
+    if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
+    static int nlog;
+    if (nlog++ < 4) printf("  [rom-ul] bloc %u publie (fn burst0=%u, L2=%02x %02x %02x..)\n", w_compte, fn0, l2[0], l2[1], l2[2]);
+}
+
 static int c54x_run_profile(C54xState *dsp, int budget)
 {
     int fait = 0;
@@ -1830,12 +1903,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * et on alimente les memes side-bands /dev/shm qu'en montage grgsm. */
             tx_inject_sortie(dsp, m.a);
             tx_ombre_compare(dsp, m.a);
+            tx_rom_publier(dsp, m.a);
             tx_sonde_apres(dsp, api_ram, m.a);
             dsp_global_tx = dsp;
             { int blud_avant = (api_ram[(API_NDB + NDB_A_CU) / 2] & B_BLUD) != 0;
               montant_scruter(api_ram, m.a, m.b & 1u);
               tx_inject_apres(api_ram, m.a, blud_avant);
-              tx_ombre_pose(api_ram, blud_avant && g_inj_n <= 0); }
+              tx_ombre_pose(api_ram, blud_avant && g_inj_n <= 0);
+              tx_rom_pose(api_ram, blud_avant); }
             trames++;
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
