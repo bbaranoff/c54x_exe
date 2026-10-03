@@ -14,6 +14,11 @@
  * Si le rejeu reproduit le Fire KO du banc, on peut iterer ici sans relancer
  * le banc ; REJEU_SANS_D=1 garde l'etat du boot local au lieu de 'D'.
  *
+ * Diagnostic (avec REJEU_TRACE=1) : REJEU_STOP_W=adr (ecritures d'un mot, PC fautif), REJEU_STOP_NW=n
+ * (nombre d'ecritures avant arret, 6), REJEU_ANNEAU_W=n (n instructions avant la 1re ecriture),
+ * REJEU_STOP_PC=pc, REJEU_STOP_TMIN=tick (ignorer avant ce tick), REJEU_PEEK=adr:n,... (memoire au
+ * point d'arret). L'API RAM est dsp->data[0x0800..] : a_dd_0 = 0x09f0.
+ *
  *   ./rejeu_banc [fichier] [ticks max]
  */
 #include <stdio.h>
@@ -171,6 +176,7 @@ static void sonde_bloc(uint32_t fn_dernier)
 /* REJEU_TRACE=1 : pas a pas, anneau des dernieres instructions, arret des que
  * SP sort de la pile ou que PC tombe en DARAM basse (< 0x0800, hors OVLY). */
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
+uint16_t data_read(C54xState *s, uint16_t addr);
 #define ANNEAU 4096
 static struct { uint16_t pc, op, op2, sp, st0, st1, ar[8]; uint32_t tick; int64_t a, b; } anneau[ANNEAU];
 static unsigned apos;
@@ -178,7 +184,20 @@ static int trace_on = -1, plante;
 static long courir(long n)
 {
     if (trace_on < 0) trace_on = getenv("REJEU_TRACE") != NULL;
-    if (!trace_on) return c54x_run(dsp, (int)n);
+    /* [2026-10-03] Boucler jusqu'au budget, comme le banc (pont.c c54x_run_profile) : c54x_run rend la
+     * main de lui-meme a un point interruptible au bout de CALYPSO_DSP_YIELD instructions (32768 par
+     * defaut). Un seul appel perdait le reste du budget de chaque phase : le DSP ne finissait pas son
+     * travail (SACCH 70 bonnes / 69 Fire KO, a_dd[2] jamais ecrit = FFFF, BFI=0) la ou le banc et le pas
+     * a pas donnent SACCH 132/33 et BFI 2654/2654. */
+    if (!trace_on) {
+        long k = 0;
+        while (k < n && dsp->running && !dsp->idle) {
+            int r = c54x_run(dsp, (int)(n - k));
+            if (r <= 0) break;
+            k += r;
+        }
+        return k;
+    }
     long k = 0;
     for (; k < n && dsp->running && !dsp->idle && !plante; k++) {
         unsigned i = apos++ & (ANNEAU - 1);
@@ -191,7 +210,8 @@ static long courir(long n)
         if (wa >= 0) wv = dsp->data[wa];
         c54x_run(dsp, 1);
         uint16_t npc = dsp->pc & 0xffff;
-        if (wa >= 0 && dsp->data[wa] != wv) {
+        static long tmin = -2; if (tmin == -2) { const char *e = getenv("REJEU_STOP_TMIN"); tmin = e ? atol(e) : 0; }
+        if (wa >= 0 && dsp->data[wa] != wv && (long)g_c54x_exe_fn >= tmin) {
             printf("ECRITURE data[%04x] %04x -> %04x par pc=%04x tick=%u : AR0=%04x AR2=%04x AR3=%04x AR4=%04x BK=%04x "
                    "[4bcc]=%04x d_task_md(W0/W1)=%04x/%04x d_task_d=%04x/%04x\n",
                    wa, wv, dsp->data[wa], pc, g_c54x_exe_fn, dsp->ar[0], dsp->ar[2], dsp->ar[3], dsp->ar[4], dsp->bk,
@@ -205,11 +225,22 @@ static long courir(long n)
                 }
                 exit(4);
             }
-            static int nw; if (++nw >= 6) exit(4);
+            static int nw; if (++nw >= (getenv("REJEU_STOP_NW") ? atoi(getenv("REJEU_STOP_NW")) : 6)) exit(4);
         }
-        if (dsp->sp < 0x5900 || dsp->sp > 0x5c00 || (getenv("REJEU_STOP_PC") && npc == (uint16_t)strtoul(getenv("REJEU_STOP_PC"), NULL, 16)) || (getenv("REJEU_STOP_DEBUG") && dsp->data[0x08dc] != 0x0074 && g_c54x_exe_fn > 6200)) {
+        if (dsp->sp < 0x5900 || dsp->sp > 0x5c00 || (getenv("REJEU_STOP_PC") && (long)g_c54x_exe_fn >= (getenv("REJEU_STOP_TMIN") ? atol(getenv("REJEU_STOP_TMIN")) : 0) && npc == (uint16_t)strtoul(getenv("REJEU_STOP_PC"), NULL, 16)) || (getenv("REJEU_STOP_DEBUG") && dsp->data[0x08dc] != 0x0074 && g_c54x_exe_fn > 6200)) {
             plante = 1;
             printf("PLANTAGE tick=%u pc=%04x sp=%04x xpc=%d\n", g_c54x_exe_fn, npc, dsp->sp, dsp->xpc);
+            {   /* REJEU_PEEK=debut:n[,debut:n...] : memoire lue par data_read au point d'arret */
+                const char *pk = getenv("REJEU_PEEK");
+                while (pk && *pk) {
+                    unsigned a0 = strtoul(pk, (char **)&pk, 16), m = 1;
+                    if (*pk == ':') m = strtoul(pk + 1, (char **)&pk, 10);
+                    printf("PEEK %04x:", a0);
+                    for (unsigned i = 0; i < m; i++) printf(" %04x", data_read(dsp, (uint16_t)(a0 + i)));
+                    printf("\n");
+                    if (*pk == ',') pk++; else break;
+                }
+            }
             int m = getenv("REJEU_ANNEAU") ? atoi(getenv("REJEU_ANNEAU")) : 120;
             for (int j = m; j > 0; j--) {
                 unsigned q = (apos - j) & (ANNEAU - 1);
