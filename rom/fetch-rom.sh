@@ -7,7 +7,7 @@
 # la conversion (tools/dsp_txt2bin.py) est verifiee contre SHA256SUMS.<version>.
 #
 #   --dest DIR   ou ecrire les .bin (repetable ; defaut : ce dossier rom/)
-#   --version V  3606 (defaut, celle de ce depot) ou 3311 (D-Sample ; pas de somme connue)
+#   --version V  3606 (defaut, celle de ce depot) ou 3311 (D-Sample)
 #   --force      retelecharger meme si les .bin sont deja la et corrects
 #
 # Registers n'est pas de la ROM : calypso_dsp.Registers.bin (instantane de
