@@ -98,3 +98,24 @@ MAILBOX.md  dated log of hypotheses, refutations and measurements
 ## License
 
 GPL-2.0-or-later, see `LICENSE`.
+
+## ROM and uplink probes
+
+The DSP ROM is **not** in this repository. `rom/fetch-rom.sh` downloads the FreeCalypso
+dump (version 3606), converts it with `tools/dsp_txt2bin.py` into
+`calypso_dsp.{DROM,PDROM,PROM0..3}.bin` and checks `rom/SHA256SUMS.3606`
+(`--dest DIR` repeatable, `--version 3311` for the D-Sample dump). `calypso_dsp.Registers.bin`
+is a register snapshot, not ROM: it stays in the repository.
+
+Two inert-by-default probes in `src/pont.c` (environment variables, `--arm` mode):
+
+- `PONT_TX_SONDE=N` — for N frames where the ARM has posted `d_task_u`/`d_task_ra`, log
+  which DSP data words the ROM wrote and dump the changed ranges to `/tmp/tx-sonde/`.
+- `PONT_TX_INJECT=FILE` — after `montant.c` has published a real uplink block (so the link
+  is untouched), overwrite `a_cu` with the next 23-byte block of FILE (one hex line each);
+  the ROM output for each block lands in `/tmp/tx-sonde/inj_<n>.txt`. Measured 2026-10-03
+  with a zero block + 184 one-bit blocks: 343 of 413 varying output positions of the
+  `0x4280` buffer have exactly the signature of a `gsm0503_xcch_encode` coded bit
+  (group g = burst g, bit j at column j-2g); 70 positions are still unexplained.
+
+`C54X_BIN=/path/to/c54x_exe ./run.sh` runs another build of the executable.

@@ -24,6 +24,8 @@
 #include <sys/un.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <osmocom/core/bits.h>
+#include <osmocom/coding/gsm0503_coding.h>
 #include "calypso_c54x.h"
 #include "calypso_dma.h"
 #include "calypso_bsp.h"
@@ -36,6 +38,7 @@
 #include "calypso_gmsk.h"
 #include "cellule.h"
 #include "montant.h"
+#include "carte_tx.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
 extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c : provenance du TOA */
@@ -176,8 +179,25 @@ static const uint16_t g_cellules[] = {
 #define N_CELLULES (sizeof(g_cellules) / sizeof(g_cellules[0]))
 static uint16_t g_cell_prev[N_CELLULES];
 static uint16_t g_trace_pc_prev;
+/* [2026-10-03] Zones surveillees en plus pendant une trace d'injection (PONT_TX_TRACE_BLOC) :
+ * a_cu (entree du codeur) et le tampon de sortie 0x4280.. + 0x2be4.. ; chaque ecriture est
+ * journalisee avec le PC de l'instruction qui l'a faite. */
+static uint16_t g_zone_prev[0x10000];
+static bool g_zone_active;
+static void trace_zones(C54xState *dsp, bool init)
+{
+    static const struct { unsigned a, n; } z[] = { {0x0a06, 16}, {0x4280, 32}, {0x2be4, 52}, {0x2bc0, 8}, {0x3f8a, 8} };
+    for (unsigned r = 0; r < sizeof z / sizeof z[0]; r++)
+        for (unsigned k = 0; k < z[r].n; k++) {
+            unsigned a = z[r].a + k; uint16_t v = dsp->data[a];
+            if (!init && v != g_zone_prev[a] && g_trace_f)
+                fprintf(g_trace_f, "      Z data[%04x] %04x -> %04x   (par pc=%04x)\n", a, g_zone_prev[a], v, g_trace_pc_prev);
+            g_zone_prev[a] = v;
+        }
+}
 static void trace_cellules(C54xState *dsp, bool init)
 {
+    if (g_zone_active) trace_zones(dsp, init);
     for (unsigned i = 0; i < N_CELLULES; i++) {
         uint16_t v = dsp->data[g_cellules[i]];
         if (!init && v != g_cell_prev[i] && g_trace_f)
@@ -237,6 +257,297 @@ static void pcc_publier(void)
     printf("  passages exacts :");
     for (int i = 0; i < g_pcc_k; i++) { printf(" %04x:%lu", g_pcc[i], g_pcc_n[i]); g_pcc_n[i] = 0; }
     printf("\n");
+}
+
+/* ── SONDE TX : la ROM execute-t-elle les taches montantes ? ───────────────────
+ * [2026-10-03] PONT_TX_SONDE=N (N evenements, 0/absent = inerte). A chaque trame
+ * ou l'ARM a pose d_task_u (ou d_task_ra) dans l'une des pages W, on compare la
+ * memoire de donnees du DSP avant et apres l'execution de la trame et on cherche
+ * ce que la ROM aurait ecrit : (a) les plages modifiees, (b) les suites de >= 100
+ * mots ne valant que 0 ou 1 — l'allure des 148 bits durs d'un burst montant, que
+ * calypso_bsp_tx_burst() lit a l'adresse CANDIDATE data[0x0900]. Ne modifie rien. */
+static uint16_t *g_tx_snap;
+static int g_tx_n = -1, g_tx_arme;
+static int tx_sonde_active(void)
+{
+    if (g_tx_n < 0) { const char *e = calypso_getenv("PONT_TX_SONDE"); g_tx_n = (e && *e) ? atoi(e) : 0; }
+    return g_tx_n > 0;
+}
+static void tx_sonde_avant(const C54xState *dsp, const uint16_t *api_ram)
+{
+    (void)api_ram;
+    /* [2026-10-03] On photographie a CHAQUE trame : l'ARM pose ses taches APRES le
+     * TICK (l1_sync tourne entre le TICK et le GO), donc d_task_u est encore a 0 ici
+     * et armer sur sa valeur de ce moment ne declenchait jamais. La decision se
+     * prend dans tx_sonde_apres(). */
+    g_tx_arme = 0;
+    if (!tx_sonde_active()) return;
+    if (!g_tx_snap) g_tx_snap = malloc(sizeof(uint16_t) * C54X_DATA_SIZE);
+    if (!g_tx_snap) return;
+    memcpy(g_tx_snap, dsp->data, sizeof(uint16_t) * C54X_DATA_SIZE);
+    g_tx_arme = 1;
+}
+static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32_t fn)
+{
+    if (!g_tx_arme || !g_tx_snap || g_tx_n <= 0) return;
+    g_tx_arme = 0;
+    /* declenche si une tache montante est posee dans l'une des pages W, et
+     * AUSSI sur la trame suivante (la ROM peut l'executer une trame plus tard). */
+    static int suite;
+    int pose = api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2] || api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2] ||
+               api_ram[(API_W_PAGE(0) + 0x06u) / 2] || api_ram[(API_W_PAGE(1) + 0x06u) / 2];
+    if (!pose && !suite) return;
+    suite = pose ? 1 : 0;
+    unsigned changes = 0, a, nplages = 0, runs = 0;
+    for (a = 0; a < C54X_DATA_SIZE; a++) if (dsp->data[a] != g_tx_snap[a]) changes++;
+    /* une trame ou la ROM ne touche a rien (tache deja traitee, ROM au repos) ne
+     * compte pas dans les N evenements : elle noyait la mesure. */
+    if (changes == 0) return;
+    g_tx_n--;
+    printf("  [tx-sonde] fn=%u task_u: page0=0x%04x page1=0x%04x task_ra: page0=0x%04x page1=0x%04x pc=0x%04x\n", fn,
+           api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2], api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2],
+           api_ram[(API_W_PAGE(0) + 0x06u) / 2], api_ram[(API_W_PAGE(1) + 0x06u) / 2], dsp->pc);
+    printf("  [tx-sonde]   %u mots de donnees modifies pendant la trame\n", changes);
+    /* Les plages modifiees d'au moins 8 mots, ET LEUR CONTENU dans
+     * /tmp/tx-sonde/fn<fn>_<adresse>.txt (un mot hexa par ligne) : de quoi
+     * chercher hors ligne le bloc encode attendu, sous toutes ses formes (un bit
+     * par mot, 16 bits par mot...). */
+    mkdir("/tmp/tx-sonde", 0777);
+    for (a = 0; a < C54X_DATA_SIZE && nplages < 12; ) {
+        if (dsp->data[a] == g_tx_snap[a]) { a++; continue; }
+        unsigned b = a; unsigned n = 0;
+        while (b < C54X_DATA_SIZE && (dsp->data[b] != g_tx_snap[b] || (b + 1 < C54X_DATA_SIZE && dsp->data[b + 1] != g_tx_snap[b + 1]))) { b++; n++; }
+        if (n >= 8) {
+            char nom[96]; snprintf(nom, sizeof nom, "/tmp/tx-sonde/fn%u_%04x.txt", fn, a);
+            FILE *f = fopen(nom, "w");
+            if (f) { for (unsigned k = a; k < b; k++) fprintf(f, "%04x\n", dsp->data[k]); fclose(f); }
+            printf("  [tx-sonde]   modifie data[0x%04x..0x%04x] (%u mots) -> %s\n", a, b - 1, n, nom);
+            nplages++;
+        }
+        a = b + 1;
+    }
+    /* suites de >= 100 mots valant 0 ou 1, dont au moins 40 modifies */
+    for (a = 0; a < C54X_DATA_SIZE && runs < 4; ) {
+        if (dsp->data[a] > 1) { a++; continue; }
+        unsigned b = a, ch = 0, uns = 0;
+        while (b < C54X_DATA_SIZE && dsp->data[b] <= 1) { if (dsp->data[b] != g_tx_snap[b]) ch++; if (dsp->data[b]) uns++; b++; }
+        if (b - a >= 100 && ch >= 40 && uns > 0) {
+            printf("  [tx-sonde]   SUITE 0/1 data[0x%04x..0x%04x] long=%u modifies=%u uns=%u :", a, b - 1, b - a, ch, uns);
+            for (unsigned k = 0; k < 24 && a + k < b; k++) printf(" %u", dsp->data[a + k]);
+            printf("\n"); runs++;
+        }
+        a = b + 1;
+    }
+    if (!runs) printf("  [tx-sonde]   aucune suite de bits 0/1 (mot a mot)\n");
+    fflush(stdout);
+}
+
+/* ── INJECTION DE BLOCS L2 DANS LA ROM (experience de linearite) ───────────────
+ * [2026-10-03] PONT_TX_INJECT=<fichier> : une ligne par bloc de 23 octets hexa.
+ * A chaque bloc montant (a_cu) que le firmware pose, APRES que montant.c l'a
+ * publie (donc le lien reel n'est pas touche : la BTS recoit le vrai bloc), on
+ * ecrit le bloc de test dans a_cu a sa place, pour que la ROM l'encode a la
+ * trame suivante. Le codage etant lineaire, un bloc nul puis des blocs a un
+ * seul bit donnent la carte entre bits d'entree et bits de sortie du tampon
+ * lu par la sonde TX (PONT_TX_SONDE). Meme ordre d'octets que prendre_ul()
+ * (montant.c) : mot 3 + i/2, octet faible d'abord. Ne fait rien si la
+ * variable est absente. */
+#define TX_INJ_MAX 600
+static uint8_t g_inj_bloc[TX_INJ_MAX][23];
+static C54xState *dsp_global_tx;
+static int g_inj_n = -1, g_inj_i, g_inj_attente = -1;
+static void tx_inject_charger(void)
+{
+    const char *f = calypso_getenv("PONT_TX_INJECT");
+    g_inj_n = 0;
+    if (!f || !*f) return;
+    FILE *fp = fopen(f, "r");
+    if (!fp) { printf("  [tx-inject] %s illisible\n", f); return; }
+    char ligne[256];
+    while (g_inj_n < TX_INJ_MAX && fgets(ligne, sizeof ligne, fp)) {
+        unsigned v[23]; int k = sscanf(ligne, "%x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x",
+            &v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7],&v[8],&v[9],&v[10],&v[11],&v[12],&v[13],&v[14],&v[15],&v[16],&v[17],&v[18],&v[19],&v[20],&v[21],&v[22]);
+        if (k != 23) continue;
+        for (int i = 0; i < 23; i++) g_inj_bloc[g_inj_n][i] = (uint8_t)v[i];
+        g_inj_n++;
+    }
+    fclose(fp);
+    printf("  [tx-inject] %d blocs de test charges depuis %s\n", g_inj_n, f);
+}
+/* avant = B_BLUD de a_cu AVANT montant_scruter() : un bloc vient d'etre pose. */
+static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
+{
+    if (g_inj_n < 0) tx_inject_charger();
+    if (g_inj_n == 0 || !avant) return;
+    if (g_inj_i >= g_inj_n) {
+        if (g_inj_i == g_inj_n) { printf("  [tx-inject] fn=%u fin : %d blocs injectes\n", fn, g_inj_n); g_inj_i++; }
+        return;
+    }
+    uint16_t *w = &api_ram[(API_NDB + NDB_A_CU) / 2];
+    const uint8_t *b = g_inj_bloc[g_inj_i];
+    for (int i = 0; i < 23; i += 2)
+        w[3 + i / 2] = (uint16_t)(b[i] | ((i + 1 < 23 ? b[i + 1] : 0) << 8));
+    g_inj_attente = g_inj_i;   /* sa sortie sera lue a la fin de la trame suivante */
+    { static long cible = -2;
+      if (cible == -2) { const char *e = calypso_getenv("PONT_TX_TRACE_BLOC"); cible = (e && *e) ? atol(e) : -1; }
+      if (cible == g_inj_i && !g_trace_f) {
+          const char *e = calypso_getenv("PONT_TX_TRACE_N");
+          g_trace_reste = (e && *e) ? atol(e) : 250000;
+          g_trace_f = fopen("/tmp/c54x-pont/trace-tx.txt", "w");
+          if (g_trace_f) { g_zone_active = true; g_trace_ouverte = true; trace_cellules(dsp_global_tx, true);
+              fprintf(g_trace_f, "# trace du bloc injecte %d a fn=%u\n", g_inj_i, fn);
+              printf("  [tx-inject] trace ouverte (bloc %d, %ld instructions) -> /tmp/c54x-pont/trace-tx.txt\n", g_inj_i, g_trace_reste); }
+      } }
+    printf("  [tx-inject] fn=%u bloc=%d ->", fn, g_inj_i);
+    for (int i = 0; i < 23; i++) printf(" %02x", b[i]);
+    printf("\n");
+    g_inj_i++;
+}
+
+/* Fin de la trame qui suit l'injection : on ecrit, pour ce bloc, les plages OU
+ * LA ROM A DEPOSE sa sortie (relevees par la sonde TX : 0x4280.. et 0x2be4..),
+ * a ADRESSES FIXES, qu'elles aient change ou non. /tmp/tx-sonde/inj_<bloc>.txt :
+ * « adresse mot » par ligne. Independant du compteur d'evenements de la sonde. */
+static void tx_inject_fulldump(const C54xState *dsp, int bloc, uint32_t fn, int d)
+{
+    static int actif=-1;
+    if (actif<0){const char*e=calypso_getenv("PONT_TX_FULLDUMP");actif=(e&&*e=='1');}
+    if(!actif) return;
+    if (d > 6) return;
+    mkdir("/tmp/tx-full",0777);
+    char nom[96]; snprintf(nom,sizeof nom,"/tmp/tx-full/full_%d_%d.txt",bloc,d);
+    FILE*f=fopen(nom,"w");
+    if(f){fprintf(f,"# fn=%u bloc=%d\n",fn,bloc);
+        for(unsigned a=0x2800;a<0x5c00;a++) fprintf(f,"%04x %04x\n",a,dsp->data[a]);
+        fclose(f);}
+}
+static void tx_inject_sortie(const C54xState *dsp, uint32_t fn)
+{
+    /* [2026-10-03] la ROM peut finir son travail sur PLUSIEURS trames (la parite FIRE, le remplissage
+     * des bursts suivants) : on releve les memes plages pendant les 8 trames qui suivent l'injection,
+     * /tmp/tx-sonde/injf_<bloc>_<d>.txt (d = trames apres l'injection), en plus du releve historique
+     * inj_<bloc>.txt de la premiere trame. */
+    static int restant = 0, bloc = -1, d = 0;
+    if (g_inj_attente >= 0) { bloc = g_inj_attente; restant = 8; d = 0; }
+    if (restant <= 0) { g_inj_attente = -1; return; }
+    tx_inject_fulldump(dsp, bloc, fn, d + 1);
+    static const struct { unsigned a, n; } plages[] = {
+        {0x4280, 32}, {0x2be4, 52}, {0x2bc0, 8}, {0x3dc6, 9}, {0x5abb, 12}, {0x3f8a, 8}, {0x0809, 8}, {0x081d, 8}, {0x0a06, 15}
+    };
+    mkdir("/tmp/tx-sonde", 0777);
+    d++;
+    char nom[96];
+    if (d == 1) snprintf(nom, sizeof nom, "/tmp/tx-sonde/inj_%d.txt", bloc);
+    else        snprintf(nom, sizeof nom, "/tmp/tx-sonde/injf_%d_%d.txt", bloc, d);
+    FILE *f = fopen(nom, "w");
+    if (f) {
+        fprintf(f, "# fn=%u bloc=%d d=%d\n", fn, bloc, d);
+        for (unsigned r = 0; r < sizeof plages / sizeof plages[0]; r++)
+            for (unsigned k = 0; k < plages[r].n; k++)
+                fprintf(f, "%04x %04x\n", plages[r].a + k, dsp->data[plages[r].a + k]);
+        fclose(f);
+    }
+    restant--;
+    g_inj_attente = -1;
+}
+
+/* ── MODE OMBRE : la ROM encode, l'hote encode, on compare ─────────────────────
+ * [2026-10-03] PONT_TX_OMBRE=1. A chaque bloc SDCCH montant REEL (a_cu, B_BLUD
+ * pose par le firmware), apres que montant.c l'a publie, on garde ses 23 octets ;
+ * a la fin de la trame suivante on lit le tampon que la ROM a rempli (data[0x4280],
+ * 4 groupes de 8 mots = 4 bursts) et on le compare aux bits de gsm0503_xcch_encode
+ * (celui que le pont utilise). Rien n'est ecrit dans le DSP ni envoye : le lien reste
+ * celui de l'hote. Disposition mesuree : bit j du burst g a la colonne q = j - 2g dans
+ * le groupe (premiere moitie, q < 57) et q = j - 2g - 2 (seconde moitie, apres le bit
+ * de vol en q = 57). Compare q in [0,50) et [58,106) : zone sure pour g = 0..3.
+ * Sortie : « [ombre] fn=.. g0 a/b g1 .. » + totaux, et le detail dans /tmp/tx-sonde/ombre.txt. */
+static int g_omb = -1, g_omb_att;
+static int g_txf_restant, g_txf_d; static uint8_t g_txf_l2[23];
+static int g_rt_restant, g_rt_d, g_rt_n; static uint8_t g_rt_l2[23];
+static uint8_t g_omb_l2[23];
+static unsigned long g_omb_blocs, g_omb_parfaits, g_omb_ok[4], g_omb_n[4];
+static void tx_ombre_pose(const uint16_t *api_ram, int blud_avant)
+{
+    if (g_omb < 0) { const char *e = calypso_getenv("PONT_TX_OMBRE"); g_omb = (e && *e == '1'); if (g_omb) printf("  [ombre] actif\n"); }
+    if (!g_omb || !blud_avant) return;
+    const uint16_t *w = &api_ram[(API_NDB + NDB_A_CU) / 2];
+    for (int i = 0; i < 23; i += 2) {
+        g_omb_l2[i] = (uint8_t)(w[3 + i / 2] & 0xff);
+        if (i + 1 < 23) g_omb_l2[i + 1] = (uint8_t)(w[3 + i / 2] >> 8);
+    }
+    g_omb_att = 1;
+    { int a=-1; static int actif=-1; if(actif<0){const char*e=calypso_getenv("PONT_TX_TXFRAMES");actif=(e&&*e=='1');}
+      if(actif){ memcpy(g_txf_l2,g_omb_l2,23); g_txf_restant=10; g_txf_d=0; } (void)a; }
+    { static int ar=-1; if(ar<0){const char*e=calypso_getenv("PONT_TX_REELFULL");ar=(e&&*e=='1');}
+      if(ar){ memcpy(g_rt_l2,g_omb_l2,23); g_rt_restant=6; g_rt_d=0; } }
+}
+/* [2026-10-03] PONT_TX_TXFRAMES=1 : apres chaque bloc reel pose (a_cu), on enregistre data[0x4280]
+ * (32 mots) a CHAQUE trame pendant 10 trames, avec le L2 et l'offset d, dans /tmp/tx-sonde/txf.txt.
+ * But : les lanes de parite du burst peuvent n'etre ecrites qu'a la trame d'EMISSION de chaque burst
+ * (une par burst), apres la trame de codage. */
+static void tx_txframes(const C54xState *dsp)
+{
+    static int actif=-1;
+    if(actif<0){const char*e=calypso_getenv("PONT_TX_TXFRAMES");actif=(e&&*e=='1');}
+    if(!actif||g_txf_restant<=0) return;
+    g_txf_d++;
+    mkdir("/tmp/tx-sonde",0777);
+    FILE*f=fopen("/tmp/tx-sonde/txf.txt","a");
+    if(f){for(int i=0;i<23;i++)fprintf(f,"%02x",g_txf_l2[i]);
+        fprintf(f," %d ",g_txf_d);
+        for(int w=0;w<32;w++)fprintf(f,"%04x",dsp->data[0x4280+w]);
+        fprintf(f,"\n");fclose(f);}
+    g_txf_restant--;
+}
+static void tx_reelfull(const C54xState *dsp, uint32_t fn)
+{
+    static int actif=-1;
+    if(actif<0){const char*e=calypso_getenv("PONT_TX_REELFULL");actif=(e&&*e=='1');}
+    if(!actif||g_rt_restant<=0||g_rt_n>=600) return;
+    g_rt_d++;
+    mkdir("/tmp/tx-rt",0777);
+    char nom[96]; snprintf(nom,sizeof nom,"/tmp/tx-rt/rt_%04d_%d.txt",g_rt_n,g_rt_d);
+    FILE*f=fopen(nom,"w");
+    if(f){for(int i=0;i<23;i++)fprintf(f,"%02x",g_rt_l2[i]);fprintf(f,"\n");
+        for(unsigned a=0x0800;a<0x0e00;a++)fprintf(f,"%04x %04x\n",a,dsp->data[a]);
+        for(unsigned a=0x2a00;a<0x2d00;a++)fprintf(f,"%04x %04x\n",a,dsp->data[a]);
+        for(unsigned a=0x4200;a<0x4300;a++)fprintf(f,"%04x %04x\n",a,dsp->data[a]);
+        fclose(f);}
+    g_rt_restant--; if(g_rt_restant==0) g_rt_n++;
+}
+static void tx_ombre_compare(const C54xState *dsp, uint32_t fn)
+{
+    tx_txframes(dsp);
+    tx_reelfull(dsp, fn);
+    if (g_omb <= 0 || !g_omb_att) return;
+    g_omb_att = 0;
+    ubit_t e[1024] = {0};
+    if (gsm0503_xcch_encode(e, g_omb_l2) != 0) return;
+    unsigned ok = 0, n = 0, okg[4] = {0}, ng[4] = {0};
+    mkdir("/tmp/tx-sonde", 0777);
+    FILE *f = fopen("/tmp/tx-sonde/ombre.txt", "a");
+    if (f) { fprintf(f, "# fn=%u L2=", fn); for (int i = 0; i < 23; i++) fprintf(f, "%02x ", g_omb_l2[i]); fprintf(f, "\n"); }
+    for (int p = 0; p < 512; p++) {
+        int i = g_carte_tx[p];
+        if (i < 0) continue;
+        unsigned bit = (dsp->data[0x4280 + p / 16] >> (15 - p % 16)) & 1u, att = e[i] & 1u;
+        n++; ng[p / 128]++;
+        if (bit == att) { ok++; okg[p / 128]++; }
+        else if (f) fprintf(f, "  p=%d (g%d q=%d) i=%d rom=%u hote=%u\n", p, p / 128, p % 128, i, bit, att);
+    }
+    if (f) fclose(f);
+    FILE *g = fopen("/tmp/tx-sonde/reel.txt", "a");
+    if (g) {
+        for (int i = 0; i < 23; i++) fprintf(g, "%02x", g_omb_l2[i]);
+        fprintf(g, " ");
+        for (int w = 0; w < 32; w++) fprintf(g, "%04x", dsp->data[0x4280 + w]);
+        fprintf(g, "\n"); fclose(g);
+    }
+    g_omb_blocs++; g_omb_parfaits += (ok == n);
+    for (int g = 0; g < 4; g++) { g_omb_ok[g] += okg[g]; g_omb_n[g] += ng[g]; }
+    printf("  [ombre] fn=%u L2=%02x %02x %02x.. %u/%u bits connus identiques (g0 %u/%u g1 %u/%u g2 %u/%u g3 %u/%u) | blocs=%lu parfaits=%lu\n", fn,
+           g_omb_l2[0], g_omb_l2[1], g_omb_l2[2], ok, n, okg[0], ng[0], okg[1], ng[1], okg[2], ng[2], okg[3], ng[3], g_omb_blocs, g_omb_parfaits);
+    fflush(stdout);
 }
 
 static int c54x_run_profile(C54xState *dsp, int budget)
@@ -1233,6 +1544,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             m.b &= 1u;
             enreg_tick(dsp, api_ram, m.a, g_tick_irq_trame, deux_phases, insns);
             enreg_api_diff(api_ram, m.a, 0);
+            tx_sonde_avant(dsp, api_ram);
             calypso_bsp_set_tpu_offset((int)m.c);   /* firmware RX window */
             /* AFC relay, closing the loop. The ARM writes d_afc (word 15 of the W
              * page) into the shared API RAM; on silicon the DSP serialises it to
@@ -1516,7 +1828,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * « UL bursts=0 rach=0 », aucune IMM ASS, aucun LU ACCEPT. On
              * scrute ici la page W que l'ARM vient de remplir (m.b = d_dsp_page)
              * et on alimente les memes side-bands /dev/shm qu'en montage grgsm. */
-            montant_scruter(api_ram, m.a, m.b & 1u);
+            tx_inject_sortie(dsp, m.a);
+            tx_ombre_compare(dsp, m.a);
+            tx_sonde_apres(dsp, api_ram, m.a);
+            dsp_global_tx = dsp;
+            { int blud_avant = (api_ram[(API_NDB + NDB_A_CU) / 2] & B_BLUD) != 0;
+              montant_scruter(api_ram, m.a, m.b & 1u);
+              tx_inject_apres(api_ram, m.a, blud_avant);
+              tx_ombre_pose(api_ram, blud_avant && g_inj_n <= 0); }
             trames++;
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;

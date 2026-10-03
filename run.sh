@@ -99,7 +99,7 @@ etape1() {   # le DSP (montage dsp seulement)
     rm -f /dev/shm/calypso_tch_cfg
     # [2026-09-23] Attendre (au plus 40 ms) une trame que la BTS livre en
     # retard plutot que la jouer en effacement (calypso_bsp.c, bsp_attendre_trame).
-    ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ./c54x_exe --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
     dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"

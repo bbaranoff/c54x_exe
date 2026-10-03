@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 # run artefacts
 /tmp/
+# ROM du DSP TI : jamais dans le depot, telechargee par rom/fetch-rom.sh (FreeCalypso)
+/rom/calypso_dsp.*.bin
+!/rom/calypso_dsp.Registers.bin
+/rom/calypso_dsp.txt
+/c54x_exe.*
