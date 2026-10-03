@@ -19,7 +19,7 @@
 # Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (80000),
 #   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
-# Details, attendus et verifications : LAUNCH.md a cote.
+# Details, attendus et verifications : LAUNCH.md a cote. Bruit (BRUIT_MODE, inactif par defaut) : bloc BRUIT_ en fin.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${MODE:-dsp}"
@@ -99,10 +99,10 @@ etape1() {   # le DSP (montage dsp seulement)
     rm -f /dev/shm/calypso_tch_cfg
     # [2026-09-23] Attendre (au plus 40 ms) une trame que la BTS livre en
     # retard plutot que la jouer en effacement (calypso_bsp.c, bsp_attendre_trame).
-    ( cd "$HERE" && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
-    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"
+    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
 }
 
 etape2() {   # l'ARM
@@ -201,7 +201,7 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     local extra=""; [ "$MODE" = dsp ] && extra="--dsp-port 6702"
     [ "$PONT_AIRREC" = 0 ] && extra="$extra --no-record"
     vitrine pont
-    ( cd "$(dirname "$PONT_PY")/.." && exec python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
+    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && exec python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"
@@ -209,10 +209,10 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
 
 arreter() {
     local n
-    for n in pont mobile osmocon gdb qemu dsp; do
+    for n in pont bruit mobile osmocon gdb qemu dsp; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
-    done
+    done; bruit_arreter
     sleep 1
     rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty"
     # [2026-09-22] Sockets du mobile : elles ne disparaissent pas avec lui. Le
@@ -241,7 +241,7 @@ statut() {
     for n in dsp qemu osmocon mobile pont; do
         if vivant "$n"; then printf '  %-8s pid %-7s  %s\n' "$n" "$(pid_de "$n")" "$RUNDIR/$n.log"
         else printf '  %-8s arrete\n' "$n"; fi
-    done
+    done; bruit_statut
     [ -f "$RUNDIR/dsp.log" ] && grep -a "fn=" "$RUNDIR/dsp.log" | tail -1
     [ -f "$RUNDIR/osmocon.log" ] && grep -a "FB0\|FB1\|SB\|BSIC" "$RUNDIR/osmocon.log" | tail -1
 }
@@ -260,13 +260,131 @@ garder_journaux() {
     [ -d "$d" ] && return 0                      # deja range (--stop puis relance)
     mkdir -p "$d" || return 0
     local n
-    for n in dsp pont mobile qemu osmocon; do
+    for n in dsp pont mobile qemu osmocon bruit; do
         [ -s "$RUNDIR/$n.log" ] && cp -L "$RUNDIR/$n.log" "$d/" 2>/dev/null
     done
     # etat du magasin dedie du BSP (stockes/joues/manques/replis/perdues)
     [ -s /dev/shm/calypso_bsp_dedie ] && cp /dev/shm/calypso_bsp_dedie "$d/bsp_dedie.txt" 2>/dev/null
     ls -1dt "$RUNDIR"/archives/*/ 2>/dev/null | tail -n +$((JOURNAUX_GARDES + 1)) | xargs -r rm -rf
     dire "journaux de la session precedente ranges dans $d"
+}
+
+# [2026-10-03] INJECTEUR DE BRUIT, INACTIF PAR DEFAUT (BRUIT_MODE et BRUIT_SNR_DB vides :
+# rien ne change, aucune ligne de plus a l'ecran). Place ici, en fin de fichier, pour que
+# les numeros de ligne cites par le wiki (Lancer-a-la-main.md...) restent justes ; les
+# etapes ci-dessus n'appellent que bruit_env_dsp, bruit_dire_dsp, bruit_env_pont,
+# bruit_arreter et bruit_statut, sans effet par defaut.
+# Source unique : $QOSMO/tools/injecteur_bruit.py, repli sur tools/injecteur_bruit.py d'ici
+# (un lien vers elle).
+#   BRUIT_MODE     ber | souple | iq (EXPERIMENTAL) | relais : etape b (--step b), entre le
+#                  DSP et QEMU dans la sequence, entre le pont et la L1 dans le flux.
+#     dsp   : c54x_exe ecoute BRUIT_PORT_DSP (16702, CALYPSO_BSP_PORT), l'injecteur prend
+#             127.0.0.1:6702 a sa place ; le pont ne change pas (--dsp-port 6702). Le BSP
+#             apprend son pair montant sur l'emetteur du descendant : son montant passe par
+#             l'injecteur, qui le rend tel quel au pont (5702) depuis 6702.
+#     grgsm : l'injecteur ecoute BRUIT_PORT_GRGSM (14730) et relaie vers QEMU 4730 ; le pont
+#             y envoie (PONT_GSMTAP_PORT, pose a l'etape 5). ber | relais seulement : QEMU
+#             recoit des blocs L2 deja decodes.
+#     iq    : refuse si CALYPSO_BSP_STREAM=1 (defaut de start-direct.sh --dsp).
+#   BRUIT_BER (0..1), BRUIT_RAFALES (L bits), BRUIT_SNR_DB (dB), BRUIT_PERTE (0..1),
+#   BRUIT_TN (0 ou 1,2...), BRUIT_GRAINE, BRUIT_STATS (10 s), BRUIT_OPTS (options en plus),
+#   BRUIT_PORT_DSP, BRUIT_PORT_GRGSM, BRUIT_PY.
+#   BRUIT_SNR_DB SANS BRUIT_MODE (dsp) : pas d'injecteur, AWGN du coeur C54x -- c54x_exe
+#   recoit CALYPSO_BSP_SNR_DB (et CALYPSO_BSP_BRUIT_GRAINE <- BRUIT_GRAINE), calypso_c54x.c.
+# Une configuration refusee (--verifier) arrete run.sh AVANT tout lancement.
+# Journal : $RUNDIR/bruit.log. Detail : /opt/GSM/osmo-operator/wiki/Injecteur-bruit.md.
+BRUIT_MODE="${BRUIT_MODE:-}"
+BRUIT_SNR_DB="${BRUIT_SNR_DB:-}"
+BRUIT_PORT_DSP="${BRUIT_PORT_DSP:-16702}"
+BRUIT_PORT_GRGSM="${BRUIT_PORT_GRGSM:-14730}"
+if [ -z "${BRUIT_PY:-}" ]; then
+    BRUIT_PY="$QOSMO/tools/injecteur_bruit.py"
+    [ -r "$BRUIT_PY" ] || BRUIT_PY="$HERE/tools/injecteur_bruit.py"
+fi
+BRUIT_ACTIF=0      # 1 : l'injecteur est intercale pour ce lancement (bruit_preparer)
+BRUIT_ARGS=()
+
+bruit_args() {   # remplit BRUIT_ARGS
+    BRUIT_ARGS=(--mode "$BRUIT_MODE" --etiquette c54x --stats "${BRUIT_STATS:-10}")
+    if [ "$MODE" = dsp ]; then
+        BRUIT_ARGS+=(--cible dsp --ecoute 127.0.0.1:6702 --vers "127.0.0.1:$BRUIT_PORT_DSP")
+    else
+        BRUIT_ARGS+=(--cible grgsm --ecoute "127.0.0.1:$BRUIT_PORT_GRGSM" --vers 127.0.0.1:4730)
+    fi
+    [ -n "${BRUIT_BER:-}" ]     && BRUIT_ARGS+=(--ber "$BRUIT_BER")
+    [ -n "${BRUIT_RAFALES:-}" ] && BRUIT_ARGS+=(--rafales "$BRUIT_RAFALES")
+    [ -n "$BRUIT_SNR_DB" ]      && BRUIT_ARGS+=(--snr-db "$BRUIT_SNR_DB")
+    [ -n "${BRUIT_PERTE:-}" ]   && BRUIT_ARGS+=(--perte "$BRUIT_PERTE")
+    [ -n "${BRUIT_TN:-}" ]      && BRUIT_ARGS+=(--tn "$BRUIT_TN")
+    [ -n "${BRUIT_GRAINE:-}" ]  && BRUIT_ARGS+=(--graine "$BRUIT_GRAINE")
+    [ -n "${BRUIT_OPTS:-}" ]    && BRUIT_ARGS+=($BRUIT_OPTS)
+    return 0
+}
+
+bruit_preparer() {   # avant l'etape 1 : decide BRUIT_ACTIF, verifie la configuration
+    [ -n "$BRUIT_MODE" ] || return 0
+    if vivant bruit; then BRUIT_ACTIF=1; return 0; fi
+    if [ "$MODE" = dsp ] && vivant dsp; then
+        # Un c54x_exe deja lance n'est intercalable que s'il ecoute deja le port deplace.
+        if ! tr '\0' '\n' < "/proc/$(pid_de dsp)/environ" 2>/dev/null | grep -qx "CALYPSO_BSP_PORT=$BRUIT_PORT_DSP"; then
+            dire "b. BRUIT_MODE=$BRUIT_MODE ignore : c54x_exe tourne deja sur 6702, sans injecteur (./run.sh --stop puis ./run.sh)"
+            return 0
+        fi
+    fi
+    [ -r "$BRUIT_PY" ] || rater "injecteur de bruit absent : $BRUIT_PY (posez BRUIT_PY)"
+    bruit_args
+    local msg
+    msg="$(python3 "$BRUIT_PY" "${BRUIT_ARGS[@]}" --verifier 2>&1)" || rater "injecteur de bruit : $(printf '%s\n' "$msg" | tail -1)"
+    BRUIT_ACTIF=1
+}
+
+bruit_env_dsp() {   # dans le sous-shell de c54x_exe ; ne pose rien par defaut
+    [ "$BRUIT_ACTIF" = 1 ] && export CALYPSO_BSP_PORT="$BRUIT_PORT_DSP"
+    if [ -z "$BRUIT_MODE" ] && [ -n "$BRUIT_SNR_DB" ]; then
+        export CALYPSO_BSP_SNR_DB="${CALYPSO_BSP_SNR_DB:-$BRUIT_SNR_DB}"
+        [ -n "${BRUIT_GRAINE:-}" ] && export CALYPSO_BSP_BRUIT_GRAINE="${CALYPSO_BSP_BRUIT_GRAINE:-$BRUIT_GRAINE}"
+    fi
+    return 0
+}
+
+bruit_dire_dsp() {   # apres l'etape 1 ; muet par defaut
+    [ "$BRUIT_ACTIF" = 1 ] && dire "   BSP deplace sur udp/$BRUIT_PORT_DSP (CALYPSO_BSP_PORT) : 6702 est a l'injecteur de bruit"
+    [ -z "$BRUIT_MODE" ] && [ -n "$BRUIT_SNR_DB" ] && dire "   bruit du coeur : CALYPSO_BSP_SNR_DB=${CALYPSO_BSP_SNR_DB:-$BRUIT_SNR_DB} dB${BRUIT_GRAINE:+, graine $BRUIT_GRAINE}"
+    return 0
+}
+
+bruit_env_pont() {   # dans le sous-shell du pont ; ne pose rien par defaut
+    [ "$MODE" = grgsm ] && [ -n "$BRUIT_MODE" ] || return 0
+    # pont/pont.py viserait de lui-meme BRUIT_PORT_GRGSM : on le dit explicitement, et
+    # 4730 (QEMU) si l'injecteur ne tourne pas, pour ne pas envoyer dans le vide.
+    if vivant bruit; then export PONT_GSMTAP_PORT="$BRUIT_PORT_GRGSM"; else export PONT_GSMTAP_PORT=4730; fi
+    return 0
+}
+
+etapeb() {   # l'injecteur de bruit (BRUIT_MODE), entre le pont et la couche 1
+    [ "$BRUIT_ACTIF" = 1 ] || return 0
+    vivant bruit && { dire "b. injecteur de bruit deja lance (pid $(pid_de bruit))"; return; }
+    bruit_args
+    : > "$RUNDIR/bruit.log"
+    python3 -u "$BRUIT_PY" "${BRUIT_ARGS[@]}" >> "$RUNDIR/bruit.log" 2>&1 &
+    echo $! > "$RUNDIR/bruit.pid"
+    attendre 5 grep -aq "PRET ecoute=" "$RUNDIR/bruit.log" || rater "l'injecteur de bruit ne s'est pas annonce (voir $RUNDIR/bruit.log)"
+    dire "b. injecteur de bruit  pid $(pid_de bruit)  mode $BRUIT_MODE  $(sed -n 's/.*PRET \(ecoute=[^ ]*\) \(vers=[^ ]*\).*/\1 \2/p' "$RUNDIR/bruit.log" | head -1)  journal $RUNDIR/bruit.log"
+}
+
+bruit_arreter() {   # --stop : l'injecteur sans pid (lance a la main avec --etiquette c54x)
+    pkill -f -- "injecteur_bruit\.py .*--etiquette c54x" 2>/dev/null
+    return 0
+}
+
+bruit_statut() {   # --status : muet par defaut
+    if vivant bruit; then
+        printf '  %-8s pid %-7s  %s\n' bruit "$(pid_de bruit)" "$RUNDIR/bruit.log"
+        grep -a "STATS\|BILAN" "$RUNDIR/bruit.log" 2>/dev/null | tail -1
+    elif [ -n "$BRUIT_MODE" ]; then
+        printf '  %-8s arrete\n' bruit
+    fi
+    return 0
 }
 
 mkdir -p "$RUNDIR"
@@ -276,10 +394,10 @@ case "${1:-}" in
               [ -f "$RUNDIR/dsp.log" ] && : > "$RUNDIR/dsp.log"
               [ -f /dev/shm/pont.log ] && : > /dev/shm/pont.log ;;
     --status) statut ;;
-    --logs)   exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log 2>/dev/null ;;
-    --step)   case "${2:-}" in 1) etape1;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|2|3|4|5";; esac ;;
+    --logs)   exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
+    --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|b|2|3|4|5";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;
-    "")       garder_journaux; etape1; etape2; etape3; etape4; etape5
+    "")       garder_journaux; bruit_preparer; etape1; etapeb; etape2; etape3; etape4; etape5
               dire "tout tourne. Journaux : $RUNDIR/*.log   suivre : ./run.sh --logs   arreter : ./run.sh --stop" ;;
     *)        rater "option inconnue : $1 (voir --help)" ;;
 esac

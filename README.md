@@ -142,3 +142,33 @@ logical (not arithmetic) 40-bit shift in `AND/OR/XOR src,SHIFT,dst`, SXM-respect
 RSBX/SSBX (gates `CALYPSO_LOGIC40`, `CALYPSO_LD16_SEXT`, `CALYPSO_F0BX_SBIT` = old behaviour).
 
 `C54X_BIN=/path/to/c54x_exe ./run.sh` runs another build of the executable.
+
+## Noise injection (downlink)
+
+Off by default. Two independent ways to degrade what the DSP receives, both driven from the
+environment of `run.sh` (and therefore of `osmo-operator/start-direct.sh --dsp`):
+
+- `BRUIT_SNR_DB=<dB>` alone: AWGN added by the C54x core itself to every downlink I/Q sample
+  (`c54x_bsp_load()` in qosmo `calypso_c54x.c`); `run.sh` passes it to `c54x_exe` as
+  `CALYPSO_BSP_SNR_DB` (and `BRUIT_GRAINE` as `CALYPSO_BSP_BRUIT_GRAINE`).
+- `BRUIT_MODE=ber|souple|iq|relais`: `run.sh` inserts the UDP proxy
+  `/opt/GSM/qosmo/tools/injecteur_bruit.py` (fallback: `tools/injecteur_bruit.py`, a link to it)
+  as step **b**: `c54x_exe` listens on `BRUIT_PORT_DSP` (16702, via `CALYPSO_BSP_PORT`), the proxy
+  takes `127.0.0.1:6702`, degrades the bridge's 8-byte-header + 148 hard-bit bursts and forwards
+  them; anything the BSP sends back is relayed unchanged to the bridge.
+  `ber` flips bits (`BRUIT_BER`, bursty with `BRUIT_RAFALES=<mean length in bits>`), `souple` adds
+  AWGN at `BRUIT_SNR_DB` then hard-decides (the stream carries no soft values), `iq` (experimental,
+  numpy, refused under `CALYPSO_BSP_STREAM=1`) sends GMSK I/Q + AWGN through the BSP's
+  IQ_PASSTHROUGH path, `relais` changes nothing. `BRUIT_PERTE` erases bursts, `BRUIT_TN` restricts
+  timeslots, `BRUIT_GRAINE` makes errors reproducible per (fn, tn). In `MODE=grgsm` the proxy sits
+  between `pont.py` (`PONT_GSMTAP_PORT=14730`) and QEMU's GSMTAP port 4730 (`ber`/`relais` only).
+
+```sh
+BRUIT_MODE=ber BRUIT_BER=0.01 PONT=1 ./run.sh       # 1 % bit errors on every downlink burst
+BRUIT_SNR_DB=12 PONT=1 ./run.sh                     # core AWGN at 12 dB, no proxy
+./run.sh --step b                                   # the proxy alone; --status shows its last STATS line
+```
+
+Log: `$RUNDIR/bruit.log` (periodic `STATS`, final `BILAN`); `./run.sh --stop` stops it. A rejected
+configuration stops `run.sh` before anything is launched. Details:
+`/opt/GSM/osmo-operator/wiki/Injecteur-bruit.md`.
