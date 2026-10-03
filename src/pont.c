@@ -599,7 +599,10 @@ static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
     if (b == 0) { masque = 0; memcpy(l2, g_romul_l2_pose, 23); fn0 = fn; }
     uint8_t *o = &bits[b * 116], *x = &flux[b * 116];
     for (int i = 0; i < 116; i++) {
-        int k = i < 57 ? i : (i < 59 ? 114 + (i - 57) : i - 2);   /* 57 donnees, hl, hu, 57 donnees */
+        /* 57 donnees, hl, hu, 57 donnees. Les 114 bits de donnees occupent les mots 0..7 MSB d'abord
+         * (bits 0..113) ; hl/hu sont les 2 bits BAS du mot 7 (releve : 0x3f91 = 0x?003 sur SDCCH, ou
+         * hl = hu = 1), soit k = 126 et 127 -- pas 114/115 (bits 13/12, toujours 0 : revue 2026-10-03). */
+        int k = i < 57 ? i : (i < 59 ? 126 + (i - 57) : i - 2);
         o[i] = (dsp->data[ROM_UL_BURST + k / 16] >> (15 - k % 16)) & 1;
         x[i] = (dsp->data[ROM_UL_FLUX + k / 16] >> (15 - k % 16)) & 1;
     }
