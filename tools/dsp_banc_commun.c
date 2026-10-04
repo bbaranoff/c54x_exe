@@ -601,7 +601,8 @@ static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn, int amp)
         gmsk_elargir(dst, 148, 0.3);
         return;
     }
-    gmsk_moduler(bits, 148, amp, 0.0, 0.35, dst);
+    { static double dsb = -9; if (dsb < -1) { const char *e = getenv("BANC_SB_DEC"); dsb = e ? atof(e) : 0.35; }
+      gmsk_moduler(bits, 148, amp, 0.0, dsb, dst); }
     gmsk_elargir(dst, 148, 1.0);
     uint32_t seed = fn * 2654435761u + 777u;
     for (int k = 0; k < 296; k++) {
@@ -627,7 +628,23 @@ static void deposer(uint32_t fn)
     if (amp <= 0) amp = 30000;
     const bool one_shot = calypso_rhea_dma_one_shot();
     const int nwin = one_shot ? calypso_rhea_dma_get_len_words() / 2 : 0;
-    const int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+    int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+    /* BANC_FB_DECAL=k : en recherche FB (DMA continue), le FCCH est depose k
+     * echantillons apres l'ouverture de la fenetre (mesure TOA = f(k)). */
+    static int fb_decal = -1;
+    if (fb_decal < 0) { const char *e = getenv("BANC_FB_DECAL"); fb_decal = e ? atoi(e) : 0; }
+    if (!one_shot && type == 'F') marge = fb_decal;
+    /* BANC_SB_DECAL=k : en fenetre SB (one-shot), le SCH est depose k echantillons
+     * apres l'ouverture de la fenetre (defaut 21). */
+    static int sb_decal = -2;
+    if (sb_decal == -2) { const char *e = getenv("BANC_SB_DECAL"); sb_decal = e ? atoi(e) : -1; }
+    if (type == 'S' && one_shot && nwin >= 190 && sb_decal >= 0) marge = sb_decal;
+    static int sb_neg = 0; { const char *e = getenv("BANC_SB_NEG"); sb_neg = e ? atoi(e) : 0; }
+    if (type == 'S' && one_shot && nwin >= 190 && sb_neg > 0) marge = 0;
+    /* BANC_NB_DECAL=k : burst normal (fenetre one-shot de 150..189 echantillons), defaut 3. */
+    static int nb_decal = -2;
+    if (nb_decal == -2) { const char *e = getenv("BANC_NB_DECAL"); nb_decal = e ? atoi(e) : -1; }
+    if (type != 'S' && type != 'F' && type && one_shot && nwin >= 150 && nwin < 190 && nb_decal >= 0) marge = nb_decal;
     memset(iq, 0, sizeof iq);
     if (type == 'S') {
         g_sch.fn = fn; g_sch.tick = fn; g_sch.amp = amp;
@@ -635,11 +652,27 @@ static void deposer(uint32_t fn)
         g_sch.livre_sb = one_shot && nwin >= 190;
         g_sch.valide = true;
         if (g_sch.livre_sb) banc_stats.depots_fenetre_sb++;
-        sb_moduler(bits, iq + 2 * marge, fn, amp);
+        { static int cel = -1; if (cel < 0) cel = getenv("BANC_SB_CELLULE") ? 1 : 0;
+          extern char cellule_burst(uint32_t, uint8_t, int, double, int, int16_t *, int *) __attribute__((weak));
+          if (cel && cellule_burst) {   /* meme forme d'onde que le pont : src/cellule.c cellule_burst() */
+              static int16_t tmp[2 * 512]; int n_iq = 0;
+              const char *ed = getenv("BANC_SB_DEC");
+              cellule_burst(fn, banc_bsic, amp, ed ? atof(ed) : 0.5, marge, tmp, &n_iq);
+              memcpy(iq, tmp, (size_t)(n_iq < 2 * 256 ? n_iq : 2 * 256) * sizeof(int16_t));
+          } else {
+              sb_moduler(bits, iq + 2 * marge, fn, amp);
+              if (sb_neg > 0) { memmove(iq, iq + 2 * sb_neg, (size_t)(2 * (512 - sb_neg)) * sizeof(int16_t)); marge = 1; }
+          } }
     } else if (type) {
+        /* BANC_NB_NEG=n : burst normal en avance de n echantillons (debut coupe) */
+        static int nb_neg = -1; if (nb_neg < 0) { const char *e = getenv("BANC_NB_NEG"); nb_neg = e ? atoi(e) : 0; }
+        const bool nb_win = type != 'F' && one_shot && nwin >= 150 && nwin < 190;
+        if (nb_neg > 0 && nb_win) marge = 0;
         gmsk_moduler(bits, 148, amp, 0.0, 0.5, iq + 2 * marge);
         if (type != 'F') gmsk_elargir(iq + 2 * marge, 148, 0.3);
+        if (nb_neg > 0 && nb_win) { memmove(iq, iq + 2 * nb_neg, (size_t)(2 * (512 - nb_neg)) * sizeof(int16_t)); marge = 1; }
     }
+    if (type == 'S' && getenv("BANC_NWIN_DBG")) { static int n; if (n++ < 3) { FILE *f = fopen(getenv("BANC_NWIN_DBG"), "a"); if (f) { fprintf(f, "[nwin] SB one_shot=%d nwin=%d marge=%d len_words=%d\n", one_shot, nwin, marge, calypso_rhea_dma_get_len_words()); fclose(f); } } }
     int total = marge > 0 ? (nwin > marge + 148 ? nwin : marge + 148) : 148;
     if (total > 256) total = 256;
     calypso_bsp_rx_burst(0, fn, iq, 2 * total);
@@ -668,6 +701,7 @@ static void sb_retenter(uint32_t tick)
     if (total < 190) return;
     if (total > 512) total = 512;
     int marge = 21;
+    { const char *e = getenv("BANC_SB_DECAL"); if (e && atoi(e) >= 0) marge = atoi(e); }
     if (marge > total - 148) marge = total - 148;
     memset(iq, 0, sizeof iq);
     sb_moduler(g_sch.bits, iq + 2 * marge, g_sch.fn, g_sch.amp);

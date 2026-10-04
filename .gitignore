@@ -15,3 +15,4 @@ __pycache__/
 !/rom/calypso_dsp.Registers.bin
 /rom/calypso_dsp.txt
 /c54x_exe.*
+/tools/layer1_tester

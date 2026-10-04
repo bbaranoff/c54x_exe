@@ -582,6 +582,30 @@ static int t_tx_sdcch(void) { return ul_bloc(DUL_DSP_TASK, 22 + 15, 51, 6, 0, NU
 /* ===================================================================== */
 /*  table des tests                                                        */
 /* ===================================================================== */
+/* TOA de la FB quand la FCCH est dans la TOUTE PREMIERE trame de recherche
+ * (commande a p51 = 9, recherche des p51 = 10 : FCCH). FBPOS_MODE=0|1 (defaut 1).
+ * Avec BANC_FB_DECAL=k (decalage du burst depuis l'ouverture de la fenetre), donne
+ * le TOA de la FB en fonction de k, sans les termes de pages de 48 d'une FCCH lointaine. */
+static int t_fb_pos(void)
+{
+    banc_source = banc_cellule;
+    banc_cfg.afc_dac = -700;
+    const char *em = getenv("FBPOS_MODE");
+    int mode = em ? atoi(em) : 1;
+    int vus = 0;
+    for (int essai = 0; essai < 3; essai++) {
+        uint32_t cible = (banc_fn() / 51 + 2) * 51 + 9;
+        while (banc_fn() < cible) banc_trame();
+        uint32_t debut; int residu = 0;
+        long fcch = une_fb(mode, &debut, &residu);
+        if (fcch < 0 || g_fb.det <= 0) { det("essai %d : debut=%u (p51=%u) : pas de FB\n", essai, debut, debut % 51); continue; }
+        vus++;
+        det("essai %d : debut=%u (p51=%u) FB%d att=%d TOA=%d PM=%d angle=%d\n",
+            essai, debut, debut % 51, mode, g_fb.attempt, g_fb.toa, g_fb.pm, g_fb.angle);
+    }
+    return vus ? V_PASS : V_FAIL;
+}
+
 typedef struct { const char *nom, *tache, *desc; int (*f)(void); } Test;
 static const Test TESTS[] = {
     { "boot",      "-",            "chargeur + dsp_power_on() du firmware, IDLE, version API", t_boot },
@@ -589,6 +613,7 @@ static const Test TESTS[] = {
     { "checksum",  "33 CHECKSUM",  "dsp_checksum_task() : version/somme du code dans a_pm", t_checksum },
     { "fb0",       "5 FB, mode 0", "detection FCCH (d_fb_det, a_sync_demod : TOA -> trame, angle -> Hz)", t_fb0 },
     { "fb1",       "5 FB, mode 1", "detection FCCH en poursuite", t_fb1 },
+    { "fbpos",     "5 FB",         "TOA FB, FCCH dans la 1re trame de recherche (FBPOS_MODE, BANC_FB_DECAL)", t_fb_pos },
     { "fb-afc",    "5 FB, mode 0", "erreur de frequence mesuree avec un VCXO decale (+60 LSB)", t_fb_afc },
     { "sb",        "6 SB",         "SCH : CRC (a_sch[0]), BSIC et T1/T2/T3 (a_sch[3..4]) sur 20 SCH", t_sb },
     { "fbsb",      "5,5,6",        "acquisition complete FB0 -> FB1 -> SB (prim_fbsb.c)", t_fbsb },
