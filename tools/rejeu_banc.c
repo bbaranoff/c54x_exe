@@ -19,6 +19,15 @@
  * REJEU_STOP_PC=pc, REJEU_STOP_TMIN=tick (ignorer avant ce tick), REJEU_PEEK=adr:n,... (memoire au
  * point d'arret). L'API RAM est dsp->data[0x0800..] : a_dd_0 = 0x09f0.
  *
+ * [2026-10-04] Montant et descendant du TCH :
+ *   REJEU_TX=1        chaque burst montant final (script TSP, src/tsp_tx.c) : fn de la page W, type,
+ *                     TSC, hl/hu, 148 bits -- a decoder hors ligne (libosmocoding, A5 au fn de la ROM)
+ *   REJEU_TX_PHASE=1  a quel moment du tick la ROM finit ce script (phase A, B, pompe DMA)
+ *   REJEU_BLUD=1      qui pose / efface B_BLUD de a_cu, a_fu, a_du (ARM a T, ROM a T+1)
+ *   REJEU_DL=1        chaque burst descendant livre (fenetre 0) : fn du pont, fn de la page W (a_a5fn,
+ *                     les deux doivent etre egaux), bits demodules (grossierement : TSC a 14/26)
+ * C'est REJEU_BLUD qui a montre que montant.c effacait B_BLUD de a_fu avant la ROM (appels sans FACCH).
+ *
  *   ./rejeu_banc [fichier] [ticks max]
  */
 #include <stdio.h>
@@ -269,6 +278,28 @@ static long courir(long n)
     return k;
 }
 
+/* [2026-10-04] REJEU_TX_PHASE=1 : a quel moment du tick la ROM finit-elle le burst montant dans le
+ * script TSP (apres la phase A, apres la phase B, a quelle iteration de la pompe DMA) ? Compare les 16
+ * mots BULDATA a la derniere lecture, sans toucher au `nouveau` de tsp_tx_lire (copie locale). */
+static void tsp_phase(uint32_t tick, const char *etape, int k)
+{
+    static uint16_t vu[16]; static int actif = -1;
+    if (actif < 0) actif = getenv("REJEU_TX_PHASE") != NULL;
+    if (!actif) return;
+    struct tsp_tx_burst tb; bool nouveau;
+    const uint16_t *d = dsp->data;
+    uint16_t mots[16] = {0}; bool trouve = false;
+    for (unsigned a = 0x3cbb; a + 18 <= 0x3d00 && !trouve; a++) {
+        if (d[a] != 0x1c0a) continue;
+        int ok = 1; for (int i = 0; i < 16; i++) if ((d[a + 2 + i] & 0x3e) != 0x06 && (d[a + 2 + i] & 0x3e) != 0x04) { ok = 0; break; }
+        if (ok) { memcpy(mots, &d[a + 2], sizeof mots); trouve = true; }
+    }
+    if (!trouve || memcmp(mots, vu, sizeof vu) == 0) return;
+    memcpy(vu, mots, sizeof vu);
+    (void)tb; (void)nouveau;
+    printf("tick=%u SCRIPT TSP nouveau : %s%s%d\n", tick, etape, k >= 0 ? " iteration " : "", k >= 0 ? k : 0);
+}
+
 /* Un tick = les enregistrements entre deux 'T'. */
 typedef struct { size_t debut, fin; uint32_t tick; uint8_t drap; long budget; } Tick;
 
@@ -395,6 +426,7 @@ fini:
         long fait = 0;
         if (!dsp->idle) fait = courir(budget / 8);
         while (!dsp->idle && fait < budget / 2) fait += courir(256);
+        tsp_phase(t->tick, "fin de phase A", -1);
         /* ecritures ARM, fenetre 1, puis livraisons I/Q dans l'ordre */
         for (size_t q = t->debut; q < t->fin;) {
             uint8_t k = fichier[q];
@@ -434,11 +466,14 @@ fini:
         }
         /* phase B : reste du budget, puis la pompe DMA de pont.c */
         reveil();
+        tsp_phase(t->tick, "apres les livraisons I/Q (avant phase B)", -1);
         if (!dsp->idle && budget - fait > 0) courir(budget - fait);
+        tsp_phase(t->tick, "fin de phase B", -1);
         for (int k = 0; k < 40 && dsp->running; k++) {
             if (!calypso_rhea_dma_pump(dsp)) break;
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
             if (!dsp->idle) courir(budget / 4);
+            tsp_phase(t->tick, "pompe DMA", k);
         }
         {   /* [2026-10-04] le burst montant final de la ROM (script TSP, src/tsp_tx.c), REJEU_TX=1 : chaque burst */
             struct tsp_tx_burst tb; bool nouveau = false;
@@ -457,6 +492,19 @@ fini:
         }
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2];
         uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0 : parole descendante */
+        {   /* [2026-10-04] REJEU_BLUD=1 : qui efface B_BLUD des tampons montants (a_cu, a_fu, a_du) ?
+             * En fin de tick (apres la ROM) ; les poses sont des ecritures ARM enregistrees. */
+            static int blud_on = -1; static uint16_t blud_prec[3];
+            if (blud_on < 0) blud_on = getenv("REJEU_BLUD") != NULL;
+            if (blud_on) {
+                static const unsigned off[3] = { NDB_A_CU, NDB_A_FU, NDB_A_DU_1 };
+                static const char *nom[3] = { "a_cu", "a_fu", "a_du" };
+                for (int i = 0; i < 3; i++) {
+                    uint16_t v = api[(API_NDB + off[i]) / 2] & B_BLUD;
+                    if (v != blud_prec[i]) { printf("tick=%u BLUD %s %s (fin de tick)\n", t->tick, nom[i], v ? "pose" : "EFFACE"); blud_prec[i] = v; }
+                }
+            }
+        }
         {   static int dit;
             if (!dsp->idle && dit < 5) { dit++; printf("tick=%u : DSP PAS A L'IDLE en fin de tick, pc=%04x sp=%04x\n", t->tick, dsp->pc & 0xffff, dsp->sp); } }
         {   /* REJEU_DUMP=t1-t2,dossier : memoire de donnees du DSP en fin de tick */

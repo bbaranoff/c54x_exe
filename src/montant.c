@@ -244,11 +244,38 @@ static void publier_parole(const uint8_t *fr, uint32_t fn)
 
 /* Bloc montant depose par le firmware dans le NDB : mot 0 = en-tete (B_BLUD
  * signale « bloc pret »), donnees a partir du mot 3. Les 33 octets de parole
- * sont ranges octet fort d'abord, les 23 octets L2 octet faible d'abord. */
+ * sont ranges octet fort d'abord, les 23 octets L2 octet faible d'abord.
+ *
+ * [2026-10-04] B_BLUD EST A LA ROM, PAS A L'HOTE. Cette fonction effacait le drapeau
+ * « comme le ferait le DSP » -- mais AVANT lui. Pour a_cu (SDCCH, SACCH) la ROM n'en a
+ * pas besoin : elle code le bloc des la tache DUL/AUL posee, et le drapeau tombe au tick
+ * suivant (rejeu REJEU_BLUD : pose a T, efface par la ROM a T+1, bursts de T+1 a T+4).
+ * Pour a_fu (FACCH) et a_du (parole), la tache TCHT s'en sert pour decider FACCH ou
+ * parole, et la ROM ne le lit qu'au tick suivant : montant_scruter, en fin de tick T,
+ * l'avait deja efface -> la ROM n'a jamais emis UN SEUL burst FACCH ni de parole
+ * (appels de 18:30, 18:31, 18:59, 19:02 : la BTS ne recoit sur le TS2 que les bursts
+ * SACCH, fn%26 = 12, pas de UA au SABM, retour sur le SDCCH apres 6 SABM ; le rejeu, qui
+ * ne joue pas montant.c, montre les 8 bursts FACCH a fn%26 = 4..11). Le drapeau est donc
+ * laisse a la ROM ; un bloc n'est publie qu'une fois par pose (le drapeau vu retombe entre
+ * deux, ou contenu different). MONTANT_CONSOMME_BLUD=1 : ancien comportement. */
 static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
 {
     uint16_t *w = &api_ram[(API_NDB + off) / 2];
+    static int consomme = -1;
+    static struct { unsigned off; bool publie; uint8_t contenu[FR_BYTES]; } vu[4];
+    static int nvu;
+    if (consomme < 0) {
+        const char *e = calypso_getenv("MONTANT_CONSOMME_BLUD");
+        consomme = (e && *e == '1') ? 1 : 0;
+        printf("  [montant] B_BLUD des tampons montants (a_cu, a_fu, a_du) %s\n",
+               consomme ? "efface par l'hote apres lecture (MONTANT_CONSOMME_BLUD=1) : la ROM n'emet ni FACCH ni parole"
+                        : "laisse a la ROM, qui le consomme (MONTANT_CONSOMME_BLUD=1 pour l'ancien comportement)");
+    }
+    int k;
+    for (k = 0; k < nvu && vu[k].off != off; k++) { }
+    if (k == nvu && nvu < 4) { vu[nvu].off = off; vu[nvu].publie = false; nvu++; }
     if (!(w[0] & B_BLUD)) {
+        if (k < nvu) vu[k].publie = false;     /* la ROM a consomme : la prochaine pose se publie */
         return false;
     }
     for (int i = 0; i < n; i += 2) {
@@ -260,7 +287,15 @@ static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
             out[i + 1] = second;
         }
     }
-    w[0] &= (uint16_t)~B_BLUD;   /* consomme, comme le ferait le DSP */
+    if (consomme) {
+        w[0] &= (uint16_t)~B_BLUD;
+        return true;
+    }
+    if (k < nvu) {
+        if (vu[k].publie && memcmp(vu[k].contenu, out, (size_t)n) == 0) return false;   /* deja publie, pas encore consomme */
+        vu[k].publie = true;
+        memcpy(vu[k].contenu, out, (size_t)n);
+    }
     return true;
 }
 
