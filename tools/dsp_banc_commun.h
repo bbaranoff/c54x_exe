@@ -168,9 +168,19 @@ extern struct banc_stats banc_stats;
 /* La ROM copie a chaque trame d'emission le burst courant (116 bits : 57,
  * hl, hu, 57 -> ordre libosmocoding) dans data[0x3f8a..0x3f91] et avance
  * data[0x3d9b] (pont.c tx_rom_publier). flux = flux A5 montant data[0x3f9b..]. */
-struct banc_ul_burst { uint32_t fn; int rang; uint16_t ptr; uint8_t bits[116]; uint8_t flux[116]; };
+/* Un burst serialise par la ROM dans data[0x3f8a..0x3f91] (serialiseur PROM0 0x8900) : anneau xCCH
+ * (pointeur 0x3d9b, mode 0x3fac = 3), TCH (0x3d91, mode 0), mode 1 (0x3d93/0x3d95), RACH (0x3d97/0x3d99,
+ * mode 2). rang : rang du burst dans le bloc xCCH (0..3), -1 sinon ; raw : les 8 mots tels quels. */
+struct banc_ul_burst { uint32_t fn; int rang; int mode; uint16_t ptr; uint16_t raw[8]; uint8_t bits[116]; uint8_t flux[116]; };
 #define BANC_UL_MAX 512
 extern struct banc_ul_burst banc_ul[BANC_UL_MAX];
+/* Le burst montant FINAL tel que la ROM le remet au BSP de l'ABB : 16 mots BULDATA (10 bits de donnees
+ * en [15:6], registre BULDATA1 = 3 en [5:1]) ecrits par l'emetteur PROM0 0x8605 dans le script TSP
+ * (data[0x3cbb..], juste apres le mot TOGBR2 = 0x1c0a et un mot de puissance). 160 bits = garde/queue
+ * etendue + burst de 148 + garde. Capture a chaque trame ou ces 16 mots changent. */
+struct banc_tsp_burst { uint32_t fn; uint16_t mots[16]; };
+extern struct banc_tsp_burst banc_tsp[BANC_UL_MAX];
+extern int banc_n_tsp;
 extern int banc_n_ul;
 void banc_ul_capturer(uint32_t fn);    /* appele en fin de trame par banc_trame() */
 

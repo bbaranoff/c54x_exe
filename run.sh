@@ -19,6 +19,8 @@
 # Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (80000),
 #   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
+#   Temps reel : RT_NICE (-10 par defaut, vide = sans), RT_FIFO (SCHED_FIFO, ex. 20, root), RT_CPUS (taskset,
+#   ex. 1-3), RT_RENICE_AUTRES (ex. 15 : renice des outils du panneau) ; ./run.sh --charge  qui consomme quoi.
 # Details, attendus et verifications : LAUNCH.md a cote. Bruit (BRUIT_MODE, inactif par defaut) : bloc BRUIT_ en fin.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +47,38 @@ else
     PONT_PY="${PONT_PY:-/opt/GSM/osmo-operator/pont/pont_dsp.py}"
 fi
 RUNDIR="${RUNDIR:-/tmp/c54x-pont}"
+# [2026-10-04] TEMPS REEL. Sous charge (campagne de tests, panneau, ffmpeg) la chaine c54x_exe <-> QEMU
+# <-> osmocon/mobile <-> pont rate des ticks et le son se coupe : la trame fait 4,615 ms, le travail
+# mesure ~1,2 ms ([chrono] 2026-09-23 : A 0.33 + go 0.40 + B 0.16 + qemu <0.32), et l'ordonnanceur CFS
+# met volontiers un processus de cote 5 a 10 ms quand les coeurs sont pris. Les cinq processus de la
+# chaine sont donc lances avec une priorite : RT_NICE=-10 par defaut (RT_NICE= vide pour ne rien faire),
+# RT_FIFO=<prio> pour SCHED_FIFO (chrt -f, root ; rester sous 50, les threads noyau sont au-dessus),
+# RT_CPUS=<liste> pour les epingler (taskset -c, ex. 1-3 : le coeur 0 reste au reste du systeme).
+# RT_RENICE_AUTRES=<n> abaisse en plus les outils du panneau (osmo-fft-snap, osmo-panel, osmo-topzone,
+# osmo-ts-probe, conky) a nice n. ./run.sh --charge montre qui consomme quoi.
+RT_NICE="${RT_NICE--10}"
+RT_FIFO="${RT_FIFO:-}"
+RT_CPUS="${RT_CPUS:-}"
+RT_RENICE_AUTRES="${RT_RENICE_AUTRES:-}"
+PRIO=()
+[ -n "$RT_CPUS" ] && PRIO+=(taskset -c "$RT_CPUS")
+if [ -n "$RT_FIFO" ]; then PRIO+=(chrt -f "$RT_FIFO"); elif [ -n "$RT_NICE" ]; then PRIO+=(nice -n "$RT_NICE"); fi
+renice_autres() {
+    [ -n "$RT_RENICE_AUTRES" ] || return 0
+    local pids; pids="$(pgrep -f 'osmo-fft-snap|osmo-panel|osmo-topzone|osmo-ts-probe|conky' | tr '\n' ' ')"
+    [ -n "$pids" ] && renice -n "$RT_RENICE_AUTRES" -p $pids >/dev/null 2>&1 && dire "   outils du panneau a nice $RT_RENICE_AUTRES : $pids"
+    return 0
+}
+charge() {
+    echo "chaine (pid %cpu nice politique) :"
+    local n
+    for n in dsp qemu osmocon mobile pont; do
+        if vivant "$n"; then printf '  %-8s %s\n' "$n" "$(ps -o pid=,pcpu=,ni=,cls= -p "$(pid_de "$n")" | tr -s ' ')"; else printf '  %-8s arrete\n' "$n"; fi
+    done
+    echo "processus les plus gourmands :"
+    ps -eo pid,pcpu,ni,cls,comm --sort=-pcpu | head -12 | sed 's/^/  /'
+    echo "charge moyenne $(cut -d' ' -f1-3 /proc/loadavg) sur $(nproc) coeurs ; priorite de la chaine : ${PRIO[*]:-aucune}"
+}
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
 GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (etape 2)
@@ -95,6 +129,7 @@ attendre() { local n=$(( $1 * 10 )); shift; while [ "$n" -gt 0 ]; do "$@" && ret
 [ "$MODE" = dsp ] || [ "$MODE" = grgsm ] || rater "MODE=$MODE inconnu (dsp|grgsm)"
 
 etape1() {   # le DSP (montage dsp seulement)
+    renice_autres
     [ "$MODE" = dsp ] || { dire "1. (montage grgsm : pas de c54x_exe, la couche 1 est dans QEMU)"; return; }
     vivant dsp && { dire "1. c54x_exe deja lance (pid $(pid_de dsp))"; return; }
     [ -x "$HERE/c54x_exe" ] || make -C "$HERE" >/dev/null || rater "make c54x_exe"
@@ -104,7 +139,7 @@ etape1() {   # le DSP (montage dsp seulement)
     rm -f /dev/shm/calypso_tch_cfg
     # [2026-09-23] Attendre (au plus 40 ms) une trame que la BTS livre en
     # retard plutot que la jouer en effacement (calypso_bsp.c, bsp_attendre_trame).
-    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
     dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
@@ -136,7 +171,7 @@ etape2() {   # l'ARM
     # lieu de trame/16 (0,29 ms) : la partie en serie d'une trame (DONE de la
     # phase A, GO) payait deux fois cette latence -- mesure [chrono] en TCH.
     CALYPSO_PONT_RETRY_DIV="${CALYPSO_PONT_RETRY_DIV:-64}" \
-    CALYPSO_DSP_EXTERN="$extern" "$QEMU" -M calypso -cpu arm946 -display none -parallel none \
+    CALYPSO_DSP_EXTERN="$extern" ${PRIO[@]+"${PRIO[@]}"} "$QEMU" -M calypso -cpu arm946 -display none -parallel none \
         -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" "${gdb_opt[@]}" \
         -kernel "$FIRMWARE_ELF" > "$RUNDIR/qemu.log" 2>&1 &
     echo $! > "$RUNDIR/qemu.pid"
@@ -165,7 +200,7 @@ etape3() {   # osmocon
     local pty; pty="$(cat "$RUNDIR/modem.pty")"
     rm -f "$L2_SOCK"
     vitrine osmocon
-    stdbuf -oL -eL "$OSMOCON" -m romload -i 100 -p "$pty" -s "$L2_SOCK" "$FIRMWARE_BIN" > "$RUNDIR/osmocon.log" 2>&1 &
+    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$OSMOCON" -m romload -i 100 -p "$pty" -s "$L2_SOCK" "$FIRMWARE_BIN" > "$RUNDIR/osmocon.log" 2>&1 &
     echo $! > "$RUNDIR/osmocon.pid"
     if ! attendre 30 grep -aq "your code is running now" "$RUNDIR/osmocon.log"; then
         rater "osmocon n'a pas fini le romload (voir $RUNDIR/osmocon.log). Un osmocon tue a mi-bloc laisse
@@ -192,7 +227,7 @@ etape4() {   # le mobile
     local retries=""
     [ "$MODE" = dsp ] && retries="${L23_SYNC_RETRIES_SELECTION:-8}"
     L23_SYNC_RETRIES_SELECTION="$retries" \
-    stdbuf -oL "$MOBILE" -c "$MOBILE_CFG" > "$RUNDIR/mobile.log" 2>&1 &
+    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL "$MOBILE" -c "$MOBILE_CFG" > "$RUNDIR/mobile.log" 2>&1 &
     echo $! > "$RUNDIR/mobile.pid"
     sleep 2
     vivant mobile || rater "mobile s'est arrete : $(sed 's/\x1b\[[0-9;]*m//g' "$RUNDIR/mobile.log" | grep -iE 'cannot|error|unable' | tail -1)"
@@ -206,7 +241,7 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     local extra=""; [ "$MODE" = dsp ] && extra="--dsp-port 6702"
     [ "$PONT_AIRREC" = 0 ] && extra="$extra --no-record"
     vitrine pont
-    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && exec python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
+    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"
@@ -399,6 +434,7 @@ case "${1:-}" in
               [ -f "$RUNDIR/dsp.log" ] && : > "$RUNDIR/dsp.log"
               [ -f /dev/shm/pont.log ] && : > /dev/shm/pont.log ;;
     --status) statut ;;
+    --charge) charge ;;
     --logs)   exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
     --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|b|2|3|4|5";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;

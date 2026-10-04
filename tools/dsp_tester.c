@@ -580,6 +580,73 @@ static int ul_bloc(uint16_t tache, int p51, int modulo, int n_blocs, int a5, con
 static int t_tx_sdcch(void) { return ul_bloc(DUL_DSP_TASK, 22 + 15, 51, 6, 0, NULL, "SDCCH/4 n0 montant (DUL, comme osmocom-bb)"); }
 
 /* ===================================================================== */
+/*  RACH montant (layer1/prim_rach.c)                                      */
+/* ===================================================================== */
+/* Le firmware ecrit d_rach = (ra << 8) | (bsic << 2) dans le NDB et d_task_ra = RACH_DSP_TASK (10) dans
+ * la page W (prim_rach.c l1s_tx_rach_cmd). La ROM code l'access-burst (36 bits codes) dans son anneau
+ * TX de mode 2 (pointeur 0x3d97), le serialiseur 0x8900 le copie dans data[0x3f8a] a la trame d'emission,
+ * et l'emetteur 0x85a2 y ajoute la sequence de synchro (DROM 0xa0d9, 41 bits) et les queues. Ici on
+ * compare les 36 bits codes trouves dans 0x3f8a a gsm0503_rach_ext_encode(ra, bsic) (bits 49..84 du
+ * burst de 148). */
+static struct { uint8_t ra, bsic; uint32_t fn_cmd; } g_rach;
+static int rach_cmd(uint8_t p1, uint8_t p2, uint16_t p3)
+{
+    (void)p1; (void)p2; (void)p3;
+    dsp_api.ndb->d_rach = (uint16_t)((g_rach.ra << 8) | (g_rach.bsic << 2));
+    dsp_api.db_w->d_task_ra = RACH_DSP_TASK;
+    g_rach.fn_cmd = banc_suivant.fn;
+    return 0;
+}
+static int rach_resp(uint8_t p1, uint8_t p2, uint16_t p3) { (void)p1; (void)p2; (void)p3; dsp_api.r_page_used = 1; return 0; }
+static const struct tdma_sched_item rach_sched_set[] = {
+    SCHED_ITEM_DT(rach_cmd, 3, 1, 0), SCHED_END_FRAME(),
+    SCHED_END_FRAME(),
+    SCHED_ITEM(rach_resp, -4, 1, 0), SCHED_END_FRAME(),
+    SCHED_END_SET()
+};
+static int t_rach(void)
+{
+    banc_source = banc_cellule;
+    static const char *sync = "01001011011111111001100110101010001111000";   /* 05.02 5.2.7, 41 bits */
+    int n = 0, ok36 = 0, ok148 = 0;
+    for (int essai = 0; essai < 5; essai++) {
+        banc_courir(4);
+        g_rach.ra = alea8(); g_rach.bsic = banc_bsic;
+        int n0 = banc_n_tsp;
+        tdma_schedule_set(0, rach_sched_set, 0);
+        banc_courir(6);
+        n++;
+        ubit_t cod[36];
+        gsm0503_rach_ext_encode(cod, g_rach.ra, g_rach.bsic, false);
+        /* 1. les 36 bits codes dans data[0x3f8a..0x3f8c] (le codeur de la ROM) */
+        const uint16_t *m = banc_dsp->data;
+        int d36 = 0;
+        for (int k = 0; k < 36; k++) d36 += ((m[0x3f8a + k / 16] >> (15 - k % 16)) & 1) != cod[k];
+        /* 2. le burst final (script TSP, emetteur 0x8605) : [8 garde][8 queue etendue 00111010][41 sync][36][3 queue][garde] */
+        char att[8 + 41 + 36 + 3 + 1]; int p = 0;
+        memcpy(att, "00111010", 8); p = 8;
+        memcpy(att + p, sync, 41); p += 41;
+        for (int k = 0; k < 36; k++) att[p++] = '0' + cod[k];
+        memcpy(att + p, "000", 3); p += 3; att[p] = 0;
+        int trouve = -1; char flux[161];
+        for (int i = n0; i < banc_n_tsp; i++) {
+            const struct banc_tsp_burst *t = &banc_tsp[i % BANC_UL_MAX];
+            for (int w = 0; w < 16; w++) for (int b = 0; b < 10; b++) flux[10 * w + b] = '0' + ((t->mots[w] >> (15 - b)) & 1);
+            flux[160] = 0;
+            const char *q = strstr(flux, att);
+            if (q) { trouve = (int)(q - flux); break; }
+        }
+        det("essai %d : ra=%02x bsic=%u : 36 bits codes dans 0x3f8a : %d faux ; burst final (TSP, %d capture%s) : [queue 00111010][sync][36][000] %s\n",
+            essai, g_rach.ra, g_rach.bsic, d36, banc_n_tsp - n0, banc_n_tsp - n0 > 1 ? "s" : "",
+            trouve >= 0 ? "trouve" : "ABSENT");
+        if (trouve >= 0) det("          flux de 160 bits : %s (burst a l'offset %d)\n", flux, trouve);
+        ok36 += d36 == 0; ok148 += trouve >= 0;
+    }
+    det("RACH : %d/%d codages (36 bits) = gsm0503_rach_ext_encode ; %d/%d access-bursts complets dans le script TSP de la ROM", ok36, n, ok148, n);
+    return (ok36 == n && ok148 == n) ? V_PASS : V_FAIL;
+}
+
+/* ===================================================================== */
 /*  table des tests                                                        */
 /* ===================================================================== */
 /* TOA de la FB quand la FCCH est dans la TOUTE PREMIERE trame de recherche
@@ -618,6 +685,7 @@ static const Test TESTS[] = {
     { "sb",        "6 SB",         "SCH : CRC (a_sch[0]), BSIC et T1/T2/T3 (a_sch[3..4]) sur 20 SCH", t_sb },
     { "fbsb",      "5,5,6",        "acquisition complete FB0 -> FB1 -> SB (prim_fbsb.c)", t_fbsb },
     { "nb",        "24 ALLC",      "BCCH : 8 blocs, a_cd FIRE + 23 octets == gsm0503_xcch_encode", t_nb_bcch },
+    { "rach",      "10 RACH",      "access-burst montant : codage ROM (0x3f8a) et burst final (script TSP) == 05.03/05.02", t_rach },
     { "tx-sdcch",  "12 DUL",       "SDCCH montant : a_cu -> bursts 0x3f8a == gsm0503_xcch_encode", t_tx_sdcch },
 };
 #define N_TESTS (int)(sizeof TESTS / sizeof TESTS[0])
@@ -626,6 +694,15 @@ static const Test TESTS[] = {
 static int lancer(const Test *t)
 {
     int tube[2];
+    /* DSP_TESTER_NOFORK=1 : le test tourne dans ce processus (gdb, gprof) ; un plantage emporte tout. */
+    static int nofork = -1;
+    if (nofork < 0) { const char *e = getenv("DSP_TESTER_NOFORK"); nofork = (e && *e == '1') ? 1 : 0; }
+    if (nofork) {
+        g_dl = 0; g_detail[0] = 0;
+        int v = t->f();
+        printf("[%-8s] %-10s %-14s %s\n", NOMV[v], t->nom, t->tache, g_detail);
+        return v;
+    }
     if (pipe(tube) < 0) { perror("pipe"); return V_FAIL; }
     fflush(stdout);
     pid_t p = fork();

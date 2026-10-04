@@ -46,10 +46,14 @@ int (*banc_crochet_l1s)(uint32_t fn);
 void (*banc_crochet_fin)(uint32_t fn);
 bool banc_sur_tch;
 struct banc_ul_burst banc_ul[BANC_UL_MAX];
+struct banc_tsp_burst banc_tsp[BANC_UL_MAX];
+int banc_n_tsp;
+static uint16_t g_tsp_prec[16];
 int banc_n_ul;
 
 static int g_irq_armee;            /* dsp_end_scenario() a la derniere l1_sync */
 static uint16_t g_ul_prec;
+static uint16_t g_ul_prec_ptr[6];   /* derniers pointeurs des anneaux TX : 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b */
 
 /* API RAM, en mots depuis data[0x0800] (dsp_api.h : BASE_API_*) */
 #define W_PAGE_MOT(p)   ((p) ? 0x14u : 0x00u)
@@ -305,6 +309,8 @@ int banc_dsp_power_on(struct banc_boot *b)
     /* layer1 init : l1s_reset_hw() */
     l1s_reset_hw();
     g_ul_prec = banc_dsp->data[0x3d9b];
+    { static const uint16_t ptrs[6] = { 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b };
+      for (int i = 0; i < 6; i++) g_ul_prec_ptr[i] = banc_dsp->data[ptrs[i]]; }
     return (b->bl_status == BL_STATUS_IDLE && b->idle) ? 0 : -1;
 }
 
@@ -766,18 +772,44 @@ void banc_courir(uint32_t n)
 }
 
 /* ---- bursts montants de la ROM (pont.c tx_rom_publier) --------------------------- */
-void banc_ul_capturer(uint32_t fn)
+static void banc_tsp_capturer(uint32_t fn)
 {
     const uint16_t *m = banc_dsp->data;
+    for (unsigned a = 0x3cbb; a < 0x3d00 - 18; a++) {
+        if (m[a] != 0x1c0a) continue;
+        const uint16_t *w = &m[a + 2];
+        int ok = 1;
+        for (int i = 0; i < 16; i++) if ((w[i] & 0x3e) != 0x06 && (w[i] & 0x3e) != 0x04) { ok = 0; break; }
+        if (!ok) continue;
+        if (!memcmp(w, g_tsp_prec, sizeof g_tsp_prec)) return;
+        memcpy(g_tsp_prec, w, sizeof g_tsp_prec);
+        struct banc_tsp_burst *t = &banc_tsp[banc_n_tsp % BANC_UL_MAX];
+        t->fn = fn; memcpy(t->mots, w, sizeof t->mots);
+        banc_n_tsp++;
+        return;
+    }
+}
+
+void banc_ul_capturer(uint32_t fn)
+{
+    banc_tsp_capturer(fn);
+    const uint16_t *m = banc_dsp->data;
+    static const uint16_t ptrs[6] = { 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b };
+    int bouge = 0;
+    for (int i = 0; i < 6; i++) if (m[ptrs[i]] != g_ul_prec_ptr[i]) { g_ul_prec_ptr[i] = m[ptrs[i]]; bouge = 1; }
+    if (!bouge) return;
     uint16_t p = m[0x3d9b];
-    if (p == g_ul_prec) return;
     g_ul_prec = p;
     struct banc_ul_burst *u = &banc_ul[banc_n_ul % BANC_UL_MAX];
     u->fn = fn;
     u->ptr = p;
-    u->rang = (p >= 0x4280 && p < 0x42a0 && (p - 0x4280) % 8 == 0) ? (int)(((p - 0x4280) / 8 + 3) & 3) : -1;
+    u->mode = m[0x3fac];
+    for (int i = 0; i < 8; i++) u->raw[i] = m[0x3f8a + i];
+    u->rang = (u->mode == 3 && p >= 0x4280 && p < 0x42a0 && (p - 0x4280) % 8 == 0) ? (int)(((p - 0x4280) / 8 + 3) & 3) : -1;
     for (int i = 0; i < 116; i++) {
-        int k = i < 57 ? i : (i < 59 ? 114 + (i - 57) : i - 2);   /* 57 donnees, hl, hu, 57 donnees */
+        /* 57 donnees, hl, hu, 57 donnees ; hl/hu = 2 bits BAS du mot 7 (k = 126, 127), comme pont.c tx_rom_publier
+         * (revue 2026-10-03) -- le banc gardait 114/115 et comptait 0/24 bursts justes. */
+        int k = i < 57 ? i : (i < 59 ? 126 + (i - 57) : i - 2);
         u->bits[i] = (m[0x3f8a + k / 16] >> (15 - k % 16)) & 1;
         u->flux[i] = (m[0x3f9b + k / 16] >> (15 - k % 16)) & 1;
     }
