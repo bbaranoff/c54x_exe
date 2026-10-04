@@ -515,3 +515,199 @@ E
 say ""
 say "# done — $(wc -l < "$LOG") lines in $LOG"
 ```
+# magic 23 reproduction — 2026-10-04T16:50Z — Linux 6.8.0-146-generic x86_64
+
+## 1. ROM dump -> PROM0.bin
+$ sha256sum dsp-rom-3606-dump.txt
+e35798f50fd0a29aa61cd53e417c010d7f172582c7bc055211daab8af1e05470  dsp-rom-3606-dump.txt
+
+PROM0.bin: 28672 words (0x7000-0xdfff)
+  7cbd: f010 2be4
+  84a4: 7713 2a27
+  b21d: 7713 00bf
+  b2b1: 7713 0097
+  b32d: 7713 0030
+$ sha256sum PROM0.bin
+75ce5375a07eac85ee42ba00af7ca82089d15b5df517710a756e6c26497021d7  PROM0.bin
+
+
+## 2. objdump tic54x (binutils 2.21.1)
+$ build-tic54x/binutils/objdump --version
+GNU objdump (GNU Binutils) 2.21.1
+Copyright 2011 Free Software Foundation, Inc.
+This program is free software; you may redistribute it under the terms of
+the GNU General Public License version 3 or (at your option) any later version.
+This program has absolutely no warranty.
+
+full disassembly: PROM0.dis (28665 lines)
+
+### expected: 7cbd sub #11236,a | 84a4 stm #10791,ar3 | b21d stm #191,ar3 | b2b1 stm #151,ar3 | b32d stm #48,ar3
+    7cbd:	f010 	sub    #11236,a
+    84a4:	7713 	stm    #10791,ar3
+    b21d:	7713 	stm    #191,ar3
+    b2b1:	7713 	stm    #151,ar3
+    b32d:	7713 	stm    #48,ar3
+
+### SB TOA chain
+    7c3d:	7712 	stm    #3278,ar2
+    81c8:	f272 	rptbd  0x81db
+    7c49:	7712 	stm    #11498,ar2
+    7a1c:	fe00 	retd   
+    84a1:	f7b6 	ssbx   st1,frct
+    84ca:	f6b6 	rsbx   st1,frct
+    84dd:	e900 	ld     #0,b
+    7c5f:	7210 	mvdm   0x2f06,ar0
+    7ca6:	f4bc 	rsbx   st0,tc
+    7cbc:	4817 	ldm    ar7,a
+    7e8a:	711f 	mvdk   DP+0x1f,0x3fa4
+    b1e7:	10f8 	ld     *(0x3fa4),a
+
+### FB TOA: 0x793e-0x795a
+    793e:	1194 	ld     *ar4+,b
+    793f:	f762 	sfta   b,2
+    7940:	44f8 	ld     *(0x3fb4),16,a
+    7941:	3fb4 
+    7942:	f061 	sub    #3,16,a
+    7943:	0003 
+    7944:	3c84 	add    *ar4,16,a
+    7945:	f061 	sub    #2,16,a
+    7946:	0002 
+    7947:	f48c 	mpya   a
+    7948:	f500 	add    a,b
+    7949:	f310 	sub    #5,b
+    794a:	0005 
+    794b:	6ff8 	sub    *(0xc3d),b,a
+    794c:	0c3d 
+    794d:	0e20 
+    794e:	fc47 	rc     aleq
+    794f:	44f8 	ld     *(0x3fb3),16,a
+    7950:	3fb3 
+    7951:	f061 	sub    #3,16,a
+    7952:	0003 
+    7953:	770e 	stm    #48,t
+    7954:	0030 
+    7955:	f48c 	mpya   a
+    7956:	08f8 	sub    *(0xc3e),a
+    7957:	0c3e 
+    7958:	f620 	sub    b,a
+    7959:	fc47 	rc     aleq
+    795a:	81f8 	stl    b,*(0x8fa)
+
+### DMA programming routine: 0xa5cd-0xa5f6
+    a5cd:	ea86 	ld     #134,dp
+    a5ce:	76f8 	st     #-3980,*(0x158)
+    a5cf:	0158 
+    a5d0:	f074 
+    a5d1:	76f8 	st     #29250,*(0x159)
+    a5d2:	0159 
+    a5d3:	7242 
+    a5d4:	76f8 	st     #-3981,*(0x15a)
+    a5d5:	015a 
+    a5d6:	f073 
+    a5d7:	4811 	ldm    ar1,a
+    a5d8:	80f8 	stl    a,*(0x15b)
+    a5d9:	015b 
+    a5da:	69f8 	orm    #4,*(0x3fdc)
+    a5db:	3fdc 
+    a5dc:	0004 
+    a5dd:	75f8 	portw  *(0x3fdc),pa63744
+    a5de:	3fdc 
+    a5df:	f900 
+    a5e0:	47f8 	rpt    *(0xc32)
+    a5e1:	0c32 
+    a5e2:	f495 	nop    
+    a5e3:	4812 	ldm    ar2,a
+    a5e4:	f010 	sub    #2048,a
+    a5e5:	0800 
+    a5e6:	6f56 	stl    a,1,DP+0x56
+    a5e7:	0c81 
+    a5e8:	7556 	portw  DP+0x56,pa64548
+    a5e9:	fc24 
+    a5ea:	4813 	ldm    ar3,a
+    a5eb:	f110 	sub    #48,a,b
+    a5ec:	0030 
+    a5ed:	6f56 	stl    a,2,DP+0x56
+    a5ee:	0c82 
+    a5ef:	7556 	portw  DP+0x56,pa64550
+    a5f0:	fc26 
+    a5f1:	7656 	st     #1197,DP+0x56
+    a5f2:	04ad 
+    a5f3:	ff4d 	xc     2,beq
+    a5f4:	7656 	st     #1193,DP+0x56
+    a5f5:	04a9 
+    a5f6:	7556 	portw  DP+0x56,pa64552
+
+## 3. layer1 git history
+$ git clone -q https://gitea.osmocom.org/phone-side/osmocom-bb
+
+$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Stoa -= 23 -- src/target/firmware/layer1
+8978ec57 2010-05-19 Harald Welte layer1/l1ctl: Split L1CTL_NEW_CCCH_REQ in FBSB_REQ nad SYNC_REQ
+5f751d3d 2010-04-09 Harald Welte layer1: move FB and SB detection into prim_fbsb.c
+fbe7b94c 2010-02-18 Harald Welte Initial import of OsmocomBB into git repository
+
+$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Smagic 23 -- src/target/firmware/layer1
+8978ec57 2010-05-19 Harald Welte layer1/l1ctl: Split L1CTL_NEW_CCCH_REQ in FBSB_REQ nad SYNC_REQ
+5f751d3d 2010-04-09 Harald Welte layer1: move FB and SB detection into prim_fbsb.c
+48dfd41e 2010-04-07 Harald Welte layer1: add 'struct mon_state' argument to read_{fb,sb}_result()
+
+### cb71b972: toa -= 23 / fbinfo2cellinfo lines (expect added fbinfo2cellinfo, no removed toa -= 23)
+20:@@ -87,7 +87,7 @@ static void dump_mon_state(struct mon_state *fb)
+29:@@ -98,14 +98,16 @@ static int l1ctl_fbsb_resp(uint8_t res)
+48:@@ -179,25 +181,24 @@ static int l1s_sbdet_resp(__unused uint8_t p1, uint8_t attempt,
+80:@@ -225,25 +226,14 @@ static int l1s_sbdet_resp(__unused uint8_t p1, uint8_t attempt,
+108:@@ -259,18 +249,13 @@ static int l1s_sbdet_resp(__unused uint8_t p1, uint8_t attempt,
+134:@@ -279,6 +264,9 @@ static int l1s_sbdet_cmd(__unused uint8_t p1, __unused uint8_t p2,
+144:@@ -330,6 +318,41 @@ static int read_fb_result(struct mon_state *st, int attempt)
+148:+static void fbinfo2cellinfo(struct l1_cell_info *cinfo,
+154:+	last_fb->toa -= 23;
+186:@@ -354,6 +377,8 @@ static int l1s_fbdet_cmd(__unused uint8_t p1, __unused uint8_t p2,
+195:@@ -363,16 +388,7 @@ static int l1s_fbdet_resp(__unused uint8_t p1, uint8_t attempt,
+213:@@ -385,8 +401,22 @@ static int l1s_fbdet_resp(__unused uint8_t p1, uint8_t attempt,
+236:@@ -398,7 +428,8 @@ static int l1s_fbdet_resp(__unused uint8_t p1, uint8_t attempt,
+246:@@ -408,6 +439,7 @@ static int l1s_fbdet_resp(__unused uint8_t p1, uint8_t attempt,
+254:@@ -423,8 +455,15 @@ static int l1s_fbdet_resp(__unused uint8_t p1, uint8_t attempt,
+267:+				fbinfo2cellinfo(&l1s.serving_cell, last_fb);
+271:@@ -458,8 +497,6 @@ static const struct tdma_sched_item fb_sched_set[] = {
+280:@@ -467,35 +504,10 @@ static void l1a_fb_compl(__unused enum l1_compl c)
+285:-	last_fb->toa -= 23;
+313:+	fbinfo2cellinfo(&l1s.serving_cell, last_fb);
+319:@@ -513,6 +525,9 @@ void l1s_fbsb_req(uint8_t base_fn, struct l1ctl_fbsb_req *req)
+
+### current constants
+38:#define L1_NB_MARGIN_Q		(3 * 4)
+39:#define L1_SB_MARGIN_Q		(23 * 4)
+40:#define L1_TAIL_DURATION_Q	(3 * 4)
+43:#define L1_NB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_NB_MARGIN_Q - L1_TAIL_DURATION_Q)
+44:#define L1_SB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_SB_MARGIN_Q - L1_TAIL_DURATION_Q)
+54:	[L1_RXWIN_SB]	= L1_SB_DURATION_Q,
+55:	[L1_RXWIN_NB]	= L1_NB_DURATION_Q,
+206:	last_fb->toa -= 23;
+333:	/* FIXME: where did this magic 23 come from? */
+334:	last_fb->toa -= 23;
+469:	/* FIXME: where did this magic 23 come from? */
+470:	last_fb->toa -= 23;
+119:	 * is within 0...8. We have to add 75 to get an SB TOA of 4. */
+120:	tpu_shift += 75;
+
+## 4. hardware logs: qbits check ((TOA-46) mod 1250)*4
+sources: http://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html
+         https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html
+  TOA= 9651 printed=3420  -46:3420 OK   -23:3512
+  TOA= 8751 printed=4820  -46:4820 OK   -23:4912
+  TOA= 8755 printed=4836  -46:4836 OK   -23:4928
+  TOA=10003 printed=4828  -46:4828 OK   -23:4920
+  TOA=10007 printed=4844  -46:4844 OK   -23:4936
+  TOA= 8755 printed=4836  -46:4836 OK   -23:4928
+  TOA=   29 printed=4932  -46:4932 OK   -23:  24
+  TOA=   29 printed=4932  -46:4932 OK   -23:  24
+  TOA=   27 printed=4924  -46:4924 OK   -23:  16
+  TOA=   27 printed=4924  -46:4924 OK   -23:  16
+  TOA=   24 printed=4912  -46:4912 OK   -23:   4
+  TOA=   26 printed=4920  -46:4920 OK   -23:  12
+  12/12 lines match the -46 rule
+  FB mode 0 multiples of 48: 7/7
+  FB mode 1 == 3 mod 4:      10/10
+  first SB after FB sync: [29, 29, 27, 27, 24, 26]  mean delta -0.25
+  148 + 2*23 - 3 = 191 ; 148 + 2*3 - 3 = 151 ; (191-148+3)/2 = 23
+
+# done — 195 lines in toa.log
