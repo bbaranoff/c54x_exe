@@ -35,6 +35,7 @@
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
 #include "pont.h"
+#include "tsp_tx.h"
 #include "calypso_gmsk.h"
 #include "cellule.h"
 #include "montant.h"
@@ -578,6 +579,91 @@ static void tx_rom_pose(const uint16_t *api_ram, int blud_avant)
     for (int i = 0; i < 23; i++)
         g_romul_l2_pose[i] = (uint8_t)(i & 1 ? w[3 + i / 2] >> 8 : w[3 + i / 2] & 0xff);
 }
+
+/* [2026-10-04] LE BURST MONTANT FINAL DE LA ROM (script TSP, voir src/tsp_tx.h). Chaque trame ou le
+ * script porte un burst nouveau, on le publie dans /dev/shm/calypso_tx_rom (anneau : en-tete w(4)
+ * slots(4), puis des cases de 160 octets : seq(4) fn(4) type(1) tsc(1) offset(1) .(1) bits(148)).
+ * fn = la trame du tick (m.a), celle que l'ARM a donnee au DSP pour ce burst : c'est aussi le
+ * numero de trame avec lequel la ROM a chiffre (dsp_tester tx-sdcch-a5 : XOR = osmo_a5(kc, fn de la
+ * commande), 24/24). Le pont peut donc emettre ce burst tel quel a ce fn, sans codage ni A5 cote
+ * hote (PONT_UL_RAW=1 dans pont/dsp/uplink.py). MONTANT_ROM_TX=0 coupe la publication. */
+/* [2026-10-04] LE NUMERO DE TRAME DU BURST. Le tick du pas-a-pas (m.a) n'est PAS le fn GSM : le
+ * firmware se cale sur la SCH (run de 17:49 : SB fn=409 au tick ~1009) et le pont emettait les bursts
+ * de la ROM a fn%51 = 5..8 au lieu de 15..18. Le fn vrai est dans la page W que le firmware remet au
+ * DSP : a_a5fn[0] = (T3 << 5) | T2, a_a5fn[1] = T1 (calypso/dsp.c dsp_load_tch_param, ecrit avec
+ * chaque tache RX/TX de next_time). On le releve a l'IT trame, sur la page que d_dsp_page designe ;
+ * les pages sans tache RX/TX (RACH) gardent un a_a5fn perime : on prend alors tick + decalage, le
+ * decalage etant celui de la derniere page datee. */
+#define GSM_HYPERFRAME 2715648u
+static struct { bool valide; uint32_t fn; bool dec_valide; int32_t dec; uint32_t tick; } g_tsp_fn;
+static uint32_t gsmtime2fn(unsigned t1, unsigned t2, unsigned t3)
+{
+    return (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % GSM_HYPERFRAME;
+}
+static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
+{
+    const uint16_t *api = &dsp->data[0x800];
+    uint16_t v = api[(API_NDB + NDB_D_DSP_PAGE) / 2];
+    unsigned pg = (v & B_GSM_PAGE) ? 1u : 0u;
+    const uint16_t *w = &api[API_W_PAGE(pg) / 2];
+    bool datee = (w[WP_D_TASK_D / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0;
+    g_tsp_fn.tick = tick; g_tsp_fn.valide = false;
+    if (!(v & B_GSM_TASK) || !datee) return;
+    unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
+    if (t2 >= 26 || t3 >= 51) return;
+    g_tsp_fn.fn = gsmtime2fn(t1, t2, t3); g_tsp_fn.valide = true;
+    g_tsp_fn.dec = (int32_t)((g_tsp_fn.fn + GSM_HYPERFRAME - (tick % GSM_HYPERFRAME)) % GSM_HYPERFRAME);
+    g_tsp_fn.dec_valide = true;
+}
+static uint32_t tx_tsp_fn(uint32_t tick, int *source)
+{
+    if (g_tsp_fn.valide && g_tsp_fn.tick == tick) { *source = 1; return g_tsp_fn.fn; }
+    if (g_tsp_fn.dec_valide) { *source = 2; return (uint32_t)((tick + (uint32_t)g_tsp_fn.dec) % GSM_HYPERFRAME); }
+    *source = 0; return tick;
+}
+#define ROM_TX_SHM   "/dev/shm/calypso_tx_rom"
+#define ROM_TX_SLOTS 256
+#define ROM_TX_SZ    160
+static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
+{
+    static int actif = -1, fd = -1;
+    static uint32_t w_compte;
+    static unsigned n_rach, n_nb, n_inconnu;
+    if (actif < 0) {
+        const char *e = calypso_getenv("MONTANT_ROM_TX"); actif = !(e && *e == '0');
+        printf("  [rom-tx] burst montant final de la ROM (script TSP 0x3cbb) -> %s : %s\n", ROM_TX_SHM,
+               actif ? "actif" : "coupe (MONTANT_ROM_TX=0)");
+    }
+    if (!actif) return;
+    struct tsp_tx_burst b; bool nouveau = false;
+    if (!tsp_tx_lire(dsp->data, &b, &nouveau) || !nouveau) return;
+    if (fd < 0) {
+        fd = open(ROM_TX_SHM, O_RDWR | O_CREAT, 0666);
+        if (fd < 0 || ftruncate(fd, 8 + ROM_TX_SLOTS * ROM_TX_SZ) < 0) { actif = 0; return; }
+        uint32_t h[2] = { 0, ROM_TX_SLOTS };
+        if (pwrite(fd, h, sizeof h, 0) < 0) { actif = 0; return; }
+    }
+    uint8_t slot[ROM_TX_SZ] = {0};
+    int src = 0;
+    uint32_t fn_gsm = tx_tsp_fn(fn, &src);
+    w_compte++;
+    memcpy(slot, &w_compte, 4); memcpy(slot + 4, &fn_gsm, 4);
+    slot[8] = (uint8_t)b.type; slot[9] = (uint8_t)(b.tsc < 0 ? 0xff : b.tsc); slot[10] = (uint8_t)(b.offset < 0 ? 0xff : b.offset);
+    slot[11] = (uint8_t)src;   /* 1 = a_a5fn de la page, 2 = tick + decalage, 0 = tick nu */
+    memcpy(slot + 12, b.bits, 148);
+    off_t off = 8 + (off_t)((w_compte - 1) % ROM_TX_SLOTS) * ROM_TX_SZ;
+    if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
+    if (b.type == TSP_TX_RACH) n_rach++; else if (b.type == TSP_TX_NB) n_nb++; else n_inconnu++;
+    static int nlog;
+    if (nlog++ < 6 || (b.type == TSP_TX_RACH && n_rach <= 3))
+        printf("  [rom-tx] #%u tick=%u fn=%u (%s) %s%s offset=%d @%04x : %s...\n", w_compte, fn, fn_gsm,
+               src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : "TICK NU",
+               b.type == TSP_TX_RACH ? "RACH" : b.type == TSP_TX_NB ? "NB" : "?", b.type == TSP_TX_NB ? (char[]){' ', 'T', 'S', 'C', (char)('0' + b.tsc), 0} : "",
+               b.offset, b.adresse, (char[]){ '0' + b.bits[0], '0' + b.bits[1], '0' + b.bits[2], '0' + b.bits[3], '0' + b.bits[4], '0' + b.bits[5], '0' + b.bits[6], '0' + b.bits[7], 0 });
+    if ((n_rach + n_nb + n_inconnu) % 2000 == 0)
+        printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, inconnus %u\n", n_rach + n_nb + n_inconnu, n_rach, n_nb, n_inconnu);
+}
+
 static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
 {
     static int actif = -1, fd = -1;
@@ -853,6 +939,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         static int irq_chaque = -1;
         if (irq_chaque < 0) { const char *e = calypso_getenv("PONT_IRQ_TRAME"); irq_chaque = (e && *e == '1') ? 1 : 0; }
         if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (irq_chaque || g_tick_irq_trame)) {
+            tx_tsp_dater(dsp, g_c54x_exe_fn);     /* le fn GSM de la page que la ROM va lire */
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         }
         if (calypso_getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
@@ -1907,6 +1994,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             tx_inject_sortie(dsp, m.a);
             tx_ombre_compare(dsp, m.a);
             tx_rom_publier(dsp, m.a);
+            tx_tsp_publier(dsp, m.a);
             tx_sonde_apres(dsp, api_ram, m.a);
             dsp_global_tx = dsp;
             { int blud_avant = (api_ram[(API_NDB + NDB_A_CU) / 2] & B_BLUD) != 0;

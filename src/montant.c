@@ -1234,11 +1234,15 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
          * (elle la lirait a la trame suivante) et n'execute pas le RACH ; c'est le pont qui emet
          * l'access-burst (side-band calypso_rach). Ecart assume, desormais reglable :
          * MONTANT_EFFACE_TASK_RA=0 laisse la tache a la ROM (comportement d'un vrai Calypso, a valider). */
+        /* [2026-10-04] Par defaut la ROM GARDE la tache : elle code l'access-burst (0x3f8a, 36 bits =
+         * gsm0503_rach_ext_encode) et son emetteur le serialise dans le script TSP (dsp_tester rach,
+         * 5/5), publie par pont.c (calypso_tx_rom). MONTANT_EFFACE_TASK_RA=1 : ancien comportement. */
         static int efface_ra = -1;
         if (efface_ra < 0) {
             const char *e = calypso_getenv("MONTANT_EFFACE_TASK_RA");
-            efface_ra = (e && *e == '0') ? 0 : 1;
-            if (!efface_ra) printf("  [montant] MONTANT_EFFACE_TASK_RA=0 : d_task_ra laisse a la ROM\n");
+            efface_ra = (e && *e == '1') ? 1 : 0;
+            printf("  [montant] d_task_ra %s\n", efface_ra ? "efface avant la ROM (MONTANT_EFFACE_TASK_RA=1) : RACH code par le pont"
+                                                           : "laisse a la ROM : elle code l'access-burst (MONTANT_EFFACE_TASK_RA=1 pour l'ancien comportement)");
         }
         if (task_ra && efface_ra) {
             wp[WP_D_TASK_RA / 2] = 0;   /* comme qosmo-dsp/calypso_trx.c:1955 */

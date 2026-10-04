@@ -3176,3 +3176,40 @@ Reponses aux points de couverture demandes :
   ROM ; le BFI de la parole est posé à tort (err=0 partout, BFI=1 dès le 1er
   bloc incomplet) ; SACCH/8 DL ~80 % FIRE KO. Prochaine cible : l'instruction
   ROM qui pose B_BFI dans a_dd_0.
+
+## 2026-10-04 — Le burst montant FINAL de la ROM : deux bugs du cœur (CMPR, LD src,ASM), le script TSP, RACH bit-exact, tuyau unique vers le pont
+
+* **Le « magic 23 »** : `proof_toa_23.md` (anglais, signé par `sign.sh`) et son dossier de preuves. Le
+  DSP rend la position du burst dans sa fenêtre (indice du retard retenu par le corrélateur, bord
+  d'attaque de l'estimation de canal, PROM0 0x84a1-0x7cbf) ; les fenêtres 191 (SB) et 151 (NB) sont des
+  immédiats de la ROM (`stm #191,ar3` 0xb21d, `stm #151,ar3` 0xb2b1) = 148 + 2·marge − 3 avec les marges
+  23 et 3 de `tpu_window.c` ; le chemin FB soustrait 23 deux fois depuis `cb71b972` ; journaux
+  silicium (liste, 2011 et 2024) : qbits = ((TOA−46) mod 1250)×4 (12/12), 1re SB après synchro FB à
+  27 ± 2 (n = 6). Désassembleur : binutils 2.21.1 `--target=tic54x-coff` (sources dans la couche
+  containerd), dump public FreeCalypso 3606 = PROM0 local mot pour mot.
+* **Deux bugs du cœur** (qosmo `c54x_exec.c`, gates `CALYPSO_CMPR_ANCIEN` / `CALYPSO_LDASM_ANCIEN`) :
+  `CMPR CC,ARx` (0xF4A8 masque 0xFCF8, 78 sites) n'existait pas — l'émetteur de bursts `0x8608 cmpr
+  eq,ar2 ; rc tc` rendait la main sur un TC périmé ; `LD src,ASM` (0xF482) ignorait son décalage — les
+  16 mots BULDATA sortaient à 0xff06. ISA inchangée (150 ok / 58 FAIL / 22 S sur 230) : ces 58 sont la
+  file de travail avant tout nouveau tuyau.
+* **Le script TSP** (`src/tsp_tx.c`) : chaque trame la ROM écrit en data[0x3cbb..] le script pour
+  l'ABB ; marqueur 0x1c0a (TOGBR2), puis 16 mots BULDATA = (10 bits << 6) | 0x06 (émetteur 0x8605,
+  tables DROM 0xa0c9 TSC / 0xa0d9 sync RACH / 0xa0dc queue ; `xorm 0xaa80` à 0xb773 = inversion I/Q).
+  160 bits = 8 de garde + le burst de 148 + garde. `dsp_tester rach` : la ROM exécute la tâche RACH,
+  36 bits codés = `gsm0503_rach_ext_encode` et access-burst 05.02 exact (5/5) ; `tx-sdcch` 24/24
+  (capture hl/hu du banc alignée sur pont.c) ; `tx-sdcch-a5` 24/24 : la ROM chiffre avec
+  osmo_a5(kc, fn de la commande) = le fn du burst. `tools/rejeu_banc` (cible make) capture ces bursts sur
+  l'enregistrement TCH de 15:47 : 180 NB, TSC 7, décalage 8.
+* **Tuyau unique** : pont.c `tx_tsp_publier` publie chaque burst final (fn, type, TSC, 148 bits) dans
+  `/dev/shm/calypso_tx_rom` (`MONTANT_ROM_TX=0` coupe) ; montant.c laisse `d_task_ra` à la ROM
+  (`MONTANT_EFFACE_TASK_RA=1` = ancien) ; pont/dsp/uplink.py `RomTxRing` + `PONT_UL_RAW=1` (run.sh :
+  `UL_RAW`, 1 par défaut) : la BTS reçoit les bursts de la ROM tels quels à son fn, RACH sur TS0, NB sur
+  le TN du canal dédié, sans codage ni A5 hôte ; les chemins hôte tournent encore pour les journaux
+  mais leurs bursts vont au puits. Non testé en bout en bout : à valider au prochain run (`UL_RAW=0` pour
+  revenir). osmo-bts `trx_sched_ul_burst` ne rejette pas un burst montant sur son fn.
+* **Firmware** : retour à `layer1.highram` d'origine (variante patchée supprimée ; B_BFI à surveiller).
+* **Temps réel** (son coupé sous charge) : l'émulateur coûte ~23 ns/instruction, attentes en `poll()` ;
+  run.sh lance la chaîne en `nice -10` (`RT_NICE`), `RT_FIFO`, `RT_CPUS`, `RT_RENICE_AUTRES`,
+  `./run.sh --charge`.
+* Banc : `DSP_TESTER_NOFORK=1` (gdb/gprof), captures génériques des anneaux TX et du script TSP ;
+  `./dsp_tester --all` : 9 PASS (dont rach, tx-sdcch, tx-sdcch-a5), 4 FAIL (fb0, fb1, fbsb, nb).

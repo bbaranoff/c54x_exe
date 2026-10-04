@@ -19,6 +19,7 @@
 # Variables : MODE, PONT, LOCKSTEP (1 : QEMU attend le DSP a chaque trame), INSNS (80000),
 #   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
+#   UL_RAW (1 : le pont emet les bursts finaux de la ROM tels quels ; 0 : codage hote), MONTANT_EFFACE_TASK_RA.
 #   Temps reel : RT_NICE (-10 par defaut, vide = sans), RT_FIFO (SCHED_FIFO, ex. 20, root), RT_CPUS (taskset,
 #   ex. 1-3), RT_RENICE_AUTRES (ex. 15 : renice des outils du panneau) ; ./run.sh --charge  qui consomme quoi.
 # Details, attendus et verifications : LAUNCH.md a cote. Bruit (BRUIT_MODE, inactif par defaut) : bloc BRUIT_ en fin.
@@ -241,7 +242,10 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     local extra=""; [ "$MODE" = dsp ] && extra="--dsp-port 6702"
     [ "$PONT_AIRREC" = 0 ] && extra="$extra --no-record"
     vitrine pont
-    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
+    # [2026-10-04] UL_RAW=1 (defaut) : le pont emet les bursts montants finaux de la ROM (calypso_tx_rom,
+    # src/tsp_tx.c) tels quels, a son numero de trame -- RACH, SDCCH, SACCH, FACCH, parole, A5 compris.
+    # UL_RAW=0 : codage et A5 cote hote comme avant (PONT_UL_ROM reste le chemin xCCH de 2026-10-03).
+    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && export PONT_UL_RAW="${UL_RAW:-1}" && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"

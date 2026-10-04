@@ -578,6 +578,14 @@ static int ul_bloc(uint16_t tache, int p51, int modulo, int n_blocs, int a5, con
     return ul_comparer_xcch(a5, kc, quoi);
 }
 static int t_tx_sdcch(void) { return ul_bloc(DUL_DSP_TASK, 22 + 15, 51, 6, 0, NULL, "SDCCH/4 n0 montant (DUL, comme osmocom-bb)"); }
+/* Meme bloc, chiffre A5/1 par la ROM : ul_comparer_xcch compare au flux osmo_a5(kc, fn) de la trame
+ * de la commande (next_time) et dit si la ROM a chiffre avec le flux d'une autre trame (fn+-d). C'est
+ * la question ouverte « a quelle heure la ROM chiffre le montant » (99-couverture.sh:137). */
+static int t_tx_sdcch_a5(void)
+{
+    static const uint8_t kc[8] = { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
+    return ul_bloc(DUL_DSP_TASK, 22 + 15, 51, 6, 1, kc, "SDCCH/4 n0 montant chiffre A5/1 (DUL)");
+}
 
 /* ===================================================================== */
 /*  RACH montant (layer1/prim_rach.c)                                      */
@@ -687,6 +695,7 @@ static const Test TESTS[] = {
     { "nb",        "24 ALLC",      "BCCH : 8 blocs, a_cd FIRE + 23 octets == gsm0503_xcch_encode", t_nb_bcch },
     { "rach",      "10 RACH",      "access-burst montant : codage ROM (0x3f8a) et burst final (script TSP) == 05.03/05.02", t_rach },
     { "tx-sdcch",  "12 DUL",       "SDCCH montant : a_cu -> bursts 0x3f8a == gsm0503_xcch_encode", t_tx_sdcch },
+    { "tx-sdcch-a5","12 DUL + A5", "SDCCH montant chiffre : bursts 0x3f8a == xcch_encode XOR osmo_a5(kc, fn de la commande)", t_tx_sdcch_a5 },
 };
 #define N_TESTS (int)(sizeof TESTS / sizeof TESTS[0])
 

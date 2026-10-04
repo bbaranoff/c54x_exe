@@ -14,7 +14,7 @@ CPPFLAGS := -D_GNU_SOURCE -I$(HORS)/doublures -I$(L1DSP) -I$(CAL) -I$(QOSMO)/inc
 OSMO    := $(shell pkg-config --cflags --libs libosmocoding libosmocore 2>/dev/null)
 LDLIBS  := -lpthread -lm $(OSMO)
 
-SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src/cellule.c src/montant.c $(HORS)/cales-qemu.c \
+SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src/cellule.c src/montant.c src/tsp_tx.c $(HORS)/cales-qemu.c \
        $(L1DSP)/calypso_gmsk.c \
        $(L1DSP)/calypso_c54x.c \
        $(L1DSP)/c54x_exec.c \
@@ -56,6 +56,11 @@ c54x_exe: $(SRC) $(HDR)
 COEUR := $(filter-out src/%,$(SRC))
 tools/isa_tests.txt: tools/isa_examples.py
 	python3 tools/isa_examples.py > $@
+
+# Rejeu hors banc d'un TCH enregistre (tools/rejeu_banc.c) : /dev/shm/calypso_rejeu_tch.bin
+#   make tools/rejeu_banc && ./tools/rejeu_banc [fichier] [ticks max]
+tools/rejeu_banc: tools/rejeu_banc.c src/tsp_tx.c src/pcb-minimal.c src/verbosite.c $(COEUR) $(HDR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -Isrc -o $@ tools/rejeu_banc.c src/tsp_tx.c src/pcb-minimal.c src/verbosite.c $(COEUR) $(LDLIBS)
 
 isa_test: tools/isa_test.c src/pcb-minimal.c $(COEUR) tools/isa_tests.txt
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ tools/isa_test.c src/pcb-minimal.c $(COEUR) $(LDLIBS)

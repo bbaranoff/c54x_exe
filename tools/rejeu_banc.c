@@ -31,6 +31,7 @@
 #include "calypso_dma.h"
 #include "calypso_bsp.h"
 #include "calypso_rhea_dma.h"
+#include "tsp_tx.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include <math.h>
 #include <osmocom/core/bits.h>
@@ -46,6 +47,8 @@ void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 #define API_WORDS 0x2000u          /* fenetre API vue du DSP : data 0x0800..0x27ff */
 #define ENREG_API_WORDS CALYPSO_API_WORDS   /* taille de l'API RAM enregistree par pont.c */
 #define NDB 0xD4u
+#define W_PAGE(p) ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 mots (comme src/rejouer.c) */
+static uint32_t g_page_it_fn; static unsigned g_page_it_pg; static uint16_t g_page_it_td, g_page_it_tu, g_page_it_tra;
 #define PARAM 0x431u
 #define BL_ADDR_HI_W 0x7FCu
 #define BL_SIZE_W 0x7FDu
@@ -347,6 +350,8 @@ fini:
 
     uint16_t prec_cd = 0xffff, prec_fd = 0xffff;
     int sacch_ok = 0, sacch_ko = 0;
+    unsigned long tx_n = 0, tx_rach = 0, tx_nb = 0, tx_inc = 0;   /* bursts montants finaux (script TSP) */
+    unsigned long tx_hist26[26] = {0};
     uint16_t prec_dd = 0; unsigned long parole_n = 0, parole_bfi = 0, parole_err = 0;
     for (int it = 0; it < nt && it < max_ticks; it++) {
         Tick *t = &ticks[it];
@@ -370,6 +375,12 @@ fini:
         calypso_dma_tick(dsp);
         reveil();
         if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (t->drap & 1))
+            {   /* fn GSM de la page W que la ROM va lire a cette IT (comme pont.c tx_tsp_dater) */
+                uint16_t v = api[NDB + 0]; unsigned pg = (v & 1u) ? 1u : 0u; const uint16_t *w = &api[W_PAGE(pg)];
+                unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
+                g_page_it_fn = (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % 2715648u;
+                g_page_it_pg = pg; g_page_it_td = w[0]; g_page_it_tu = w[2]; g_page_it_tra = w[7];
+            }
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         long fait = 0;
         if (!dsp->idle) fait = courir(budget / 8);
@@ -405,6 +416,20 @@ fini:
             if (!calypso_rhea_dma_pump(dsp)) break;
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
             if (!dsp->idle) courir(budget / 4);
+        }
+        {   /* [2026-10-04] le burst montant final de la ROM (script TSP, src/tsp_tx.c), REJEU_TX=1 : chaque burst */
+            struct tsp_tx_burst tb; bool nouveau = false;
+            if (tsp_tx_lire(dsp->data, &tb, &nouveau) && nouveau) {
+                tx_n++; if (tb.type == TSP_TX_RACH) tx_rach++; else if (tb.type == TSP_TX_NB) tx_nb++; else tx_inc++;
+                /* fn GSM de la page W designee par d_dsp_page (a_a5fn, voir pont.c tx_tsp_dater) */
+                uint32_t fn_gsm = g_page_it_fn;
+                tx_hist26[fn_gsm % 26]++;
+                if (getenv("REJEU_TX") || tx_n <= 12) {
+                    char bits[149]; for (int i = 0; i < 148; i++) bits[i] = '0' + tb.bits[i]; bits[148] = 0;
+                    printf("tick=%u fn=%u (a_a5fn page %u a l'IT, taches d/u/ra %04x/%04x/%04x) TX %s tsc=%d fn%%26=%u fn%%51=%u : %s\n", t->tick, fn_gsm, g_page_it_pg,
+                           g_page_it_td, g_page_it_tu, g_page_it_tra, tb.type == TSP_TX_RACH ? "RACH" : tb.type == TSP_TX_NB ? "NB" : "?", tb.tsc, fn_gsm % 26, fn_gsm % 51, bits);
+                }
+            }
         }
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2];
         uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0 : parole descendante */
@@ -444,6 +469,8 @@ fini:
         prec_cd = cd[0]; prec_fd = fd[0]; prec_dd = dd[0];
     }
     printf("SACCH : %d bonnes, %d Fire KO\n", sacch_ok, sacch_ko);
+    printf("TX (script TSP) : %lu bursts, RACH %lu, NB %lu, inconnus %lu\n", tx_n, tx_rach, tx_nb, tx_inc);
+    printf("TX par fn%%26 (a_a5fn) :"); for (int i = 0; i < 26; i++) printf(" %d:%lu", i, tx_hist26[i]); printf("\n");
     if (parole_n) printf("PAROLE : %lu trames, %lu BFI, %.1f erreurs/trame\n", parole_n, parole_bfi, (double)parole_err / parole_n);
     return 0;
 }
