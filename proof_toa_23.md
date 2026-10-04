@@ -413,25 +413,12 @@ code predicts.*
 
 ```
 # 1. ROM: fetch the public dump and extract PROM0 as binary (little-endian, 2 bytes per word)
-curl -O ftp://ftp.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
-python3 - <<'E'
-import re,struct
-sec=None;w={}
-for l in open("dsp-rom-3606-dump.txt",errors="replace"):
-    m=re.match(r"DSP dump: (\w+) \[",l)
-    if m: sec=m.group(1); continue
-    m=re.match(r"([0-9a-f]{5}) : ((?:[0-9a-f]{4} ?)+)",l)
-    if m and sec=="PROM0":
-        a=int(m.group(1),16)
-        for i,x in enumerate(m.group(2).split()): w[a+i]=int(x,16)
-open("PROM0.bin","wb").write(b"".join(struct.pack("<H",w[a]) for a in range(0x7000,0xe000)))
-E
-# 2. disassemble (binutils 2.21.1 configured --target=tic54x-coff; recent binutils have dropped tic54x)
-objdump -D -b binary -m tms320c54x --adjust-vma=0x7000 PROM0.bin | less
-#   0xa5cd, 0xb21d, 0xb2b1, 0xb32d (windows); 0x7c3d, 0x81c8, 0x7c49, 0x7a1c, 0x84a1, 0x84ca, 0x84dd,
-#   0x7c5f, 0x7ca6, 0x7cbc, 0x7e8a, 0xb1e7 (SB TOA); 0x793e-0x795a (FB TOA)
-# 3. layer1
-git -C osmocom-bb log --format='%h %ad %s' --date=short -S"toa -= 23"
-git -C osmocom-bb show cb71b972 -- src/target/firmware/layer1/prim_fbsb.c
-# 4. logs: the two URLs above; qbits check: ((TOA-46) % 1250)*4
+curl -O https://ftp.gnu.org/gnu/binutils/binutils-2.21.1.tar.bz2
+tar xjf binutils-2.21.1.tar.bz2 && mkdir build-tic54x && cd build-tic54x
+../binutils-2.21.1/configure --target=tic54x-coff --disable-werror --disable-nls --disable-gdb --disable-gas \
+    --disable-ld --disable-gold --disable-gprof --disable-sim MAKEINFO=true CFLAGS='-O1 -w -std=gnu89'
+make -j8 all-binutils MAKEINFO=true && cd ..
+build-tic54x/binutils/objdump -D -b binary -m tms320c54x --adjust-vma=0x7000 PROM0.bin | less
+
+Contrôle attendu : 7cbd: sub #11236,a, 84a4: stm #10791,ar3, b21d: stm #191,ar3 — c'est ce que l'objdump fraîchement construit sort ici sur le même PROM0.
 ```
