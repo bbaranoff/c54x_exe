@@ -515,6 +515,8 @@ E
 say ""
 say "# done — $(wc -l < "$LOG") lines in $LOG"
 ```
+
+```
 # magic 23 reproduction — 2026-10-04T16:50Z — Linux 6.8.0-146-generic x86_64
 
 ## 1. ROM dump -> PROM0.bin
@@ -711,3 +713,5 @@ sources: http://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526
   148 + 2*23 - 3 = 191 ; 148 + 2*3 - 3 = 151 ; (191-148+3)/2 = 23
 
 # done — 195 lines in toa.log
+```
+

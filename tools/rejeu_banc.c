@@ -104,9 +104,11 @@ static void boot(void)
 static const uint8_t TSC7[26] = {1,1,1,0,1,1,1,1,0,0,0,1,0,0,1,0,1,1,1,0,1,1,1,1,0,0};
 static struct { uint32_t fn; uint8_t b[148]; } memo[4096];
 static int nmemo;
-static void memo_burst(uint32_t fn, const int16_t *iq, int n, int marge)
+/* Demodulation GMSK differentielle d'un burst livre (148 bits, polarite calee sur la TSC7) ;
+ * rend le score TSC (0..26) ou -1 si la fenetre est trop courte. */
+static int demod_burst(const int16_t *iq, int n, int marge, uint8_t *out, int *polarite)
 {
-    if (n / 2 < marge + 148) return;
+    if (n / 2 < marge + 148) return -1;
     uint8_t d[148], b[2][148];
     for (int k = 0; k < 148; k++) {
         int i0 = 2 * (marge + k), i1 = i0 - 2;
@@ -124,9 +126,17 @@ static void memo_burst(uint32_t fn, const int16_t *iq, int n, int marge)
         int sc = 0; for (int k = 0; k < 26; k++) sc += b[pol][61 + k] == TSC7[k];
         if (sc > bs) { bs = sc; best = pol; }
     }
+    memcpy(out, b[best], 148); *polarite = best;
+    return bs;
+}
+static void memo_burst(uint32_t fn, const int16_t *iq, int n, int marge)
+{
+    uint8_t b[148]; int pol;
+    int bs = demod_burst(iq, n, marge, b, &pol);
+    if (bs < 0) return;
     int slot = nmemo % 4096; nmemo++;
-    memo[slot].fn = fn; memcpy(memo[slot].b, b[best], 148);
-    static int nlog; if (nlog++ < 3) printf("  [sonde] burst fn=%u : TSC %d/26 (differentielle, pol=%d)\n", fn, bs, best);
+    memo[slot].fn = fn; memcpy(memo[slot].b, b, 148);
+    static int nlog; if (nlog++ < 3) printf("  [sonde] burst fn=%u : TSC %d/26 (differentielle, pol=%d)\n", fn, bs, pol);
 }
 static const uint8_t *memo_trouver(uint32_t fn)
 {
@@ -405,6 +415,19 @@ fini:
                 if (fichier[q + 5] == 0 && getenv("REJEU_SONDE")) {
                     int nwin = be16(fichier + q + 11) / 2, marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
                     memo_burst(be32(fichier + q + 6), iq, n, marge);
+                }
+                /* [2026-10-04] REJEU_DL=1 : chaque burst descendant livre (fenetre 0), avec le fn que le
+                 * pont lui a donne et le fn de la page W (a_a5fn) lu a l'IT de ce tick : les deux doivent
+                 * etre egaux pour que la ROM dechiffre au bon fn. Bits demodules a dechiffrer/decoder
+                 * hors ligne (libosmocoding). */
+                if (fichier[q + 5] == 0 && getenv("REJEU_DL")) {
+                    int nwin = be16(fichier + q + 11) / 2, marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
+                    uint8_t b[148]; int pol; int sc = demod_burst(iq, n, marge, b, &pol);
+                    if (sc >= 0) {
+                        char s[149]; for (int i = 0; i < 148; i++) s[i] = '0' + b[i]; s[148] = 0;
+                        printf("DL tick=%u fn=%u fnW=%u td=%04x nwin=%d tsc=%d/26 pol=%d : %s\n", t->tick, be32(fichier + q + 6),
+                               g_page_it_fn, g_page_it_td, nwin, sc, pol, s);
+                    }
                 }
             }
             q += l;
