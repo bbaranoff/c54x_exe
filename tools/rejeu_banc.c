@@ -426,8 +426,9 @@ fini:
                 tx_hist26[fn_gsm % 26]++;
                 if (getenv("REJEU_TX") || tx_n <= 12) {
                     char bits[149]; for (int i = 0; i < 148; i++) bits[i] = '0' + tb.bits[i]; bits[148] = 0;
-                    printf("tick=%u fn=%u (a_a5fn page %u a l'IT, taches d/u/ra %04x/%04x/%04x) TX %s tsc=%d fn%%26=%u fn%%51=%u : %s\n", t->tick, fn_gsm, g_page_it_pg,
-                           g_page_it_td, g_page_it_tu, g_page_it_tra, tb.type == TSP_TX_RACH ? "RACH" : tb.type == TSP_TX_NB ? "NB" : "?", tb.tsc, fn_gsm % 26, fn_gsm % 51, bits);
+                    printf("tick=%u fn=%u (a_a5fn page %u a l'IT, taches d/u/ra %04x/%04x/%04x) TX %s tsc=%d fn%%26=%u fn%%51=%u hl=%d hu=%d : %s\n", t->tick, fn_gsm, g_page_it_pg,
+                           g_page_it_td, g_page_it_tu, g_page_it_tra, tb.type == TSP_TX_RACH ? "RACH" : tb.type == TSP_TX_NB ? "NB" : "?", tb.tsc, fn_gsm % 26, fn_gsm % 51,
+                           tb.bits[60], tb.bits[87], bits);
                 }
             }
         }

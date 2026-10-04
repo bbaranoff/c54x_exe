@@ -1,0 +1,16 @@
+stab-syms.lo: ../../binutils-2.21.1/bfd/stab-syms.c \
+ /usr/include/stdc-predef.h bfd.h \
+ ../../binutils-2.21.1/bfd/../include/ansidecl.h \
+ ../../binutils-2.21.1/bfd/../include/symcat.h \
+ ../../binutils-2.21.1/bfd/libaout.h \
+ ../../binutils-2.21.1/bfd/../include/bfdlink.h \
+ ../../binutils-2.21.1/bfd/../include/aout/aout64.h \
+ ../../binutils-2.21.1/bfd/../include/aout/stab.def
+/usr/include/stdc-predef.h:
+bfd.h:
+../../binutils-2.21.1/bfd/../include/ansidecl.h:
+../../binutils-2.21.1/bfd/../include/symcat.h:
+../../binutils-2.21.1/bfd/libaout.h:
+../../binutils-2.21.1/bfd/../include/bfdlink.h:
+../../binutils-2.21.1/bfd/../include/aout/aout64.h:
+../../binutils-2.21.1/bfd/../include/aout/stab.def:
