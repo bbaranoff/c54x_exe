@@ -28,12 +28,12 @@ MODE="${MODE:-dsp}"
 PONT="${PONT:-0}"
 QOSMO="${QOSMO:-/opt/GSM/qosmo}"
 QEMU="${QEMU:-$QOSMO/build/qemu-system-arm}"
-# Firmware par defaut : layer1.highram_patched (TCH descendant : trames B_BFI, vols FACCH compris, passees
-# a charge nulle, masquees par l'ECU de GAPK — voir layer1.highram_patched.patch a cote) ;
-# repli sur layer1.highram d'origine s'il est absent. FIRMWARE_ELF=.../layer1.highram.elf pour l'origine.
+# Firmware : layer1.highram d'origine, non modifie. [2026-10-04] La variante layer1.highram_patched
+# (trames B_BFI du TCH descendant passees a charge nulle, masquees par l'ECU de GAPK ; be10de1) est
+# retiree : le B_BFI de la ROM est juste depuis qosmo a19dde59, et le but est le firmware tel quel.
+# FIRMWARE_ELF=... pour un autre binaire.
 _FW=/opt/GSM/firmware/board/compal_e88
-[ -r "$_FW/layer1.highram_patched.elf" ] && _FW_DEF="$_FW/layer1.highram_patched.elf" || _FW_DEF="$_FW/layer1.highram.elf"
-FIRMWARE_ELF="${FIRMWARE_ELF:-$_FW_DEF}"
+FIRMWARE_ELF="${FIRMWARE_ELF:-$_FW/layer1.highram.elf}"
 FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
 OSMOCON="${OSMOCON:-/opt/GSM/osmocom-bb/src/host/osmocon/osmocon}"
 MOBILE="${MOBILE:-$(command -v mobile || echo /usr/local/bin/mobile)}"

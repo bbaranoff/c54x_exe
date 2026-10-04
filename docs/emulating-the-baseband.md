@@ -7,8 +7,8 @@ Nothing goes on air: no SDR, no radio hardware, no spectrum licence. The baseban
 part of a phone. Ever wanted to watch what a 2G DSP actually does, step by step, without any hardware?
 Now you can.
 
-On the phone side, the QEMU Calypso machine loads the OsmocomBB layer 1 firmware as the real ARM would
-(with one patch, on the handling of bad speech frames), and a native C54x emulator runs the DSP from its
+On the phone side, the QEMU Calypso machine loads the unmodified OsmocomBB layer 1 firmware as the real
+ARM would, and a native C54x emulator runs the DSP from its
 mask ROM — identical, word for word, to the public FreeCalypso dump of ROM version 3606, which is where
 to get it; nothing is redistributed here.
 
@@ -20,7 +20,7 @@ flowchart LR
     classDef host fill:#4a2a6a,stroke:#301a48,color:#fff
     classDef net fill:#1e5a3a,stroke:#123a25,color:#fff
 
-    FW[/OsmocomBB layer 1<br/>firmware, one patch/]:::input
+    FW[/OsmocomBB layer 1<br/>firmware, unmodified/]:::input
     ROM[/DSP ROM 3606<br/>= public FreeCalypso dump/]:::input
 
     subgraph PC["Plain PC — nothing on air"]
@@ -63,9 +63,9 @@ path correctly; the two bugs found on 2026-10-04 were found exactly that way.
 
 ## Three stages, as they appear in the code
 
-1. **Layer 1 in QEMU.** The QEMU fork runs `layer1.highram` on the Calypso machine, patched on one
-   point (bad speech frames are passed at zero gain instead of being dropped). The API RAM is the real
-   one (`/dev/shm/calypso_api_ram`), and the ARM ⇄ DSP dialogue happens frame by frame.
+1. **Layer 1 in QEMU.** The QEMU fork runs an unmodified `layer1.highram` on the Calypso machine (a
+   patched build that passed bad speech frames at zero gain was used from 2026-10-03 to 2026-10-04 and
+   has been removed). The API RAM is the real one (`/dev/shm/calypso_api_ram`), and the ARM ⇄ DSP dialogue happens frame by frame.
 2. **The gr-gsm shunt.** The `grgsm` mode of `run.sh`, the `shunt_*` traces and `l1-grgsm/`: a « host
    path » in which gr-gsm did FB/SB detection inside QEMU, the libosmocoding bridge did channel decoding
    and the bridge did A5. The DSP was bypassed; the host rebuilt the signal processing.
