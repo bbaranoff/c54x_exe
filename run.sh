@@ -143,6 +143,9 @@ etape1() {   # le DSP (montage dsp seulement)
     ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
+    # [2026-10-06] shm en 0666 : le umask rabaisse la demande 0666 de c54x_exe a 0644, ce qui empeche
+    # un harvard.sh lance sous le compte utilisateur d'ecrire l'API RAM (d@!, demos sb/si3). On le force.
+    attendre 3 test -e "$DSP_SHM" && chmod 0666 "$DSP_SHM" 2>/dev/null || true
     dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
 }
 

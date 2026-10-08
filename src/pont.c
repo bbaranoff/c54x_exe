@@ -48,6 +48,44 @@ extern uint32_t g_c54x_exe_fn;          /* main.c: value returned by calypso_trx
 static volatile sig_atomic_t g_stop;
 static void sur_signal(int sig) { (void)sig; g_stop = 1; }
 
+/* [2026-10-06] STOP / GO COOPERATIFS SUR LE DSP EN MARCHE (harvard.sh stop / go).
+ * SIGUSR1 demande une pause, prise a la frontiere de trame suivante (en haut de
+ * la boucle TICK : le DSP a rendu son DONE, il est en IDLE, l'ARM attend) ;
+ * SIGUSR2 reprend. Pendant la pause, l'etat du coeur est ecrit dans
+ * PONT_PAUSE_FICHIER (une ligne « CLE valeur » par element, lisible par un
+ * shell) ; a la reprise la premiere ligne devient « ETAT reprise ». Rien n'est
+ * ecrit dans l'API RAM ni dans le coeur : le firmware ne voit qu'une trame plus
+ * longue, comme un SIGSTOP, mais a un point propre et avec les registres. */
+#define PONT_PAUSE_FICHIER "/dev/shm/calypso_dsp_pause"
+static volatile sig_atomic_t g_pause;
+static void sur_pause(int sig) { g_pause = (sig == SIGUSR1); }
+static void pause_ecrire(const C54xState *dsp, const char *etat)
+{
+    FILE *f = fopen(PONT_PAUSE_FICHIER ".tmp", "w");
+    if (!f) return;
+    fprintf(f, "ETAT %s\nFN %u\nPC %04x\nXPC %x\nIDLE %d\nRUNNING %d\nINSN %u\nLAST_PC %04x\nLAST_OP %04x\n",
+            etat, g_c54x_exe_fn, dsp->pc & 0xffff, dsp->xpc, dsp->idle, dsp->running, dsp->insn_count,
+            dsp->last_exec_pc, dsp->last_exec_op);
+    fprintf(f, "A %llx\nB %llx\nT %x\nSP %x\nST0 %x\nST1 %x\nPMST %x\nIMR %x\nIFR %x\nBK %x\nBRC %x\nRSA %x\nREA %x\nTRN %x\n",
+            (unsigned long long)(dsp->a & 0xFFFFFFFFFFULL), (unsigned long long)(dsp->b & 0xFFFFFFFFFFULL),
+            dsp->t, dsp->sp, dsp->st0, dsp->st1, dsp->pmst, dsp->imr, dsp->ifr, dsp->bk, dsp->brc, dsp->rsa, dsp->rea, dsp->trn);
+    for (int i = 0; i < 8; i++) fprintf(f, "AR%d %x\n", i, dsp->ar[i]);
+    fprintf(f, "RPT %d %x %x\nDELAY %d %x\n", dsp->rpt_active, dsp->rpt_count, dsp->rpt_pc, dsp->delay_slots, dsp->delayed_pc);
+    fclose(f);
+    rename(PONT_PAUSE_FICHIER ".tmp", PONT_PAUSE_FICHIER);
+}
+static void pause_cooperative(C54xState *dsp)
+{
+    pause_ecrire(dsp, "pause");
+    printf("pont : PAUSE (SIGUSR1) fn=%u pc=%04x xpc=%x idle=%d : etat dans %s, SIGUSR2 pour reprendre\n",
+           g_c54x_exe_fn, dsp->pc & 0xffff, dsp->xpc, dsp->idle, PONT_PAUSE_FICHIER);
+    fflush(stdout);
+    while (g_pause && !g_stop) usleep(10000);
+    pause_ecrire(dsp, "reprise");
+    printf("pont : REPRISE fn=%u pc=%04x\n", g_c54x_exe_fn, dsp->pc & 0xffff);
+    fflush(stdout);
+}
+
 C54xState *pont_allouer_dsp(void)
 {
     /* Shift the start of the struct so that data[] lands on a page boundary,
@@ -72,6 +110,12 @@ C54xState *pont_allouer_dsp(void)
     if (fd < 0) {
         fprintf(stderr, "pont : shm_open(%s) : %s\n", CALYPSO_PONT_SHM, strerror(errno));
         return NULL;
+    }
+    /* [2026-10-06] shm_open applique le umask : 0666 devient 0644 sous root, et un
+     * harvard.sh lance sous le compte de l'utilisateur ne peut plus ECRIRE l'API RAM
+     * (d@!, demos sb/si3). fchmod force 0666 pour que le shm soit ecrivable par tous. */
+    if (fchmod(fd, 0666) < 0) {
+        fprintf(stderr, "pont : fchmod(%s, 0666) : %s\n", CALYPSO_PONT_SHM, strerror(errno));
     }
     if (ftruncate(fd, CALYPSO_PONT_SHM_BYTES) < 0) {
         fprintf(stderr, "pont : ftruncate : %s\n", strerror(errno));
@@ -467,6 +511,51 @@ static int g_txf_restant, g_txf_d; static uint8_t g_txf_l2[23];
 static int g_rt_restant, g_rt_d, g_rt_n; static uint8_t g_rt_l2[23];
 static uint8_t g_omb_l2[23];
 static unsigned long g_omb_blocs, g_omb_parfaits, g_omb_ok[4], g_omb_n[4];
+/* ── OMBRE DESCENDANTE : reecrire a la source ce que l'ARM va lire ──────────────
+ * [2026-10-06] CALYPSO_SHADOW_LAC=<n> et CALYPSO_SHADOW_SB=1. a_cd (NDB) porte
+ * le bloc L2 descendant decode, a_sch le SCH decode ; l'ARM les lit APRES le DONE.
+ * En lockstep le DSP ecrit puis l'ARM lit : on s'intercale juste avant le DONE, donc
+ * ce qu'on pose est bien ce que le firmware recoit (deterministe, pas de course).
+ *   - SI3 : si a_cd est un System Information 3 (octet type L2 = 0x1b), on remplace
+ *     les 2 octets du LAC (LAI) par n -> mobile.log : CGI=MCC-MNC-n-CI. Flag FIRE
+ *     inchange, aucun CRC ne protege le L3. (Le cell_id n'est pas touche.)
+ *   - SB : a_sch (R0/R1) <- DEAD BEEF. DESTRUCTIF : le firmware perd la synchro SCH ;
+ *     a n'activer que pour montrer la perte de cellule.
+ * Offsets : a_cd[3]=debut L2 (dsp_memcpy_from_api be=0, 2 octets/mot, octet bas d'abord)
+ * donc type=octet bas de a_cd[4], cell_id = octet haut de a_cd[4] (MSB) | octet bas de a_cd[5] (LSB). */
+static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
+{
+    static int lac = -2, sb = -2;
+    if (lac == -2) { const char *e = calypso_getenv("CALYPSO_SHADOW_LAC");
+                     lac = (e && *e) ? atoi(e) : -1;
+                     if (lac >= 0) printf("  [ombre-dl] LAC SI3 force a %d (0x%04x)\n", lac, lac & 0xffff); }
+    if (sb == -2)  { const char *e = calypso_getenv("CALYPSO_SHADOW_SB");
+                     sb = (e && *e == '1') ? 1 : 0;
+                     if (sb) printf("  [ombre-dl] SB a_sch force a 40C3 2026 (CCC 2026 ; DESTRUCTIF : perte de synchro)\n"); }
+    if (!api_ram) return;
+    if (lac >= 0) {
+        /* LAI dans SI3 : octets L2 8-9 = LAC (gros-boutiste). dsp_memcpy be=0 les place tous deux dans
+         * a_cd[7] : octet 8 (LAC MSB) = octet bas de a_cd[7], octet 9 (LAC LSB) = octet haut. Donc
+         * a_cd[7] = (LAC_LSB << 8) | LAC_MSB = octet-echange du LAC. On ne touche PAS le cell_id (a_cd[4..5]). */
+        uint16_t *w = &api_ram[(API_NDB + NDB_A_CD) / 2];
+        if ((w[4] & 0xff) == 0x1b) {                       /* SI3 (type L2 = octet bas de a_cd[4]) */
+            uint16_t cible = (uint16_t)(((lac & 0xff) << 8) | ((lac >> 8) & 0xff));
+            if (w[7] != cible) {
+                int av = ((w[7] & 0xff) << 8) | ((w[7] >> 8) & 0xff);
+                w[7] = cible;
+                static unsigned long n;
+                if (++n <= 5 || n % 200 == 0)
+                    printf("  [ombre-dl] fn=%u SI3 LAC %d -> %d (#%lu)\n", fn, av, lac & 0xffff, n);
+            }
+        }
+    }
+    if (sb) {
+        for (unsigned base = 0x0037; ; base = 0x004b) {    /* a_sch[0] R0=0x0837, R1=0x084b ; index = adr - 0x0800 */
+            api_ram[base] = 0x40c3; api_ram[base + 1] = 0x2026;   /* CCC 2026, marqueur lisible */
+            if (base == 0x004b) break;
+        }
+    }
+}
 static void tx_ombre_pose(const uint16_t *api_ram, int blud_avant)
 {
     if (g_omb < 0) { const char *e = calypso_getenv("PONT_TX_OMBRE"); g_omb = (e && *e == '1'); if (g_omb) printf("  [ombre] actif\n"); }
@@ -1678,6 +1767,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     fflush(stdout);
 
     while (!g_stop) {
+        if (g_pause) pause_cooperative(dsp);
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
         if (poll(&pfd, 1, 200) <= 0) {
             continue;
@@ -1780,6 +1870,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                  * "EMPTY" (prim_rx_nb.c) away. */
                 sonde_pages("A", m.a, dsp, api_ram);
                 enreg_api_prendre(api_ram);
+                ombre_descendante(api_ram, m.a);
                 envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                 t_done_a = chrono_ms();
                 bool go = false;
@@ -1830,6 +1921,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 ninsn += n2; g_insn_b = n2;
                 if (g_done_tot) {
                     /* DONE tout de suite : QEMU repart, le DSP finit la trame ici. */
+                    ombre_descendante(api_ram, m.a);
                     envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                     done_envoye = true;
                     t_done = chrono_ms();
@@ -2006,7 +2098,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             insns_total += ninsn;
             if (drapeaux & PONT_DONE_API_IRQ) irqs++;
             enreg_api_prendre(api_ram);
-            if (!done_envoye) envoyer(fd, PONT_DONE, drapeaux, ninsn);
+            if (!done_envoye) { ombre_descendante(api_ram, m.a); envoyer(fd, PONT_DONE, drapeaux, ninsn); }
             { double t_fin = chrono_ms(); chrono_trame(t_tick, t_done_a, t_go, t_done > 0 ? t_done : t_fin, t_fin, m.a); }
             if (!init_avant && init_done) {
                 printf("pont : DSP boote (premier IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
@@ -2181,6 +2273,8 @@ int pont_serveur(C54xState *dsp, uint16_t *api_ram, const char *socket_path,
 {
     signal(SIGINT, sur_signal);
     signal(SIGTERM, sur_signal);
+    signal(SIGUSR1, sur_pause);
+    signal(SIGUSR2, sur_pause);
     { static int16_t rempl[2 * 148];         /* TS1..TS7 of the C0 carrier: dummy bursts */
       cellule_factice(amp, 0.5, rempl);
       calypso_bsp_set_remplissage(rempl, 2 * 148); }

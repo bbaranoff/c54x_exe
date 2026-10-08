@@ -36,12 +36,12 @@ echo "== run_si : cible LAI attendu MCC=$E_MCC MNC=$E_MNC LAC=$E_LAC (BSIC=$BSIC
 systemctl start osmo-bts-trx 2>/dev/null; sleep 3
 : > "$RUNDIR/mobile.log" 2>/dev/null; : > "$RUNDIR/osmocon.log" 2>/dev/null
 
-# chaîne réelle + échafaudage complet
+# chaîne réelle, NATIF. [2026-10-06] L'echafaudage de resultat (CAN_TOA/CAN_SB/AFC_HZ/RHEA_DMA) a ete
+# RETIRE : le corrélateur FB, l'AFC et la DMA de la ROM font le travail. On ne garde que le cadencement
+# et l'alimentation des bursts, qui ne fabriquent aucun resultat. (Historique des hacks : git.)
 export MODE=dsp PONT=1 IQ=none
-export CALYPSO_RHEA_DMA_XFER=1 CALYPSO_BSP_DIRECT_FEED=1 CALYPSO_PONT_LOCKSTEP=1
-export CALYPSO_TWL3025_AFC_HZ=1927
-export PONT_CAN_TOA=23 PONT_CAN_SB="$BSIC"
-echo "== hacks actifs : CAN_TOA=23, CAN_SB=$BSIC, AFC_HZ=1927, LOCKSTEP, DIRECT_FEED, RHEA_DMA"
+export CALYPSO_BSP_DIRECT_FEED=1 CALYPSO_PONT_LOCKSTEP=1   # cadencement / alimentation (pas des triches)
+echo "== NATIF : aucun echafaudage (CAN_TOA/CAN_SB/AFC_HZ/RHEA_DMA retires) ; LOCKSTEP + DIRECT_FEED"
 "$HERE/run.sh" >/dev/null 2>&1 &
 sleep 12
 grep -aq "code is running" "$RUNDIR/osmocon.log" && echo "== firmware lancé" || echo "== firmware PAS lancé (voir $RUNDIR/osmocon.log)"
