@@ -213,8 +213,29 @@ etape3() {   # osmocon
     dire "3. osmocon  pid $(pid_de osmocon)  L1CTL sur $L2_SOCK"
 }
 
+# [2026-10-15] BANC_VOCODEUR=rom : la ROM vocode (port voix modelise, CALYPSO_VSP=1).
+# Le mobile doit alors etre en `io-handler l1phy` -- seul mode ou le firmware leve les
+# mutes du vocodeur (prim_tch.c:101-111) -- et SANS io-tch-format ni ALSA dans le bloc
+# tch-voice : sous l1phy le mobile refuse io-tch-format et abandonne TOUT le fichier.
+# La variante est donc generee ici depuis MOBILE_CFG, jamais ecrite a la main.
+config_vocodeur_rom() {
+    local src="$1" dst="$RUNDIR/mobile_pont_rom.cfg"
+    awk '
+        /^ tch-voice/ { voix = 1; print; next }
+        /^ [^ ]/      { voix = 0 }
+        voix && /^  io-handler gapk/ { print "  io-handler l1phy"; next }
+        voix && /^  (io-tch-format|alsa-output-dev|alsa-input-dev)/ { next }
+        { print }' "$src" > "$dst" || rater "variante l1phy impossible : $dst"
+    grep -q "^  io-handler l1phy" "$dst" || rater "variante l1phy : pas de bloc tch-voice gapk dans $src"
+    echo "$dst"
+}
+
 etape4() {   # le mobile
     vivant mobile && { dire "4. mobile deja lance (pid $(pid_de mobile))"; return; }
+    if [ "${BANC_VOCODEUR:-hote}" = rom ]; then
+        MOBILE_CFG="$(config_vocodeur_rom "$MOBILE_CFG")"
+        dire "4. vocodeur ROM (BANC_VOCODEUR=rom) : tch-voice en l1phy -> $MOBILE_CFG"
+    fi
     [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
     [ -x "$MOBILE" ] || rater "mobile absent : $MOBILE"
     [ -r "$MOBILE_CFG" ] || rater "config mobile absente : $MOBILE_CFG"
@@ -252,11 +273,17 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"
+    # [2026-10-15] port voix (CALYPSO_VSP=1) : anneaux PCM du DSP <-> PulseAudio
+    if [ "${CALYPSO_VSP:-0}" = 1 ] && ! vivant vsp; then
+        ( cd /opt/GSM/osmo-operator && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
+        echo $! > "$RUNDIR/vsp.pid"
+        dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio"
+    fi
 }
 
 arreter() {
     local n
-    for n in pont bruit mobile osmocon gdb qemu dsp; do
+    for n in vsp pont bruit mobile osmocon gdb qemu dsp; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done; bruit_arreter

@@ -558,6 +558,15 @@ static void scruter_dcch(uint32_t fn)
     }
     seq = s2;
     int genre = b[4], ss = b[5], tn = b[6];
+    if (genre == 4) {
+        /* [2026-10-15] PDCH (GPRS, firmware l1gprs_fw.c, tap calypso_dcch_tap.c) : le BSP
+         * joue tout le TN, comme un TCH ; pas de SDCCH memorise, pas de bascule TCH. */
+        printf("  [montant] canal dedie (side-band seq=%u) : PDCH TS%d (GPRS), toutes les trames au BSP\n", seq, tn);
+        fflush(stdout);
+        calypso_bsp_set_dedie(tn, 4, 0);
+        g.dedie_arme = true;
+        return;
+    }
     /* [2026-09-23] Genre 2/3 : le tap QEMU (calypso_dcch_tap.c) annonce
      * desormais le TCH (TCH/F, TCH/H) au lieu de laisser le SDCCH perime
      * pendant tout l'appel. Simple constat ici : la bascule du BSP suit la
@@ -1246,7 +1255,25 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         front_valeur = (d_rach != 0);
         g.prev_rach = d_rach;
     }
-    if (d_rach != 0 && (tache_rach || (sur_drach && front_valeur)) &&
+    /* [2026-10-15] FRONT DE LA TACHE quand la ROM la garde (MONTANT_EFFACE_TASK_RA=0) :
+     * personne n'efface alors d_task_ra, qui reste a RACH_DSP_TASK dans la page W, et la
+     * garde de RACH_GARDE_TRAMES republiait le meme RACH toutes les 4 trames (7
+     * publications pour 1 burst de la ROM, dsp.log du 15/10). On ne publie plus que sur
+     * le front (tache absente -> presente) ou un nouveau d_rach. MONTANT_RACH_DEDUP=0 :
+     * ancien comportement. */
+    static int front_seul = -1;
+    static bool tache_avant;
+    if (front_seul < 0) {
+        const char *ea = calypso_getenv("MONTANT_EFFACE_TASK_RA");
+        const char *ed = calypso_getenv("MONTANT_RACH_DEDUP");
+        front_seul = (ea && *ea == '0') && !(ed && *ed == '0');
+        if (front_seul)
+            printf("  [montant] RACH publie sur le front de d_task_ra (MONTANT_RACH_DEDUP=0 : toutes les %d trames)\n",
+                   RACH_GARDE_TRAMES);
+    }
+    bool nouveau_rach = !front_seul || !tache_avant || front_valeur;
+    tache_avant = tache_rach;
+    if (d_rach != 0 && (tache_rach || (sur_drach && front_valeur)) && nouveau_rach &&
         (!g.rach_vu || (uint32_t)(fn - g.fn_rach) >= RACH_GARDE_TRAMES)) {
         publier_rach((uint8_t)(d_rach >> 8), (uint8_t)((d_rach & 0xff) >> 2), fn);
         g.prev_rach = d_rach;

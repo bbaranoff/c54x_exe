@@ -31,6 +31,8 @@
 #include "calypso_bsp.h"
 #include "calypso_twl3025.h"
 #include "calypso_rhea_dma.h"
+#include "calypso_a5.h"
+#include "calypso_vsp.h"
 #include "calypso_rif.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include "hw/arm/calypso/calypso_dsp_pont.h"
@@ -739,6 +741,16 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     memcpy(slot, &w_compte, 4); memcpy(slot + 4, &fn_gsm, 4);
     slot[8] = (uint8_t)b.type; slot[9] = (uint8_t)(b.tsc < 0 ? 0xff : b.tsc); slot[10] = (uint8_t)(b.offset < 0 ? 0xff : b.offset);
     slot[11] = (uint8_t)src;   /* 1 = a_a5fn de la page, 2 = tick + decalage, 0 = tick nu */
+    /* [2026-10-15] bit 7 : burst NB chiffre par la ROM -- le coprocesseur A5 a
+     * calcule un flux A5/1-2 pour ce fn (a une trame pres : recalage SACCH,
+     * calypso_a5.c). Lu par le pont pour le compteur « A5 ul rom= ». */
+    {
+        uint32_t fa;
+        if (b.type == TSP_TX_NB && calypso_a5_dernier(&fa)) {
+            int32_t d = (int32_t)((fn_gsm + GSM_HYPERFRAME - fa) % GSM_HYPERFRAME);
+            if (d <= 1 || d >= (int32_t)GSM_HYPERFRAME - 1) slot[11] |= 0x80;
+        }
+    }
     memcpy(slot + 12, b.bits, 148);
     off_t off = 8 + (off_t)((w_compte - 1) % ROM_TX_SLOTS) * ROM_TX_SZ;
     if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
@@ -965,19 +977,34 @@ static int g_reste_b;
  * B = phase B jusqu'au DONE, apres = fin de trame DSP apres le DONE. */
 #include <time.h>
 static double chrono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
-static struct { double t_fin, qemu, a, go, b, apres; unsigned n; } g_chrono;
+/* [2026-10-15] + PIRE TRAME : la moyenne ne peut pas depasser 4.62 (la trame est
+ * cadencee par le TICK de QEMU, l'attente comble le reste) ; seuls le max et le
+ * nombre de trames hors budget disent si la marge tient. dt = fin de trame a fin de
+ * trame ; trop = dt > 5.54 ms (+20 % : la trame est cadencee sur 4.615, la moitie des
+ * trames la depassent par simple gigue) ; dsp_trop = TICK -> fin de trame > 4.615 ms
+ * (le DSP seul ne tient pas une trame). */
+static struct { double t_fin, qemu, a, go, b, apres, dt_max, travail_max; unsigned n, trop, dsp_trop; } g_chrono;
 static void chrono_trame(double t_tick, double t_done_a, double t_go, double t_done, double t_fin, uint32_t fn)
 {
-    if (g_chrono.t_fin > 0) g_chrono.qemu += t_tick - g_chrono.t_fin;
+    if (g_chrono.t_fin > 0) {
+        double dt = t_fin - g_chrono.t_fin;
+        g_chrono.qemu += t_tick - g_chrono.t_fin;
+        if (dt > g_chrono.dt_max) g_chrono.dt_max = dt;
+        if (dt > 5.538) g_chrono.trop++;
+    }
+    if (t_fin - t_tick > g_chrono.travail_max) g_chrono.travail_max = t_fin - t_tick;
+    if (t_fin - t_tick > 4.615) g_chrono.dsp_trop++;
     g_chrono.a += t_done_a - t_tick; g_chrono.go += t_go - t_done_a;
     g_chrono.b += t_done - t_go; g_chrono.apres += t_fin - t_done;
     g_chrono.t_fin = t_fin;
     if (++g_chrono.n == 1000) {
         double k = 1.0 / g_chrono.n;
         printf("  [chrono] fn=%u sur 1000 trames (ms) : qemu %.2f | A %.2f | go %.2f | B %.2f | apres DONE %.2f "
-               "| trame %.2f (temps reel 4.62)\n", fn, g_chrono.qemu * k, g_chrono.a * k, g_chrono.go * k,
+               "| trame %.2f (temps reel 4.62) | pire trame %.2f, DSP pire %.2f, trames >5.54 ms %u/1000, DSP >4.62 ms %u/1000\n",
+               fn, g_chrono.qemu * k, g_chrono.a * k, g_chrono.go * k,
                g_chrono.b * k, g_chrono.apres * k,
-               (g_chrono.qemu + g_chrono.a + g_chrono.go + g_chrono.b + g_chrono.apres) * k);
+               (g_chrono.qemu + g_chrono.a + g_chrono.go + g_chrono.b + g_chrono.apres) * k,
+               g_chrono.dt_max, g_chrono.travail_max, g_chrono.trop, g_chrono.dsp_trop);
         fflush(stdout);
         double tf = g_chrono.t_fin; memset(&g_chrono, 0, sizeof g_chrono); g_chrono.t_fin = tf;
     }
@@ -1983,6 +2010,10 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 ninsn += dsp->insn_count - av2;
                 drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             }
+            /* [2026-10-15] PORT VOIX (VSP, calypso_vsp.c, CALYPSO_VSP=1) : les 36 ou 37
+             * echantillons PCM de la trame, chacun par l'ISR 0xc14a de la ROM (IT 20). */
+            if (init_done && dsp->running)
+                ninsn += calypso_vsp_trame(dsp, c54x_run_profile, m.a);
             drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             /* [2026-09-20] NB probe (PONT_NB_DEBUG=1): what the ROM leaves in the
              * R pages for a normal-burst task (ALLC/BCCH), per burst: d_task_d,
@@ -2248,8 +2279,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * Le BSP en a besoin pour savoir quel intervalle de temps livrer :
              * le pont lui envoie les huit, il n'en joue qu'un par tick, et sans
              * ca c'est toujours TS0 - donc rien du SDCCH du mobile. */
-            printf("pont : canal dedie %s : TS%u SDCCH/%s SS=%u\n",
-                   m.b == 0xFF ? "libere" : "arme", m.a, m.b ? "8" : "4", m.c);
+            if (m.b == 4)
+                printf("pont : canal dedie arme : TS%u PDCH (GPRS)\n", m.a);
+            else
+                printf("pont : canal dedie %s : TS%u SDCCH/%s SS=%u\n",
+                       m.b == 0xFF ? "libere" : "arme", m.a, m.b ? "8" : "4", m.c);
             calypso_bsp_set_dedie((int)m.a, (int)m.b, (int)m.c);
             if (m.b == 0xFF || (int)m.a <= 0) {
                 montant_canal_libere();

@@ -58,8 +58,8 @@ A A 1200
 A B 1812
 A C 0
 E
-T 7 6: Class 7 (see page 3-12) | ADD #4568, 8, A, B
-W f108 11d8
+T 7 6: Class 7 (see page 3-12) | ADD #4568h, 8, A, B
+W f108 4568
 B A 1200
 B B 1800
 B C 1
@@ -98,10 +98,10 @@ A M 0100 8000
 E
 T 12 ADDS Smem, src | ADDS *AR2–, B
 W 038a
-B AR2 100
+B AR2 104
 B B 3
 B M 0104 f006
-A AR2 ff
+A AR2 103
 A B f009
 A C 0
 A M 0104 f006
@@ -168,7 +168,7 @@ A AR3 ffff
 A PC 1002
 E
 T 23 BANZ[D] pmad, Sind | BANZ 2000h, *AR3(–1)
-W 6ce3 2000 ffff
+W 6ce3 ffff 2000
 B AR3 1
 B PC 1000
 A AR3 1
@@ -759,9 +759,11 @@ E
 T 81 4: Class 4B (see page 3-8) | LD *AR3+, 16, A
 W 4493
 B A 0
+B AR3 300
 B SXM 1
 B M 0300 fedc
 A A fffedc0000
+A AR3 301
 A SXM 1
 A M 0300 fedc
 # ligne registre incomplete: AR3                   0300                     AR1                   0301
@@ -780,7 +782,7 @@ B B ffff
 B OVB 0
 B SXM 1
 B M 0200 fedc
-A A 7ff00040
+A A 7ffd0040
 A B 7ffd004000
 A OVB 1
 A SXM 1
@@ -820,7 +822,7 @@ B ARP 0
 A ARP 3
 E
 T 89 2: Class 5B (see page 3-9) | LD 0, ASM
-W ed00
+W 3200
 B ASM 0
 B DP 4
 B M 0200 fedc
@@ -843,7 +845,7 @@ A B 1234
 A M 0060 1234
 E
 T 92 LD Xmem, dst | LD *AR4+, A
-W 1094
+W a8ab
 B A 1000
 B AR4 100
 B AR5 200
@@ -862,7 +864,7 @@ A M 0100 1234
 A M 0200 4321
 E
 T 93 LD Xmem, dst | LD *AR4+, A
-W 1094
+W aaab
 B A 1000
 B AR4 100
 B AR5 200
@@ -881,7 +883,7 @@ A M 0100 1234
 A M 0200 4321
 E
 T 94 LD Xmem, dst | LD *AR4+, A
-W 1094
+W acab
 B A 1000
 B AR4 100
 B AR5 200
@@ -900,7 +902,7 @@ A M 0100 1234
 A M 0200 4321
 E
 T 95 LD Xmem, dst | LD *AR4+, A
-W 1094
+W aeab
 B A 1000
 B AR4 100
 B AR5 200
@@ -1197,7 +1199,8 @@ B M 0200 1234
 A A 1000
 A AR4 201
 A AR5 101
-A B fff9da0fa0
+A B fff3b40f40
+# errata SPRU172C: exemple MAS Xmem,Ymem calcule sans FRCT=1 (cf. MAC Xmem,Ymem test 103 qui l'applique)
 A FRCT 1
 A T 5678
 A M 0100 5678
@@ -1229,7 +1232,8 @@ B M 0200 1234
 A A 1000
 A AR4 201
 A AR5 101
-A B fff9da0000
+A B fff3b40000
+# errata SPRU172C: idem MAS, rnd(A - 2*X*Y)
 A FRCT 1
 A T 5678
 A M 0100 5678
@@ -1647,8 +1651,10 @@ E
 T 166 RESET | RESET
 W f7e0
 B INTM 0
+B IPTR 1
 B PC 25
 A INTM 1
+A IPTR 1
 A PC 80
 E
 T 167 RET[D] | RET
@@ -1672,13 +1678,14 @@ A M 2001 0110
 E
 T 169 RETF[D] | RETF
 W f49b
+B INTM 1
 B PC 1c3
 B SP 2001
 B M 2001 0110
+A INTM 0
 A PC 110
 A SP 2002
 A M 2001 0110
-# valeur: ['xCxx']
 E
 T 170 RND src [, dst ] | RND A, B
 W f59f
@@ -1719,25 +1726,27 @@ A A 5800091a
 A C 1
 E
 S 175 3: Class 2 (see page 3-4) | RPT DAT127 ; DAT127 .EQU 0FFF | rpt['OP_Smem']: nombre: 'DAT127'; rpt['OP_k8u']: nombre: 'DAT127'; rpt['OP_lku']: nombre: 'DAT127'
-T 178 RPTB[D] pmad | ST #99, BRC
-W 761a 0063
+T 178 RPTB[D] pmad | ST #99, BRC ; RPTB end_block-1 (end_block-1 = 100Fh)
+W 761a 0063 f072 100f
+N 2
 B BRC 1234
-B PC 1000
+B PC ffe
 B RSA 5678
 A BRC 63
 A PC 1002
 A RSA 1002
-# valeur: ['end_block', '-', '1']
+A REA 100f
 E
-T 179 RPTB[D] pmad | ST #99, BRC ;execute the block 100 times
-W 761a 0063
+T 179 RPTB[D] pmad | ST #99, BRC ; RPTBD end_block-1 ; 2 delay-slot NOPs
+W 761a 0063 f272 100f
+N 4
 B BRC 1234
-B PC 1000
+B PC ffe
 B RSA 5678
 A BRC 63
 A PC 1004
 A RSA 1004
-# valeur: ['end_block', '-', '1']
+A REA 100f
 E
 T 180 RPTZ dst, #lk | RPTZ A, 1023 ; Repeat the next instruction 1024 times
 W f071 03ff
@@ -2070,8 +2079,8 @@ A C 0
 A DP 6
 A M 0302 0001
 E
-T 232 SUBC Smem, src | RPT #15
-W 470f
+T 232 SUBC Smem, src | RPT #15 ; SUBC *AR1, B
+W ec0f 1f81
 B AR1 1000
 B B 41
 B M 1000 0007
@@ -2109,8 +2118,9 @@ A A 257
 A DP 32
 A M 1005 4339
 E
-T 236 n       Opcode N | XC 1, ALEQ
-W fd47
+T 236 n       Opcode N | XC 1, ALEQ ; MAR *AR1+
+W fd47 6d91
+N 2
 B A ffffffffff
 B AR1 32
 A A ffffffffff
@@ -2177,4 +2187,22 @@ A M 0100 4040
 # ligne registre incomplete: C bus (CB), definition C-3                      DLD instruction 4-42
 # ligne registre incomplete: C16 C-3                                         double (32-bit operand) instructions 2-6
 # ligne registre incomplete: T                                       zero detect bit A (ZA), definition C-10
+E
+T 301 [banc 2026-10-16] ADD src, ASM, dst | ADD B, ASM, A ; codeur FR ROM PDROM 0xeac1 (RPE, xM << 6-exp)
+W f680
+B A 0
+B B d990000
+B ASM 3
+A A 6cc80000
+A B d990000
+A ASM 3
+E
+T 302 [banc 2026-10-16] SUB src, ASM, dst | SUB B, ASM, A
+W f681
+B A 0
+B B d990000
+B ASM 3
+A A ff93380000
+A B d990000
+A ASM 3
 E

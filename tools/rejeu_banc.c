@@ -41,6 +41,7 @@
 #include "calypso_bsp.h"
 #include "calypso_rhea_dma.h"
 #include "tsp_tx.h"
+#include "calypso_vsp.h"
 #include "hw/arm/calypso/calypso_api.h"
 #include <math.h>
 #include <osmocom/core/bits.h>
@@ -57,7 +58,7 @@ void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 #define ENREG_API_WORDS CALYPSO_API_WORDS   /* taille de l'API RAM enregistree par pont.c */
 #define NDB 0xD4u
 #define W_PAGE(p) ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 mots (comme src/rejouer.c) */
-static uint32_t g_page_it_fn; static unsigned g_page_it_pg; static uint16_t g_page_it_td, g_page_it_tu, g_page_it_tra;
+static uint32_t g_page_it_fn; static unsigned g_page_it_pg; static uint16_t g_page_it_td, g_page_it_tu, g_page_it_tra, g_page_it_ctrl, g_it_tch_mode, g_it_du1;
 #define PARAM 0x431u
 #define BL_ADDR_HI_W 0x7FCu
 #define BL_SIZE_W 0x7FDu
@@ -202,7 +203,19 @@ uint16_t data_read(C54xState *s, uint16_t addr);
 #define ANNEAU 4096
 static struct { uint16_t pc, op, op2, sp, st0, st1, ar[8]; uint32_t tick; int64_t a, b; } anneau[ANNEAU];
 static unsigned apos;
+static uint16_t *g_pcs; static unsigned long *g_pcs_cpt; static int g_npcs;
+static unsigned long *g_pcplage; static unsigned g_pclo, g_pchi;
+static void pcplage_resume(void)
+{
+    for (unsigned a = g_pclo; a <= g_pchi; a++) if (g_pcplage[a - g_pclo]) printf("PCH %04x %lu\n", a, g_pcplage[a - g_pclo]);
+}
+static void pcs_resume(void)
+{
+    for (int q = 0; q < g_npcs; q++) printf("PCS %04x : %lu\n", g_pcs[q], g_pcs_cpt[q]);
+}
 static int trace_on = -1, plante;
+static long courir(long n);
+static int vsp_courir(C54xState *d, int n) { (void)d; return (int)courir(n); }
 static long courir(long n)
 {
     if (trace_on < 0) trace_on = getenv("REJEU_TRACE") != NULL;
@@ -227,6 +240,40 @@ static long courir(long n)
         anneau[i].pc = pc; anneau[i].op = prog_fetch(dsp, pc); anneau[i].op2 = prog_fetch(dsp, pc + 1);
         anneau[i].sp = dsp->sp; anneau[i].st0 = dsp->st0; anneau[i].st1 = dsp->st1; anneau[i].tick = g_c54x_exe_fn;
         memcpy(anneau[i].ar, dsp->ar, sizeof dsp->ar); anneau[i].a = dsp->a; anneau[i].b = dsp->b;
+        {   /* [2026-10-15] REJEU_PCPLAGE=lo-hi : histogramme des PC executes dans la plage (fin de rejeu) */
+            static int init; static unsigned lo, hi; static unsigned long *h;
+            if (!init) { init = 1; const char *e = getenv("REJEU_PCPLAGE");
+                if (e && sscanf(e, "%x-%x", &lo, &hi) == 2 && hi >= lo) { h = calloc(hi - lo + 1, sizeof *h); g_pcplage = h; g_pclo = lo; g_pchi = hi; atexit(pcplage_resume); } }
+            if (h && pc >= lo && pc <= hi && dsp->xpc == 0) h[pc - lo]++;
+        }
+        {   /* [2026-10-15] REJEU_PCS=pc1,pc2,... : nombre d'executions de chaque PC (resume en fin de rejeu) */
+            static int npcs = -1; static uint16_t pcs[32]; static unsigned long cpt[32];
+            if (npcs < 0) { npcs = 0; const char *e = getenv("REJEU_PCS");
+                while (e && *e && npcs < 32) { pcs[npcs++] = (uint16_t)strtoul(e, (char **)&e, 16); if (*e == ',') e++; else break; }
+                if (npcs) atexit(pcs_resume); }
+            for (int q = 0; q < npcs; q++) if (pc == pcs[q]) cpt[q]++;
+            g_pcs = pcs; g_pcs_cpt = cpt; g_npcs = npcs;
+        }
+        {   /* [2026-10-16] REJEU_CODEC=fichier (avec REJEU_TRACE=1) : le codeur FR de la ROM, trame par trame.
+             * SO = les 160 echantillons qu'il lit (PDROM 0xe6af, deja (s>>3)<<2 comme Gsm_Preprocess),
+             * ENC = la trame qu'il rend (0x0a24, format TI : c000 52b0 0000 puis 260 bits). Avec
+             * CALYPSO_VSP_UL_FICHIER (micro de test), tools/cmp_codeur.py les compare a libgsm. */
+            static int vt = -1; static FILE *fv;
+            if (vt < 0) { const char *e = getenv("REJEU_CODEC"); vt = e && *e; if (vt) fv = fopen(e, "w"); if (!fv) vt = 0; }
+            if (vt && dsp->xpc == 0) {
+                if (pc == 0xe6af) { fprintf(fv, "SO"); for (int j = 0; j < 160; j++) fprintf(fv, " %d", (int16_t)dsp->data[0x2bfd + j]); fprintf(fv, "\n"); }
+                if (pc == 0xe3fe) { fprintf(fv, "ENC fn=%u A", g_page_it_fn); for (int j = 0; j < 20; j++) fprintf(fv, " %04x", dsp->data[0x0a24 + j]); fprintf(fv, "\n"); }
+            }
+        }
+        {   /* [2026-10-15] REJEU_MOTS=1 : le tampon de burst 0x3f8a..0x3f91 tel que la routine d'emballage
+             * le recoit, AVANT le XOR A5 (PC 0x85cb) -- a correler avec les bits emis (verif_codage). */
+            static int mots = -1; if (mots < 0) mots = getenv("REJEU_MOTS") != NULL;
+            if (mots && pc == 0x85cb) {
+                printf("MOTS tick=%u fn=%u :", g_c54x_exe_fn, g_page_it_fn);
+                for (int j = 0; j < 8; j++) printf(" %04x", dsp->data[0x3f8a + j]);
+                printf("\n");
+            }
+        }
         static int wa = -2; static uint16_t wv;
         if (wa == -2) { const char *e = getenv("REJEU_STOP_W"); wa = e ? (int)strtoul(e, NULL, 16) : -1; }
         if (wa >= 0) wv = dsp->data[wa];
@@ -393,6 +440,7 @@ fini:
     int sacch_ok = 0, sacch_ko = 0;
     unsigned long tx_n = 0, tx_rach = 0, tx_nb = 0, tx_inc = 0;   /* bursts montants finaux (script TSP) */
     unsigned long tx_hist26[26] = {0};
+    static char tx_dernier[16] = "-";
     uint16_t prec_dd = 0; unsigned long parole_n = 0, parole_bfi = 0, parole_err = 0;
     for (int it = 0; it < nt && it < max_ticks; it++) {
         Tick *t = &ticks[it];
@@ -412,6 +460,69 @@ fini:
                 }
             q += l;
         }
+        {   /* [2026-10-15] REJEU_TCH_MODE_AND / _OR (hexa) : forcer des bits de d_tch_mode (NDB mot 3)
+             * a chaque tick, apres les ecritures ARM -- p.ex. AND=7fff efface B_MUTE_VOCODEC_UL (phase C1). */
+            static int lu; static unsigned m_and = 0xffff, m_or = 0;
+            if (!lu) { lu = 1; const char *e;
+                       if ((e = getenv("REJEU_TCH_MODE_AND"))) m_and = strtoul(e, NULL, 16);
+                       if ((e = getenv("REJEU_TCH_MODE_OR")))  m_or  = strtoul(e, NULL, 16);
+                       if (m_and != 0xffff || m_or) printf("d_tch_mode force a chaque tick : AND %04x OR %04x\n", m_and, m_or); }
+            if (m_and != 0xffff || m_or) api[NDB + 3] = (uint16_t)((api[NDB + 3] & m_and) | m_or);
+        }
+        {   /* [2026-10-15] REJEU_W16_BIT14=1 : quand l'ARM pose B_TASK_ABORT (bit 15 de d_ctrl_system,
+             * mot 16 de la page W), ajouter le bit 14 -- la ROM (PROM0 0xa569) ne lance alors la tache 43
+             * (decodeur de parole) que si ce bit l'accompagne. */
+            static int on = -1; static unsigned long n;
+            if (on < 0) on = getenv("REJEU_W16_BIT14") != NULL;
+            for (int pg = 0; on && pg < 2; pg++) {
+                uint16_t *w16 = &api[W_PAGE(pg) + 16];
+                if (!(*w16 & 0x4000)) { *w16 |= 0x4000; if (n++ < 3) printf("tick=%u : d_ctrl_system page %d |= 0x4000\n", t->tick, pg); }
+            }
+        }
+        /* [2026-10-15] REJEU_MISC_TASK=1 : B_MISC_TASK (bit 3) dans d_dsp_page, comme la pile TI --
+         * la ROM ne lance la tache 34 (commandes audio -> tache 64 -> decodeur de parole 0xc4f7)
+         * que si ce bit est pose (PROM0 0xb0f9, 0x3fb0 = copie de d_dsp_page). */
+        if (getenv("REJEU_MISC_TASK") && (api[NDB + 0] & 0x0002)) api[NDB + 0] |= 0x0008;
+        {   /* [2026-10-15] REJEU_DU1_VERS_DU0=1 : la trame de parole que le firmware pose dans a_du_1
+             * (prim_tch.c : tch_sub ? a_du_0 : a_du_1) est recopiee dans a_du_0 -- la ROM relit a_du_0
+             * a PC 0x909c une fois par bloc, jamais a_du_1 au-dela de l'aiguillage (phase C1). */
+            static int on = -1; static unsigned long n;
+            if (on < 0) on = getenv("REJEU_DU1_VERS_DU0") != NULL;
+            uint16_t *du1 = &api[NDB + 0x134 / 2], *du0 = &api[NDB + 0x2A0 / 2];
+            if (on && (du1[0] & 0x8000)) {
+                memcpy(du0, du1, 22 * sizeof(uint16_t));
+                du1[0] &= 0x7fff;
+                if (n++ < 3) printf("tick=%u : a_du_1 -> a_du_0 (en-tete %04x)\n", t->tick, du0[0]);
+            }
+        }
+        {   /* [2026-10-15] REJEU_DD0=1 : chaque trame de parole descendante (a_dd_0, B_BLUD, mots 3..19,
+             * format TI) avec son tick -- reference libgsm pour juger la sortie du vocodeur ROM. */
+            static int on = -1; static uint16_t prec[22];
+            if (on < 0) on = getenv("REJEU_DD0") != NULL;
+            uint16_t *dd0 = &api[NDB + 0x238 / 2];
+            if (on && (dd0[0] & 0x8000) && memcmp(dd0 + 3, prec + 3, 17 * 2)) {
+                printf("DD0 tick=%u hdr=%04x :", t->tick, dd0[0]);
+                for (int i = 0; i < 17; i++) printf(" %04x", dd0[3 + i]);
+                printf("\n");
+                memcpy(prec, dd0, sizeof prec);
+            }
+        }
+        {   /* [2026-10-15] REJEU_DU1=1 : chaque trame de parole posee par l'ARM (a_du_1 avec B_BLUD,
+             * format TI, mots 3.. octet fort d'abord), avec le fn de la page W -- reference pour
+             * comparer hors ligne au codage de la ROM (verif_codage.py). */
+            static int on = -1; static uint16_t prec[22];
+            if (on < 0) on = getenv("REJEU_DU1") != NULL;
+            uint16_t *du1 = &api[NDB + 0x134 / 2];
+            if (on && (du1[0] & 0x8000) && memcmp(du1 + 3, prec + 3, 17 * 2)) {
+                uint16_t v = api[NDB + 0]; unsigned pg = (v & 1u) ? 1u : 0u; const uint16_t *w = &api[W_PAGE(pg)];
+                unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
+                uint32_t f = (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % 2715648u;
+                printf("DU1 tick=%u fn=%u :", t->tick, f);
+                for (int i = 0; i < 17; i++) printf(" %04x", du1[3 + i]);
+                printf("\n");
+                memcpy(prec, du1, sizeof prec);
+            }
+        }
         /* phase A : comme jouer_trame(phase 1) */
         calypso_dma_tick(dsp);
         reveil();
@@ -421,6 +532,9 @@ fini:
                 unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
                 g_page_it_fn = (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % 2715648u;
                 g_page_it_pg = pg; g_page_it_td = w[0]; g_page_it_tu = w[2]; g_page_it_tra = w[7];
+                g_page_it_ctrl = w[9];   /* d_ctrl_tch (W 0x0809 / 0x081d) : phase C1 du 2026-10-15 */
+                g_it_tch_mode = api[NDB + 3];          /* d_tch_mode (NDB mot 3) : B_PLAY_UL, mutes */
+                g_it_du1 = api[NDB + 0x134 / 2];       /* a_du_1[0] : B_BLUD = trame de parole de l'ARM */
             }
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         long fait = 0;
@@ -433,11 +547,14 @@ fini:
             size_t l = k == 'T' ? 10 : k == 'A' ? 8 + 4 * (size_t)be16(fichier + q + 6)
                      : k == 'B' ? 15 + 2 * (size_t)be16(fichier + q + 13) : 0;
             if (!l) break;
-            if (k == 'A' && fichier[q + 5] == 1)
+            if (k == 'A' && fichier[q + 5] == 1) {
                 for (unsigned i = 0, n = be16(fichier + q + 6); i < n; i++) {
                     unsigned a = be16(fichier + q + 8 + 4 * i);
                     if (a < API_WORDS) api[a] = be16(fichier + q + 10 + 4 * i);
                 }
+                if (getenv("REJEU_W16_BIT14")) { api[W_PAGE(0) + 16] |= 0x4000; api[W_PAGE(1) + 16] |= 0x4000; }
+                if (getenv("REJEU_MISC_TASK") && (api[NDB + 0] & 0x0002)) api[NDB + 0] |= 0x0008;   /* B_MISC_TASK */
+            }
             if (k == 'B') {
                 int n = be16(fichier + q + 13);
                 static int16_t iq[1024];
@@ -475,13 +592,23 @@ fini:
             if (!dsp->idle) courir(budget / 4);
             tsp_phase(t->tick, "pompe DMA", k);
         }
+        /* [2026-10-15] port voix (CALYPSO_VSP=1, avec CALYPSO_VSP_SHM=0 hors banc) */
+        if (dsp->running) calypso_vsp_trame(dsp, vsp_courir, g_page_it_fn);
         {   /* [2026-10-04] le burst montant final de la ROM (script TSP, src/tsp_tx.c), REJEU_TX=1 : chaque burst */
             struct tsp_tx_burst tb; bool nouveau = false;
             if (tsp_tx_lire(dsp->data, &tb, &nouveau) && nouveau) {
                 tx_n++; if (tb.type == TSP_TX_RACH) tx_rach++; else if (tb.type == TSP_TX_NB) tx_nb++; else tx_inc++;
+                snprintf(tx_dernier, sizeof tx_dernier, "%s%s", tb.type == TSP_TX_RACH ? "RACH" : tb.type == TSP_TX_NB ? "NB" : "?",
+                         tb.type == TSP_TX_NB ? (tb.bits[60] || tb.bits[87] ? "/vol" : "/parole") : "");
                 /* fn GSM de la page W designee par d_dsp_page (a_a5fn, voir pont.c tx_tsp_dater) */
                 uint32_t fn_gsm = g_page_it_fn;
                 tx_hist26[fn_gsm % 26]++;
+                if (getenv("REJEU_TX")) {   /* [2026-10-15] Kc/algo courants, pour dechiffrer hors ligne */
+                    static char kc_prec[40];
+                    char kcs[40]; uint16_t *akc = &api[NDB + 0x2CE / 2];
+                    snprintf(kcs, sizeof kcs, "%d %04x%04x%04x%04x", api[NDB + 0x1CE / 2], akc[3], akc[2], akc[1], akc[0]);
+                    if (strcmp(kcs, kc_prec)) { printf("KC algo,kc(a_kc[3..0])= %s\n", kcs); strcpy(kc_prec, kcs); }
+                }
                 if (getenv("REJEU_TX") || tx_n <= 12) {
                     char bits[149]; for (int i = 0; i < 148; i++) bits[i] = '0' + tb.bits[i]; bits[148] = 0;
                     printf("tick=%u fn=%u (a_a5fn page %u a l'IT, taches d/u/ra %04x/%04x/%04x) TX %s tsc=%d fn%%26=%u fn%%51=%u hl=%d hu=%d : %s\n", t->tick, fn_gsm, g_page_it_pg,
@@ -489,6 +616,28 @@ fini:
                            tb.bits[60], tb.bits[87], bits);
                 }
             }
+        }
+        {   /* [2026-10-15] REJEU_CTRL=1 : par tick, ce que la ROM lit a l'IT (taches d/u, d_ctrl_tch de la
+             * page W) et ce qu'elle emet a la fin du tick -- pour savoir si la parole montante manque
+             * faute de d_ctrl_tch = TCH_F/FS (0x0011) ou pour une autre raison (phase C1). */
+            static int ctrl_on = -1; static unsigned long tx_avant;
+            if (ctrl_on < 0) ctrl_on = getenv("REJEU_CTRL") != NULL;
+            char scr[64] = "-";
+            if (ctrl_on && (g_page_it_tu || g_page_it_td)) {   /* tout script TSP (0x1c0a + 16 mots 0x04/0x06) */
+                int k = 0; scr[0] = 0;
+                for (unsigned a = 0x0080; a + 18 < 0x8000 && k < 4; a++) {
+                    if (dsp->data[a] != 0x1c0a) continue;
+                    int ok = 1; for (int i = 0; i < 16; i++) { uint16_t v = dsp->data[a + 2 + i] & 0x3e; if (v != 0x06 && v != 0x04) { ok = 0; break; } }
+                    if (ok) { k += snprintf(scr + strlen(scr), sizeof scr - strlen(scr), "%s%04x", k ? "," : "", a) > 0; }
+                }
+                if (!scr[0]) strcpy(scr, "-");
+            }
+            if (ctrl_on && (g_page_it_tu || g_page_it_td))
+                printf("SCR %s ", scr), printf("CTRL tick=%u fn=%u fn%%26=%u pg=%u td=%04x tu=%04x ctrl_tch=%04x tch_mode=%04x du1=%04x du1_fin=%04x tx=%s\n", t->tick, g_page_it_fn,
+                       g_page_it_fn % 26, g_page_it_pg, g_page_it_td, g_page_it_tu, g_page_it_ctrl, g_it_tch_mode, g_it_du1,
+                       api[NDB + 0x134 / 2],
+                       tx_n == tx_avant ? "-" : tx_dernier);
+            tx_avant = tx_n;
         }
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2];
         uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0 : parole descendante */

@@ -31,6 +31,7 @@ SRC := src/main.c src/rejouer.c src/pcb-minimal.c src/verbosite.c src/pont.c src
        $(L1DSP)/calypso_rif.c \
        $(L1DSP)/calypso_a5.c \
        $(L1DSP)/calypso_twl3025.c \
+       $(L1DSP)/calypso_vsp.c \
        $(CAL)/calypso_xio.c \
        $(CAL)/calypso_iota.c \
        $(CAL)/calypso_trf6151.c \

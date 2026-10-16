@@ -28,6 +28,18 @@
 uint32_t g_c54x_exe_fn;
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 void calypso_inth_arm_ack(void) { }
+
+/* Program word at a 16-bit address as the core will fetch it: 0x8000-0xDFFF is
+ * banked by XPC (c54x_prog_xlate), so write the word in every page; an example
+ * that starts with XPC != 0 (FBACCD B) or changes XPC before its delay slots
+ * otherwise fetches 0x0000. */
+static void poser_prog(C54xState *s, uint16_t a, uint16_t w)
+{
+    s->prog[a] = w;
+    if (a >= 0x8000 && a < 0xE000)
+        for (uint32_t pg = 0; pg < (C54X_PROG_SIZE >> 16); pg++)
+            s->prog[((pg << 16) | a) & (C54X_PROG_SIZE - 1)] = w;
+}
 QemuMutex calypso_pcb_daram_lock;
 void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 { (void)addr; if (!wr) memset(buf, 0, len); }
@@ -62,6 +74,7 @@ static bool set_reg(C54xState *s, const char *r, uint64_t v)
     if (!strcmp(r, "PC"))  { s->pc = v; return true; }
     if (!strcmp(r, "XPC")) { s->xpc = v; return true; }
     if (!strcmp(r, "PMST")) { s->pmst = v; return true; }
+    if (!strcmp(r, "IPTR")) { s->pmst = (s->pmst & 0x7F) | ((v & 0x1FF) << 7); return true; }
     if (!strcmp(r, "ST0")) { s->st0 = v; return true; }
     if (!strcmp(r, "ST1")) { s->st1 = v; return true; }
     if (!strcmp(r, "IMR")) { s->imr = v; return true; }
@@ -93,6 +106,7 @@ static bool get_reg(C54xState *s, const char *r, uint64_t *v)
     if (!strcmp(r, "PC"))  { *v = s->pc & 0xFFFF; return true; }
     if (!strcmp(r, "XPC")) { *v = s->xpc; return true; }
     if (!strcmp(r, "PMST")) { *v = s->pmst; return true; }
+    if (!strcmp(r, "IPTR")) { *v = (s->pmst >> 7) & 0x1FF; return true; }
     if (!strcmp(r, "ST0")) { *v = s->st0; return true; }
     if (!strcmp(r, "ST1")) { *v = s->st1; return true; }
     if (!strcmp(r, "IMR")) { *v = s->imr; return true; }
@@ -125,7 +139,7 @@ int main(int argc, char **argv)
     qemu_mutex_init(&calypso_pcb_daram_lock);
 
     char ligne[1024], titre[1024] = "";
-    uint16_t mots[4]; int nmots = 0;
+    uint16_t mots[8]; int nmots = 0, npas = 1;
     Item avant[64], apres[64]; int na = 0, np = 0;
     int total = 0, ok = 0, ko = 0, ignores = 0;
     char bilan_ko[65536] = "";
@@ -134,10 +148,13 @@ int main(int argc, char **argv)
         ligne[strcspn(ligne, "\n")] = 0;
         if (ligne[0] == 'T') {
             snprintf(titre, sizeof titre, "%s", ligne + 2);
-            nmots = na = np = 0;
+            nmots = na = np = 0; npas = 1;
         } else if (ligne[0] == 'W') {
             char *p = ligne + 2; nmots = 0;
-            while (*p && nmots < 4) { mots[nmots++] = (uint16_t)strtoul(p, &p, 16); while (*p == ' ') p++; }
+            while (*p && nmots < 8) { mots[nmots++] = (uint16_t)strtoul(p, &p, 16); while (*p == ' ') p++; }
+        } else if (ligne[0] == 'N') {
+            /* N <n>: run n instructions (multi-instruction examples, delay slots) */
+            npas = atoi(ligne + 2); if (npas < 1) npas = 1;
         } else if (ligne[0] == 'B' || ligne[0] == 'A') {
             Item *it = ligne[0] == 'B' ? &avant[na] : &apres[np];
             int *n = ligne[0] == 'B' ? &na : &np;
@@ -154,6 +171,7 @@ int main(int argc, char **argv)
             C54xState *s = c54x_init();
             s->running = true;
             s->pc = 0x9000;
+            s->pmst = 0x1FFu << 7;   /* IPTR = 1FFh, its reset value, assumed by the manual's vector examples */
             bool prob = false;
             for (int i = 0; i < na; i++) {
                 if (avant[i].mem == 1) { if (avant[i].addr < 0x60) data_write(s, avant[i].addr, (uint16_t)avant[i].val); else s->data[avant[i].addr] = (uint16_t)avant[i].val; }
@@ -161,20 +179,23 @@ int main(int argc, char **argv)
                 else if (!set_reg(s, avant[i].reg, avant[i].val)) prob = true;
             }
             uint16_t pc0 = (uint16_t)s->pc;
-            for (int i = 0; i < nmots; i++) s->prog[(uint16_t)(pc0 + i)] = mots[i];
+            for (int i = 0; i < nmots; i++) poser_prog(s, (uint16_t)(pc0 + i), mots[i]);
             /* the instruction after, so a delayed branch has something to execute */
-            s->prog[(uint16_t)(pc0 + nmots)] = 0xF495; s->prog[(uint16_t)(pc0 + nmots + 1)] = 0xF495;
-            c54x_run(s, 1);
+            poser_prog(s, (uint16_t)(pc0 + nmots), 0xF495); poser_prog(s, (uint16_t)(pc0 + nmots + 1), 0xF495);
+            for (int k = 0; k < npas; k++) c54x_run(s, 1);
             /* RPT arms a counter and returns 0 executed words: run the repeated
              * instruction as well so the example's "After" is observable. */
-            if (s->rpt_active) c54x_run(s, 1);
+            { int _g = 70000; while (s->rpt_active && _g--) c54x_run(s, 1); }
+            for (int k = 0; k < 4 && s->delay_slots; k++) c54x_run(s, 1);
             char detail[2048] = ""; int d = 0; bool echec = false;
             for (int i = 0; i < np; i++) {
                 uint64_t got;
                 if (apres[i].mem == 1) got = apres[i].addr < 0x60 ? data_read(s, apres[i].addr) : s->data[apres[i].addr];
                 else if (apres[i].mem == 2) got = s->prog[apres[i].addr];
                 else if (!get_reg(s, apres[i].reg, &got)) { prob = true; continue; }
-                if (got != apres[i].val) {
+                uint64_t att = apres[i].val;
+                if (!apres[i].mem && !strcmp(apres[i].reg, "XPC")) { att &= 3; got &= 3; }
+                if (got != att) {
                     echec = true;
                     if (apres[i].mem) d += snprintf(detail + d, sizeof detail - d, "  %s[%04x]: attendu %04llx, obtenu %04llx",
                                                     apres[i].mem == 1 ? "data" : "prog", apres[i].addr,
