@@ -7,7 +7,7 @@
 #  c54x_exe compile hw/arm/calypso/l1-dsp/ de cet arbre) et libosmocore avec
 #  libosmocoding, visibles de pkg-config - ce qu a deja qui a sa pile Osmocom.
 #  C est aussi CE script qu appellent le Dockerfile d osmo-operator (stage l1),
-#  son Dockerfile.run, start.sh, l ISO et l installation native
+#  son Dockerfile.run, start-docker.sh, l ISO et l installation native
 #  (install_modules/45-calypso.sh) : une seule liste de commandes.
 #
 #      ./install.sh                 tout : build, rom, verify
@@ -252,7 +252,7 @@ inst_rom_check() {
 }
 inst_rom_run() {
     # 1. Une copie deja verifiee sur cette machine ? on la recopie, sans reseau.
-    #    (Dockerfile.run:188 et start.sh faisaient cp c54x_exe/rom/*.bin /opt/GSM/.)
+    #    (Dockerfile.run:188 et start-docker.sh faisaient cp c54x_exe/rom/*.bin /opt/GSM/.)
     local src d r args=()
     if src="$(rom_source_locale)"; then
         for d in "${ROM_DIRS[@]}"; do

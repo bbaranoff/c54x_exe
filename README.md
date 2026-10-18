@@ -146,7 +146,7 @@ RSBX/SSBX (gates `CALYPSO_LOGIC40`, `CALYPSO_LD16_SEXT`, `CALYPSO_F0BX_SBIT` = o
 ## Noise injection (downlink)
 
 Off by default. Two independent ways to degrade what the DSP receives, both driven from the
-environment of `run.sh` (and therefore of `osmo-operator/start-direct.sh --dsp`):
+environment of `run.sh` (and therefore of `osmo-operator/start-native.sh --dsp`):
 
 - `BRUIT_SNR_DB=<dB>` alone: AWGN added by the C54x core itself to every downlink I/Q sample
   (`c54x_bsp_load()` in qosmo `calypso_c54x.c`); `run.sh` passes it to `c54x_exe` as

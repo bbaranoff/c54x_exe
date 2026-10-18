@@ -86,7 +86,7 @@ GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (et
 GDB_STUB="${GDB_STUB:-1234}"
 GDB_TELNET="${GDB_TELNET:-44444}"
 GDB_TELNET_PY="${GDB_TELNET_PY:-$QOSMO/tools/gdb-telnet.py}"   # [2026-10-03] etait /opt/GSM/qosmo-dsp/... (depot disparu)
-INSNS="${INSNS:-16000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-direct.sh
+INSNS="${INSNS:-16000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-native.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
@@ -164,7 +164,7 @@ etape2() {   # l'ARM
     # touche. GDB=0 : ni stub ni console.
     local gdb_opt=()
     [ "$GDB" = 1 ] && gdb_opt=(-gdb "tcp:127.0.0.1:$GDB_STUB")
-    # [2026-09-23] ASSEMBLY_LOGS=1 (start-direct.sh --assembly-logs) : trace asm
+    # [2026-09-23] ASSEMBLY_LOGS=1 (start-native.sh --assembly-logs) : trace asm
     # de l'ARM, chaque bloc traduit et chaque bloc execute, dans qemu-asm.log.
     # nochain sinon les blocs chaines ne sont journalises qu'une fois.
     if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then
@@ -359,7 +359,7 @@ garder_journaux() {
 #     grgsm : l'injecteur ecoute BRUIT_PORT_GRGSM (14730) et relaie vers QEMU 4730 ; le pont
 #             y envoie (PONT_GSMTAP_PORT, pose a l'etape 5). ber | relais seulement : QEMU
 #             recoit des blocs L2 deja decodes.
-#     iq    : refuse si CALYPSO_BSP_STREAM=1 (defaut de start-direct.sh --dsp).
+#     iq    : refuse si CALYPSO_BSP_STREAM=1 (defaut de start-native.sh --dsp).
 #   BRUIT_BER (0..1), BRUIT_RAFALES (L bits), BRUIT_SNR_DB (dB), BRUIT_PERTE (0..1),
 #   BRUIT_TN (0 ou 1,2...), BRUIT_GRAINE, BRUIT_STATS (10 s), BRUIT_OPTS (options en plus),
 #   BRUIT_PORT_DSP, BRUIT_PORT_GRGSM, BRUIT_PY.
