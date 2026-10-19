@@ -165,12 +165,71 @@ etape2() {   # l'ARM
     local gdb_opt=()
     [ "$GDB" = 1 ] && gdb_opt=(-gdb "tcp:127.0.0.1:$GDB_STUB")
     # [2026-09-23] ASSEMBLY_LOGS=1 (start-native.sh --assembly-logs) : trace asm
-    # de l'ARM, chaque bloc traduit et chaque bloc execute, dans qemu-asm.log.
-    # nochain sinon les blocs chaines ne sont journalises qu'une fois.
+    # de l'ARM dans qemu-asm.log, chaque bloc une fois, a sa traduction.
+    # [2026-10-19] in_asm seul par defaut. ASSEMBLY_LOGS_FLAGS=in_asm,exec,nochain
+    # journalise aussi chaque bloc execute (nochain sinon les blocs chaines ne
+    # sont vus qu'une fois) : l'ARM passait de 0,4 a 62 ms par trame ([chrono]
+    # go), le DSP en pas-a-pas suivait, mais l'horloge asservie du pont
+    # (osmo-operator/pont/trx.py, plafond 4 x FRAME_DUR) prenait +1159 a +3897
+    # trames d'avance, le BSP ne trouvait plus les bursts (« le burst a existe
+    # puis a disparu ») et mobile ne voyait aucune cellule (FBSB result=255).
+    # [2026-10-19] LA TRACE VA SUR LE DISQUE, PAS SUR LE TMPFS. $RUNDIR est dans
+    # /tmp (tmpfs de 4,7 Go) : avec exec,nochain la trace a rempli /tmp en cinq
+    # minutes (3,8 Go), et un rm ne libere rien tant que QEMU garde le fichier
+    # ouvert (il faut tronquer /proc/<pid>/fd/N). On ecrit dans
+    # ASSEMBLY_LOGS_DIR (/var/tmp/c54x-pont, sur le disque) et $RUNDIR/qemu-asm.log
+    # devient un lien ; les archives n'y touchent pas (garder_journaux).
     if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then
-        gdb_opt+=(-d "${ASSEMBLY_LOGS_FLAGS:-in_asm,exec,nochain}" -D "$RUNDIR/qemu-asm.log")
+        local asm_dir="${ASSEMBLY_LOGS_DIR:-/var/tmp/c54x-pont}"
+        mkdir -p "$asm_dir" 2>/dev/null || asm_dir="$RUNDIR"
+        rm -f "$RUNDIR/qemu-asm.log" "$asm_dir/qemu-asm.log"
+        [ "$asm_dir" != "$RUNDIR" ] && ln -s "$asm_dir/qemu-asm.log" "$RUNDIR/qemu-asm.log"
+        local asm_cible="$asm_dir/qemu-asm.log"
+        # [2026-10-19] ASSEMBLY_LOGS_FIFO=1 : QEMU ecrit dans un FIFO sur /dev/shm et un
+        # cat draine vers le fichier sur le disque. qemu_log_unlock() fait un fflush() a
+        # CHAQUE ligne (util/log.c) : avec exec,nochain c'est un write(2) par bloc
+        # execute (~830 par trame), une dizaine de us sur le disque contre 1 a 2 us
+        # sur un pipe. Le lecteur est lance AVANT QEMU : son fopen(fifo, "w") bloque
+        # tant que personne ne lit.
+        if [ "${ASSEMBLY_LOGS_FIFO:-0}" = 1 ]; then
+            local asm_fifo="/dev/shm/qemu-asm.fifo"
+            rm -f "$asm_fifo"; mkfifo "$asm_fifo"
+            ${PRIO[@]+"${PRIO[@]}"} cat "$asm_fifo" > "$asm_cible" 2>/dev/null &
+            echo $! > "$RUNDIR/asmcat.pid"
+            asm_cible="$asm_fifo"
+        fi
+        gdb_opt+=(-d "${ASSEMBLY_LOGS_FLAGS:-in_asm}" -D "$asm_cible")
         [ -n "${ASSEMBLY_LOGS_FILTRE:-}" ] && gdb_opt+=(-dfilter "$ASSEMBLY_LOGS_FILTRE")
+        # [2026-10-19] QEMU_LOG_BUFFERED (util/log.c de qosmo) : fichier -D pleinement
+        # bufferise, plus de fflush() par ligne. 4 Mio par defaut quand on trace.
+        export QEMU_LOG_BUFFERED="${QEMU_LOG_BUFFERED:-4194304}"
+        # [2026-10-19] ANNEAU DES BLOCS EXECUTES, PAR DEFAUT AVEC ASSEMBLY_LOGS=1. Le plugin
+        # TCG tbring (qosmo/tools/qosmo-tbring) pousse le PC de chaque bloc EXECUTE, blocs
+        # chaines compris, dans un anneau mmap : 8 octets par bloc, pas de texte dans la
+        # boucle, pas de nochain, l'ARM tourne comme en production (-d exec,nochain : 150 Mo/s
+        # de texte, 20 Go en 130 s). Anneau de 64 Gio = 2^33 blocs, soit ~12 h d'ARM a
+        # 180 000 blocs/s ; fichier CREUX sur le disque ($asm_dir, pas le tmpfs), il ne pese
+        # que ce qui a ete ecrit. Relecture a chaud, a tout moment, sans arreter QEMU :
+        #     tbring-dump -n 500 -f $asm_dir/qemu-tbring -e $FIRMWARE_ELF -a $asm_dir/qemu-asm.log
+        # (la trace in_asm, un bloc par traduction, sert de table de desassemblage).
+        # ASSEMBLY_LOGS_RING=0 coupe ; ASSEMBLY_LOGS_RING_ENTRIES (puissance de 2) et
+        # ASSEMBLY_LOGS_RING_FILE changent la taille et l'emplacement.
+        if [ "${ASSEMBLY_LOGS_RING:-1}" = 1 ]; then
+            local tbring="${TBRING_SO:-$QOSMO/tools/qosmo-tbring/libtbring.so}"
+            [ -f "$tbring" ] || tbring=/usr/local/lib/qosmo/libtbring.so
+            if [ -f "$tbring" ]; then
+                local ring="${ASSEMBLY_LOGS_RING_FILE:-$asm_dir/qemu-tbring}"
+                rm -f "$ring" "$RUNDIR/qemu-tbring"
+                [ "$(dirname "$ring")" != "$RUNDIR" ] && ln -s "$ring" "$RUNDIR/qemu-tbring"
+                # anneau= et pas file= : file= est le mot-cle de QEMU pour le chemin du plugin
+                gdb_opt+=(-plugin "$tbring,anneau=$ring,entries=${ASSEMBLY_LOGS_RING_ENTRIES:-8589934592}")
+            else
+                dire "   anneau tbring ignore : libtbring.so introuvable (make -C $QOSMO/tools/qosmo-tbring)"
+            fi
+        fi
     fi
+    # [2026-10-19] QEMU_ICOUNT=auto|shift=N,... (start-native.sh --icount) : -icount.
+    case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) gdb_opt+=(-icount "$QEMU_ICOUNT") ;; esac
     # [2026-09-23] Relance de QEMU vers le DSP toutes les trame/64 (0,07 ms) au
     # lieu de trame/16 (0,29 ms) : la partie en serie d'une trame (DONE de la
     # phase A, GO) payait deux fois cette latence -- mesure [chrono] en TCH.
@@ -193,7 +252,13 @@ etape2() {   # l'ARM
     sed -n 's/.*redirected to \(\/dev\/pts\/[0-9]*\) (label serial0).*/\1/p' "$RUNDIR/qemu.log" | head -1 > "$RUNDIR/modem.pty"
     dire "2. qemu-system-arm  pid $(pid_de qemu)  pty modem $(cat "$RUNDIR/modem.pty")  moniteur $MONITOR  L1=$([ "$MODE" = dsp ] && echo "DSP externe" || echo "gr-gsm (udp 4730/4731)")"
     [ "$GDB" = 1 ] && dire "   gdb ARM : telnet 0 $GDB_TELNET  (stub tcp::$GDB_STUB, journal $RUNDIR/gdb.log)"
-    [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   trace asm ARM : $RUNDIR/qemu-asm.log (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm,exec,nochain}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE})"
+    case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) dire "   icount : $QEMU_ICOUNT" ;; esac
+    # [2026-10-19] moniteur mailbox (CALYPSO_MAILBOX=1) : deux fichiers, un par cote
+    if [ -n "${CALYPSO_MAILBOX:-}" ] && [ "${CALYPSO_MAILBOX}" != 0 ]; then
+        local _mb="${CALYPSO_MAILBOX_FILE:-${LOG_DIR:-/tmp/calypso/logs}/mailbox.log}"
+        dire "   mailbox ARM<->DSP : ${_mb} (cote DSP, c54x_exe) et ${_mb%.log}-arm.log (cote ARM, QEMU) ; CALYPSO_MAILBOX=$CALYPSO_MAILBOX"
+    fi
+    [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   trace asm ARM : $(readlink -f "$RUNDIR/qemu-asm.log") (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE}${ASSEMBLY_LOGS_FIFO:+, via FIFO}, QEMU_LOG_BUFFERED=$QEMU_LOG_BUFFERED)$([ "${ASSEMBLY_LOGS_RING:-1}" = 1 ] && echo " ; anneau des blocs executes : $(readlink -f "$RUNDIR/qemu-tbring" 2>/dev/null) (tbring-dump)")"
 }
 
 etape3() {   # osmocon
@@ -269,10 +334,18 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     # [2026-10-04] UL_RAW=1 (defaut) : le pont emet les bursts montants finaux de la ROM (calypso_tx_rom,
     # src/tsp_tx.c) tels quels, a son numero de trame -- RACH, SDCCH, SACCH, FACCH, parole, A5 compris.
     # UL_RAW=0 : codage et A5 cote hote comme avant (PONT_UL_ROM reste le chemin xCCH de 2026-10-03).
+    # [2026-10-19] Trace asm de l'ARM : le couple ARM+DSP peut tourner a 14 fois le
+    # temps reel (exec,nochain). L'horloge asservie du pont (pont/trx.py) ne
+    # descend que 4 fois sous le temps reel par defaut ; on lui permet 16 fois
+    # (mesure : 10 a 14 fois ; au-dela de 16 la pause demandee a osmo-bts-trx
+    # entre deux IND CLOCK approche sa limite de 50 trames, voir trx.py
+    # run_clock). PONT_HORLOGE_MAX deja pose dans l'environnement : on le respecte.
+    if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then export PONT_HORLOGE_MAX="${PONT_HORLOGE_MAX:-16}"; fi
     ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && export PONT_UL_RAW="${UL_RAW:-1}" && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"
+    [ -n "${PONT_HORLOGE_MAX:-}" ] && dire "   horloge asservie : ralentissement jusqu'a ${PONT_HORLOGE_MAX} x le temps reel (PONT_HORLOGE_MAX)"
     # [2026-10-15] port voix (CALYPSO_VSP=1) : anneaux PCM du DSP <-> PulseAudio
     if [ "${CALYPSO_VSP:-0}" = 1 ] && ! vivant vsp; then
         ( cd /opt/GSM/osmo-operator && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
@@ -283,12 +356,12 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
 
 arreter() {
     local n
-    for n in vsp pont bruit mobile osmocon gdb qemu dsp; do
+    for n in vsp pont bruit mobile osmocon gdb qemu dsp asmcat; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done; bruit_arreter
     sleep 1
-    rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty"
+    rm -f "$DSP_SHM" "$DSP_SOCK" "$L2_SOCK" "$MONITOR" "$RUNDIR/modem.pty" /dev/shm/qemu-asm.fifo
     # [2026-09-22] Sockets du mobile : elles ne disparaissent pas avec lui. Le
     # « sap » etait deja oublie, et « ms_data » (tch-data, mobile_pont.cfg)
     # arrive avec la meme faiblesse : un fichier reste fait echouer le bind du
@@ -469,7 +542,12 @@ case "${1:-}" in
               [ -f /dev/shm/pont.log ] && : > /dev/shm/pont.log ;;
     --status) statut ;;
     --charge) charge ;;
-    --logs)   exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
+    --logs)   # [2026-10-19] en couleur a l'affichage (qosmo/tools/qosmo-couleurs.py, QOSMO_COULEURS=0 coupe)
+              _coul="$QOSMO/tools/qosmo-couleurs.py"
+              if [ "${QOSMO_COULEURS:-1}" != 0 ] && [ -f "$_coul" ] && [ -t 1 ]; then
+                  exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null | python3 -u "$_coul" --force
+              fi
+              exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
     --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|b|2|3|4|5";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;
     "")       garder_journaux; bruit_preparer; etape1; etapeb; etape2; etape3; etape4; etape5
