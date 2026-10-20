@@ -128,6 +128,7 @@ static struct {
     int      tch_tn, tch_tsc;  /* annonce du pont : 0 = pas de TCH annonce */
     bool     sur_tch;          /* le BSP joue l'intervalle du TCH          */
 } g;
+static int g_tn_tch_sb;   /* TS du TCH vu par le side-band (0 : TS0 / pas de TCH) */
 
 /* Taches de lecture que l'ARM pose dans d_task_d de la page W
  * (osmocom-bb firmware, include/calypso/l1_environment.h:45-52). La lecture
@@ -575,6 +576,7 @@ static void scruter_dcch(uint32_t fn)
      * c'est lui que l'ASSIGNMENT FAILURE retrouve (le tap le republie quand
      * le firmware y revient). */
     if (genre == 2 || genre == 3) {
+        g_tn_tch_sb = tn;   /* [2026-10-20] le TS du TCH, pour etiqueter les bursts montants publies (air) */
         printf("  [montant] canal dedie (side-band seq=%u) : TCH/%c TS%d SS=%d, firmware sur le TCH "
                "(%s%s)\n", seq, genre == 2 ? 'F' : 'H', tn, ss,
                g.sur_tch ? "BSP deja sur le TCH" : "BSP pas encore bascule",
@@ -585,6 +587,7 @@ static void scruter_dcch(uint32_t fn)
     printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d%s\n",
            seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
            (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
+    g_tn_tch_sb = 0;   /* SDCCH (TS0) arme ou canal libere : le mobile n'emet plus sur le TCH */
     if (genre == 0xFF) {
         calypso_bsp_set_dedie(0, 0xFF, 0);
         g.dedie_arme = false;
@@ -938,6 +941,14 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
 bool montant_sur_tch(void)
 {
     return g.sur_tch;
+}
+
+/* [2026-10-20] L'intervalle sur lequel le firmware emet : le TS du TCH annonce par le side-band (genre 2/3)
+ * tant qu'il n'est pas libere, 0 sinon (SDCCH/4 du TS0, RACH). Sert a etiqueter les bursts publies dans
+ * calypso_tx_rom (bits 4-6 de l'octet src) pour que l'air les porte au bon intervalle du TRX. */
+int montant_tn_dedie(void)
+{
+    return g_tn_tch_sb;
 }
 
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)

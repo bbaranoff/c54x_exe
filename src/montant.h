@@ -21,5 +21,6 @@ void montant_bilan(void);
 
 /* Vrai tant que le BSP joue l'intervalle du TCH (bascule suivie par le firmware). */
 bool montant_sur_tch(void);
+int  montant_tn_dedie(void);   /* [2026-10-20] TS du TCH (side-band), 0 sinon : etiquette des bursts publies */
 
 #endif

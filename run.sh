@@ -20,7 +20,7 @@
 #                       tx_start == 5 (fenetre TX decalee de 3 slots). [2026-10-20] -m 0x01 posait aussi
 #                       TX=0x01 -> tx_start 0 -> dummy a chaque trame (DUMMY 18000, FB 0, SB 0).
 #                    5. pas de pont : il tiendrait les memes ports 5700-5702 (PONT force a 0)
-#                    OSMO_TRX_ARGS (defaut « --no-sync -e 3 »), TRANSCEIVER (chemin du binaire).
+#                    OSMO_TRX_ARGS (defaut « --no-sync -e 3 », + « -r $OSMO_TRX_RT » SCHED_RR 20), TRANSCEIVER (chemin du binaire).
 #   INSTANCE=2       [2026-10-19] UNE DEUXIEME CHAINE COMPLETE a cote de la premiere (banc-mobile pendant
 #                    que banc-trx tourne) : run.sh se relance dans un espace de montage prive ou
 #                    /dev/shm EST /dev/shm/calypso2 (vu de l'hote), et le vrai /dev/shm de l'hote est
@@ -92,6 +92,21 @@ if [ -n "$FIRMWARE_APP" ]; then
     FIRMWARE_BIN="${FIRMWARE_ELF%.elf}.bin"
     PONT=0
 fi
+# [2026-10-20] OSMO_TRX_TS1=1 (instance 1, avec OSMO_TRX=1) : un DEUXIEME Calypso TRX pour le TS1 (TCH/F, les appels) :
+# l'instance OSMO_TRX_TS1_INSTANCE (3) est lancee avant le transceiver (etapes 1-3 seules, OSMO_TRX_PHONE=2 : firmware trx,
+# L1CTL /tmp/osmocom_l2_3, pas de transceiver, pas d'air) et le transceiver prend « -2 -L /tmp/osmocom_l2_3 » (telephone 2 =
+# TS1 TX+RX, prim_bts.c SLOT 0 / tn 1). Son BSP (udp 6722) n'a pas de SB pour se caler : CALYPSO_BSP_TRX_OFFSET=-1 (fn du
+# firmware = tick - 1, mesure sur le telephone 1). L'air (instance 2) relie aussi cet anneau (--c-ring/--c-port).
+# [2026-10-20 23:10] -2 par defaut : OSMO_TRX_TS1=1 (start-native.sh --ts 1 ou OSMO_TRX_TS1=0 pour un seul telephone)
+OSMO_TRX_TS1="${OSMO_TRX_TS1:-1}"
+OSMO_TRX_TS1_INSTANCE="${OSMO_TRX_TS1_INSTANCE:-3}"
+OSMO_TRX_PHONE="${OSMO_TRX_PHONE:-1}"
+# [2026-10-20] Le mobile par l'air (INSTANCE=N, AIR=1) n'est jamais le TRX : start-native.sh --bts exporte OSMO_TRX=1
+# et l'instance 2 en heritait (firmware trx + second transceiver -> « port UDP 5700 deja pris »).
+if [ "$OSMO_TRX" = 1 ] && [ "$AIR" = 1 ] && [ "$INSTANCE" != 1 ] && [ "$OSMO_TRX_PHONE" != 2 ]; then
+    printf '\033[1m[run dsp]\033[0m INSTANCE=%s AIR=1 : OSMO_TRX=1 herite ignore, ce Calypso est le mobile (le TRX est l instance 1)\n' "$INSTANCE"
+    OSMO_TRX=0
+fi
 if [ "$OSMO_TRX" = 1 ]; then
     # Le firmware trx S'IMPOSE : /etc/default/osmo-banc (profil GPRS) pose FIRMWARE_ELF=layer1.highram.gprs
     # dans l'environnement, et un « ${FIRMWARE_ELF:-trx} » le laissait passer : le transceiver parlait
@@ -104,13 +119,26 @@ if [ "$OSMO_TRX" = 1 ]; then
     OSMO_TRX_BSIC="${OSMO_TRX_BSIC:-$(awk '/^ *bts 0$/{f=1} f&&/base_station_id_code/{print $2; exit}' /etc/osmocom/osmo-bsc.cfg 2>/dev/null)}"
     TRANSCEIVER="${TRANSCEIVER:-/opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver/transceiver}"
     [ -x "$TRANSCEIVER" ] || TRANSCEIVER="$(command -v transceiver || echo "$TRANSCEIVER")"
+    # [2026-10-20] OSMO_TRX_TCH=1 (defaut) : le telephone sert TS0 ET TS1 (TCH/F, les appels) : masques 0x03,
+    # le firmware patche emet les deux slots de sa fenetre TX (prim_bts.c) et remonte le TS1 depuis rx[2] ;
+    # c54x_exe publie les deux bursts depuis la page (CALYPSO_TRX_TX_SLOTS=2) et ecrit le montant TS1 dans
+    # la page. OSMO_TRX_TCH=0 : TS0 seul (0x01).
+    # [2026-10-20 23:10] avec le telephone 2 (OSMO_TRX_TS1=1, defaut) le telephone 1 garde le TS0 seul : OSMO_TRX_TCH=0
+    OSMO_TRX_TCH="${OSMO_TRX_TCH:-$([ "$OSMO_TRX_TS1" = 1 ] && echo 0 || echo 1)}"
+    if [ "$OSMO_TRX_TCH" = 1 ] && [ "$OSMO_TRX_PHONE" != 2 ]; then
+        OSMO_TRX_TS_MASK="${OSMO_TRX_TS_MASK:-0x03}"
+        OSMO_TRX_TX_MASK="${OSMO_TRX_TX_MASK:-0x03}"
+        export CALYPSO_TRX_TX_SLOTS="${CALYPSO_TRX_TX_SLOTS:-2}"
+    fi
     OSMO_TRX_TS_MASK="${OSMO_TRX_TS_MASK:-0x01}"
     # [2026-10-20] masque TX 0x01 : UNE fenetre TX (tx_start 0, slot TPU 5 = TS0 descendant), celle que la
     # ROM joue comme un RACH et que c54x_exe capture (script TSP 0x3cbb). Le 0xe3 d'origine (fenetre
     # multiple 5,6,7,0,1) n'est pas servi par le banc : seul le premier burst (dummy) sortait. Le firmware
     # trx corrige (prim_bts.c, SLOT/tn) vise le TS0 quel que soit tx_start.
     OSMO_TRX_TX_MASK="${OSMO_TRX_TX_MASK:-0x01}"
-    OSMO_TRX_ARGS="${OSMO_TRX_ARGS:---no-sync -e 3}"
+    # [2026-10-20 22:25] -r PRIO (SCHED_RR, main.c rt_prio ; OSMO_TRX_RT= vide pour s'en passer) ; -e 1 pour le debug (23:10 : -e 3 par defaut)
+    OSMO_TRX_RT="${OSMO_TRX_RT-20}"
+    OSMO_TRX_ARGS="${OSMO_TRX_ARGS:---no-sync -e 3}${OSMO_TRX_RT:+ -r $OSMO_TRX_RT}"
     PONT=0
     # la BTS repete ses bursts (dummy, FB) : c54x_exe publie chaque trame avec tache TX, pas que les nouveaux
     export MONTANT_ROM_TX_CHAQUE="${MONTANT_ROM_TX_CHAQUE:-1}"
@@ -118,6 +146,8 @@ if [ "$OSMO_TRX" = 1 ]; then
     # calee sur le fn du SB emis (pont.c -> calypso_bsp_trx_calage) ; CALYPSO_BSP_TRX_DELTA ajuste (defaut -2 avec le
     # firmware patche BTS_RX_LAG 3 : le burst montant fn X est joue une trame apres la fenetre native, marge pour l'air)
     export CALYPSO_BSP_TRX="${CALYPSO_BSP_TRX:-1}"
+    # telephone 2 (TS1) : pas de SB emis, offset fn/tick fixe (voir OSMO_TRX_TS1)
+    [ "$OSMO_TRX_PHONE" = 2 ] && export CALYPSO_BSP_TRX_OFFSET="${CALYPSO_BSP_TRX_OFFSET:--1}"
 fi
 FIRMWARE_ELF="${FIRMWARE_ELF:-$_FW/layer1.highram.elf}"
 FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
@@ -388,8 +418,19 @@ config_vocodeur_rom() {
 }
 
 etape4_trx() {   # OSMO_TRX=1 : l'appli hote transceiver, a la place du mobile
+    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "4. (OSMO_TRX_PHONE=2 : telephone 2 du transceiver de l'instance 1, TS1 ; pas de transceiver ici)"; return; }
     vivant transceiver && { dire "4. transceiver deja lance (pid $(pid_de transceiver))"; return; }
     [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
+    local args_ts1=""
+    if [ "$OSMO_TRX_TS1" = 1 ]; then
+        local l2_3="/tmp/osmocom_l2_$OSMO_TRX_TS1_INSTANCE"
+        if [ ! -S "$l2_3" ]; then
+            dire "4a. telephone 2 (TS1) : instance $OSMO_TRX_TS1_INSTANCE (c54x_exe + QEMU trx + osmocon)"
+            INSTANCE="$OSMO_TRX_TS1_INSTANCE" OSMO_TRX=1 OSMO_TRX_PHONE=2 AIR=0 PONT=0 bash "$0" || rater "l'instance $OSMO_TRX_TS1_INSTANCE (telephone 2) n'a pas demarre"
+        fi
+        attendre 10 test -S "$l2_3" || rater "pas de socket L1CTL $l2_3 pour le telephone 2"
+        args_ts1="-2 -L $l2_3"
+    fi
     [ -x "$TRANSCEIVER" ] || rater "transceiver absent : $TRANSCEIVER (make -C /opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver)"
     local p
     # [2026-10-19] Colonne LOCALE de ss ($4 ; $5 est le peer), tous etats : avec « -uan | grep » la colonne peer matchait
@@ -402,7 +443,7 @@ etape4_trx() {   # OSMO_TRX=1 : l'appli hote transceiver, a la place du mobile
     vitrine transceiver
     # -l : socket L1CTL d'osmocon ; -m : masque de timeslots RX (un seul pour commencer) ; le masque TX
     # garde son defaut 0xe3 (OSMO_TRX_TX_MASK pour le forcer : -M), voir l'en-tete
-    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$TRANSCEIVER" -l "$L2_SOCK" -m "$OSMO_TRX_TS_MASK" ${OSMO_TRX_TX_MASK:+-M "$OSMO_TRX_TX_MASK"} ${OSMO_TRX_BSIC:+-b "$OSMO_TRX_BSIC"} $OSMO_TRX_ARGS > "$RUNDIR/transceiver.log" 2>&1 &
+    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$TRANSCEIVER" -l "$L2_SOCK" -m "$OSMO_TRX_TS_MASK" ${OSMO_TRX_TX_MASK:+-M "$OSMO_TRX_TX_MASK"} ${OSMO_TRX_BSIC:+-b "$OSMO_TRX_BSIC"} $args_ts1 $OSMO_TRX_ARGS > "$RUNDIR/transceiver.log" 2>&1 &
     echo $! > "$RUNDIR/transceiver.pid"
     attendre 10 sh -c "ss -uanH 2>/dev/null | awk '\$4 ~ /[:.]5702\$/ {f=1} END {exit !f}'" || rater "transceiver n'ecoute pas en 5700-5702 (voir $RUNDIR/transceiver.log)"
     vivant transceiver || rater "transceiver s'est arrete : $(tail -1 "$RUNDIR/transceiver.log")"
@@ -433,7 +474,7 @@ etape4_trx() {   # OSMO_TRX=1 : l'appli hote transceiver, a la place du mobile
             fi
         fi
     fi
-    dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)"
+    dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)${args_ts1:+  + telephone 2 TS1 : $args_ts1}"
 }
 
 etape4() {   # le mobile
@@ -478,22 +519,42 @@ etape4() {   # le mobile
 }
 
 etape5_air() {   # AIR=1 : l'air entre les deux Calypsos (pont/air.py), a la place du pont
-    vivant air && { dire "5. air deja lance (pid $(pid_de air))"; return; }
+    if vivant air; then dire "5. air deja lance (pid $(pid_de air))"; etape5_vsp; return; fi
     [ -r "$AIR_PY" ] || rater "air.py absent : $AIR_PY"
     local autre_shm="$HOTE_SHM" autre_port=6702
     [ "$INSTANCE" = 1 ] && { autre_shm=/dev/shm/calypso2; autre_port=6712; }
     vitrine air
     # A = l'autre instance (son anneau TX, son port BSP), B = celle-ci
+    # [2026-10-20] le telephone 2 du TRX (TS1, instance 3 : /dev/shm/calypso3, BSP udp 6722) s'il tourne, et l'annonce du
+    # TCH au mobile (calypso_tch_cfg de CE /dev/shm) quand l'air decode l'ASSIGNMENT COMMAND
+    local args_c=""
+    if [ -S "/tmp/osmocom_l2_${OSMO_TRX_TS1_INSTANCE}" ] && [ -f "/tmp/c54x-pont${OSMO_TRX_TS1_INSTANCE}/dsp.pid" ] \
+       && kill -0 "$(cat "/tmp/c54x-pont${OSMO_TRX_TS1_INSTANCE}/dsp.pid" 2>/dev/null)" 2>/dev/null; then
+        args_c="--c-ring $HOTE_SHM/calypso${OSMO_TRX_TS1_INSTANCE}/calypso_tx_rom --c-port $((6702 + 10 * (OSMO_TRX_TS1_INSTANCE - 1)))"
+    fi
     ${PRIO[@]+"${PRIO[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
-        --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" > "$RUNDIR/air.log" 2>&1 &
+        --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" $args_c --tch-cfg /dev/shm/calypso_tch_cfg > "$RUNDIR/air.log" 2>&1 &
     echo $! > "$RUNDIR/air.pid"
     attendre 5 grep -aq "air :" "$RUNDIR/air.log" || rater "air.py ne s'est pas annonce (voir $RUNDIR/air.log)"
-    dire "5. air  pid $(pid_de air)  $autre_shm/calypso_tx_rom -> udp $CALYPSO_BSP_PORT (ici) ; /dev/shm/calypso_tx_rom (ici) -> udp $autre_port (l'autre)"
+    dire "5. air  pid $(pid_de air)  $autre_shm/calypso_tx_rom -> udp $CALYPSO_BSP_PORT (ici) ; /dev/shm/calypso_tx_rom (ici) -> udp $autre_port (l'autre)${args_c:+ ; TS1 : $args_c}"
+    etape5_vsp
+}
+
+# [2026-10-20] le port voix (CALYPSO_VSP=1) : anneaux PCM du DSP <-> PulseAudio, aussi en mode air (le son
+# de l'appel passait par le pont ; sans lui, appel etabli mais muet). Lance dans l'espace de l'instance :
+# /dev/shm/calypso_pcm_ul et _dl sont ceux de CE mobile.
+etape5_vsp() {
+    [ "${CALYPSO_VSP:-0}" = 1 ] || return 0
+    vivant vsp && { dire "5b. pont audio VSP deja lance (pid $(pid_de vsp))"; return 0; }
+    ( cd /opt/GSM/osmo-operator && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
+    echo $! > "$RUNDIR/vsp.pid"
+    dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio  (journal $RUNDIR/vsp.log)"
 }
 
 etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
     [ "$AIR" = 1 ] && { etape5_air; return; }
     [ "$OSMO_TRX" = 1 ] && { dire "5. (OSMO_TRX=1 : pas de pont, transceiver tient 5700-5702)"; return; }
+    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "5. (telephone 2 : rien)"; return; }
     [ -n "$FIRMWARE_APP" ] && { dire "5. (FIRMWARE_APP=$FIRMWARE_APP : pas de pont)"; return; }
     [ "$PONT" = 1 ] || { dire "5. (PONT=0 : pas de pont.py, aucun burst du BTS n'arrive)"; return; }
     vivant pont && { dire "5. pont.py deja lance (pid $(pid_de pont))"; return; }
@@ -707,6 +768,17 @@ bruit_statut() {   # --status : muet par defaut
 mkdir -p "$RUNDIR"
 case "${1:-}" in
     --stop)   arreter; garder_journaux
+              # [2026-10-20] le telephone 2 du TRX (instance 3) tombe avec l'instance 1
+              if [ "$INSTANCE" = 1 ] && [ -d "/tmp/c54x-pont$OSMO_TRX_TS1_INSTANCE" ] && [ -f "/tmp/c54x-pont$OSMO_TRX_TS1_INSTANCE/dsp.pid" ]; then
+                  INSTANCE="$OSMO_TRX_TS1_INSTANCE" OSMO_TRX=1 OSMO_TRX_PHONE=2 AIR=0 bash "$0" --stop
+              fi
+              # [2026-10-20 22:30] le mobile par l'air (instance 2) aussi : il survivait aux relances de
+              # start-native.sh --bts --ms (c54x_exe + air.py de 22:12 encore la a 22:28), et l'air gardait
+              # ouvert l'ANCIEN anneau TX de l'instance 1 (fichier supprime) : A->B fige, plus de descendant
+              # pour le mobile, donc plus de LU.
+              if [ "$INSTANCE" = 1 ] && [ -d /tmp/c54x-pont2 ] && ls /tmp/c54x-pont2/*.pid >/dev/null 2>&1; then
+                  INSTANCE=2 AIR=1 OSMO_TRX=0 bash "$0" --stop
+              fi
               # vides une fois ranges : le lancement suivant ne les range pas deux fois
               [ -f "$RUNDIR/dsp.log" ] && : > "$RUNDIR/dsp.log"
               [ -f /dev/shm/pont.log ] && : > /dev/shm/pont.log ;;

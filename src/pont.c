@@ -723,17 +723,45 @@ static uint32_t tx_tsp_fn(uint32_t tick, int *source)
 #define ROM_TX_SHM   "/dev/shm/calypso_tx_rom"
 #define ROM_TX_SLOTS 256
 #define ROM_TX_SZ    160
+/* [2026-10-20] L'anneau calypso_tx_rom est partage par tx_tsp_publier (bursts captures au script TSP) et
+ * tx_page_publier (mode TRX : bursts synthetises depuis la page de l'extcode, un par slot TX). Case de
+ * 160 octets : seq(4) fn(4) type(1) tsc(1) offset(1) src(1) bits(148) ; src : bit 7 = A5, bits 4-6 = tn. */
+static int g_ring_fd = -1;
+static uint32_t g_ring_w;
+static bool ring_publier(int type, const uint8_t *bits, int tsc, int offset, uint8_t src, uint32_t fn_gsm)
+{
+    if (g_ring_fd < 0) {
+        g_ring_fd = open(ROM_TX_SHM, O_RDWR | O_CREAT, 0666);
+        if (g_ring_fd < 0 || ftruncate(g_ring_fd, 8 + ROM_TX_SLOTS * ROM_TX_SZ) < 0) return false;
+        uint32_t h[2] = { 0, ROM_TX_SLOTS };
+        if (pwrite(g_ring_fd, h, sizeof h, 0) < 0) return false;
+    }
+    uint8_t slot[ROM_TX_SZ] = {0};
+    g_ring_w++;
+    memcpy(slot, &g_ring_w, 4); memcpy(slot + 4, &fn_gsm, 4);
+    slot[8] = (uint8_t)type; slot[9] = (uint8_t)(tsc < 0 ? 0xff : tsc); slot[10] = (uint8_t)(offset < 0 ? 0xff : offset);
+    slot[11] = src;
+    memcpy(slot + 12, bits, 148);
+    off_t off = 8 + (off_t)((g_ring_w - 1) % ROM_TX_SLOTS) * ROM_TX_SZ;
+    return pwrite(g_ring_fd, slot, sizeof slot, off) >= 0 && pwrite(g_ring_fd, &g_ring_w, 4, 0) >= 0;
+}
+static int trx_page_mode(void)
+{
+    static int m = -1;
+    if (m < 0) { const char *e = calypso_getenv("CALYPSO_BSP_TRX"); m = (e && *e == '1') ? 1 : 0; }
+    return m;
+}
 static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
 {
-    static int actif = -1, fd = -1;
-    static uint32_t w_compte;
+    static int actif = -1;
     static unsigned n_rach, n_nb, n_inconnu, n_sb, n_dummy, n_fb;
     static int chaque = -1;
     if (actif < 0) {
         const char *e = calypso_getenv("MONTANT_ROM_TX"); actif = !(e && *e == '0');
         e = calypso_getenv("MONTANT_ROM_TX_CHAQUE"); chaque = (e && *e == '1') ? 1 : 0;
         if (chaque) printf("  [rom-tx] MONTANT_ROM_TX_CHAQUE=1 : un burst publie a CHAQUE trame avec tache TX (mode TRX)\n");
-        printf("  [rom-tx] burst montant final de la ROM (script TSP 0x3cbb) -> %s : %s\n", ROM_TX_SHM,
+        if (trx_page_mode()) { actif = 0; printf("  [rom-tx] mode TRX : les bursts sont publies depuis la page de l'extcode (tx_page_publier), pas du script TSP\n"); }
+        else printf("  [rom-tx] burst montant final de la ROM (script TSP 0x3cbb) -> %s : %s\n", ROM_TX_SHM,
                actif ? "actif" : "coupe (MONTANT_ROM_TX=0)");
     }
     if (!actif) return;
@@ -803,19 +831,9 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
                        n_sb, n_recodes, n_sans_page, n_sb ? (double)n_bits_faux / n_sb : 0.0);
         }
     }
-    if (fd < 0) {
-        fd = open(ROM_TX_SHM, O_RDWR | O_CREAT, 0666);
-        if (fd < 0 || ftruncate(fd, 8 + ROM_TX_SLOTS * ROM_TX_SZ) < 0) { actif = 0; return; }
-        uint32_t h[2] = { 0, ROM_TX_SLOTS };
-        if (pwrite(fd, h, sizeof h, 0) < 0) { actif = 0; return; }
-    }
-    uint8_t slot[ROM_TX_SZ] = {0};
     int src = 0;
     uint32_t fn_gsm = tx_tsp_fn(fn, &src);
-    w_compte++;
-    memcpy(slot, &w_compte, 4); memcpy(slot + 4, &fn_gsm, 4);
-    slot[8] = (uint8_t)b.type; slot[9] = (uint8_t)(b.tsc < 0 ? 0xff : b.tsc); slot[10] = (uint8_t)(b.offset < 0 ? 0xff : b.offset);
-    slot[11] = (uint8_t)src;   /* 1 = a_a5fn de la page, 2 = tick + decalage, 0 = tick nu */
+    uint8_t octet_src = (uint8_t)src;
     /* [2026-10-15] bit 7 : burst NB chiffre par la ROM -- le coprocesseur A5 a
      * calcule un flux A5/1-2 pour ce fn (a une trame pres : recalage SACCH,
      * calypso_a5.c). Lu par le pont pour le compteur « A5 ul rom= ». */
@@ -823,12 +841,14 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
         uint32_t fa;
         if (b.type == TSP_TX_NB && calypso_a5_dernier(&fa)) {
             int32_t d = (int32_t)((fn_gsm + GSM_HYPERFRAME - fa) % GSM_HYPERFRAME);
-            if (d <= 1 || d >= (int32_t)GSM_HYPERFRAME - 1) slot[11] |= 0x80;
+            if (d <= 1 || d >= (int32_t)GSM_HYPERFRAME - 1) octet_src |= 0x80;
         }
     }
-    memcpy(slot + 12, b.bits, 148);
-    off_t off = 8 + (off_t)((w_compte - 1) % ROM_TX_SLOTS) * ROM_TX_SZ;
-    if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
+    /* [2026-10-20] bits 4-6 : l'intervalle sur lequel le firmware emet (TCH TS1..7 ; 0 = TS0) : l'air
+     * porte le burst a cet intervalle du TRX */
+    octet_src |= (uint8_t)((montant_tn_dedie() & 7) << 4);
+    if (!ring_publier(b.type, b.bits, b.tsc, b.offset, octet_src, fn_gsm)) { actif = 0; return; }
+    uint32_t w_compte = g_ring_w;
     if (b.type == TSP_TX_RACH) n_rach++; else if (b.type == TSP_TX_NB) n_nb++; else if (b.type == TSP_TX_SB) n_sb++; else if (b.type == TSP_TX_DUMMY) n_dummy++; else if (b.type == TSP_TX_FB) n_fb++; else n_inconnu++;
     static int nlog;
     if (nlog++ < 6 || (b.type == TSP_TX_RACH && n_rach <= 3))
@@ -838,6 +858,80 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
                b.offset, b.adresse, (char[]){ '0' + b.bits[0], '0' + b.bits[1], '0' + b.bits[2], '0' + b.bits[3], '0' + b.bits[4], '0' + b.bits[5], '0' + b.bits[6], '0' + b.bits[7], 0 });
     if ((n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu) % 2000 == 0)
         printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, SB %u, DUMMY %u, FB %u, inconnus %u\n", n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu, n_rach, n_nb, n_sb, n_dummy, n_fb, n_inconnu);
+}
+
+/* [2026-10-20] MODE TRX : PUBLICATION DEPUIS LA PAGE DE L'EXTCODE. Le firmware trx remplit tx[p] (cmd,
+ * pointeur de donnees) pour chaque slot p de sa fenetre TX (prim_bts.c patche : slot p = TS (tx_start + p)),
+ * et l'extcode du DSP les module ; la ROM emulee ne joue qu'un burst par trame (le script TSP) et le
+ * codeur SCH de l'extcode est faux sur ce coeur. On n'a pas besoin de la ROM : les bits se deduisent de
+ * la page (FB = 148 zeros, dummy = 05.02 5.2.6, SB = gsm0503_sch_encode(sch[0..1]), NB = 8 mots de
+ * donnees + TSC du NDB). Appele a la phase A du tick T+1 avec la page que le DSP a traitee au tick T
+ * (index d_dsp_page) : les bursts publies portent fn = T. Le SB cale le BSP montant (calypso_bsp_trx_calage).
+ * CALYPSO_TRX_TX_SLOTS (1) : nombre de slots publies ; CALYPSO_TRX_TX_START (0) : TS du slot 0. */
+static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
+{
+    static int nslots = -1, tx_start = 0; static unsigned n_pub, n_cal; static int32_t ecart_prec = INT32_MIN;
+    static const char DUMMY_148[] = "0001111101101110110000010100100111000001001000100000001111100011100010111000101110001010111010010100011001100111001111010011111000100101111101010000";
+    static const char *const TSC8[8] = {
+        "00100101110000100010010111", "00101101110111100010110111", "01000011101110100100001110",
+        "01000111101101000100011110", "00011010111001000001101011", "01001110101100000100111010",
+        "10100111110110001010011111", "11101111000100101110111100" };
+    if (nslots < 0) {
+        const char *e = calypso_getenv("CALYPSO_TRX_TX_SLOTS"); nslots = (e && *e) ? atoi(e) : 1;
+        if (nslots < 1) nslots = 1; if (nslots > 8) nslots = 8;
+        e = calypso_getenv("CALYPSO_TRX_TX_START"); tx_start = (e && *e) ? atoi(e) & 7 : 0;
+        printf("  [rom-tx] publication depuis la page de l'extcode : %d slot(s) TX a partir du TS%d\n", nslots, tx_start);
+    }
+    const uint16_t *db = &dsp->data[w_page ? 0x2200 : 0x2000];
+    uint32_t fn_tag = tick - 1;                       /* la trame DSP ou ces bursts sont partis */
+    int tsc = dsp->data[0x2401] & 7;
+    for (int p = 0; p < nslots; p++) {
+        unsigned cmd = db[2 * p], ptr = db[2 * p + 1];
+        uint8_t bits[148]; int type, offset = 0, tscp = -1;
+        memset(bits, 0, sizeof bits);
+        switch (cmd) {
+        case 1: type = TSP_TX_FB; break;                                          /* 148 zeros */
+        case 2: {                                                                  /* SB */
+            uint32_t sch = db[32] | ((uint32_t)db[33] << 16);
+            uint8_t info[4] = { sch & 0xff, (sch >> 8) & 0xff, (sch >> 16) & 0xff, (sch >> 24) & 0xff };
+            ubit_t code[78];
+            if (gsm0503_sch_encode(code, info) < 0) continue;
+            static const char SYNC_SB[] = "1011100101100010000001000000111100101101010001010111011000011011";
+            for (int k = 0; k < 39; k++) { bits[3 + k] = code[k]; bits[106 + k] = code[39 + k]; }
+            for (int k = 0; k < 64; k++) bits[42 + k] = (uint8_t)(SYNC_SB[k] - '0');
+            type = TSP_TX_SB;
+            /* calage du montant : ce SB (fn GSM) est parti au tick fn_tag ; applique quand deux SB d'affilee concordent */
+            uint32_t t1 = ((sch >> 23) & 1) | ((sch >> 7) & 0x1fe) | ((sch & 3) << 9);
+            uint32_t t2 = (sch >> 18) & 0x1f, t3 = (((sch >> 24) & 1) | (((sch >> 16) & 3) << 1)) * 10 + 1;
+            uint32_t fnsb = 51 * 26 * t1 + 51 * ((t3 + 26 - t2) % 26) + t3;
+            int32_t ecart = (int32_t)(fnsb - fn_tag);
+            /* le calage garde la relation mesuree au script TSP (fn du SB = tick d'emission - 1) : on passe
+             * le tick de la phase A (T + 1), pas fn_tag, pour que CALYPSO_BSP_TRX_DELTA garde son sens */
+            if (ecart == ecart_prec && calypso_bsp_trx_calage(fnsb, tick) && (++n_cal <= 3 || n_cal % 500 == 0))
+                printf("  [rom-tx] calage TRX (page) : SB fn=%u emis au tick %u (fn - tick = %d) -> BSP montant cale (%u)\n", fnsb, fn_tag, ecart, n_cal);
+            ecart_prec = ecart;
+            break; }
+        case 3: for (int k = 0; k < 148; k++) bits[k] = (uint8_t)(DUMMY_148[k] - '0'); type = TSP_TX_DUMMY; break;
+        case 5: {                                                                  /* NB : 116 bits + TSC */
+            if (ptr + 8 > 0x200) continue;
+            const uint16_t *w = &db[ptr];
+            uint8_t pb[15];
+            for (int k = 0; k < 7; k++) { pb[2 * k] = w[k] >> 8; pb[2 * k + 1] = w[k] & 0xff; }
+            pb[14] = w[7] >> 8;
+            for (int k = 0; k < 58; k++) bits[3 + k] = (pb[k >> 3] >> (7 - (k & 7))) & 1;          /* 57 data + hl */
+            for (int k = 0; k < 58; k++) bits[87 + k] = (pb[(58 + k) >> 3] >> (7 - ((58 + k) & 7))) & 1;   /* hu + 57 data */
+            for (int k = 0; k < 26; k++) bits[61 + k] = (uint8_t)(TSC8[tsc][k] - '0');
+            type = TSP_TX_NB; tscp = tsc;
+            break; }
+        default: continue;                                                         /* 0 (rien) ou AB */
+        }
+        uint8_t src = (uint8_t)(((tx_start + p) & 7) << 4);
+        ring_publier(type, bits, tscp, offset, src, fn_tag);
+        n_pub++;
+        if (n_pub <= 4 || n_pub % 20000 == 0)
+            printf("  [rom-tx] page : #%u tick=%u slot %d (TS%d) cmd=%u -> %s\n", n_pub, fn_tag, p, (tx_start + p) & 7, cmd,
+                   type == TSP_TX_FB ? "FB" : type == TSP_TX_SB ? "SB" : type == TSP_TX_DUMMY ? "DUMMY" : "NB");
+    }
 }
 
 static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
@@ -1974,8 +2068,13 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 enreg_api_prendre(api_ram);
                 ombre_descendante(api_ram, m.a);
                 /* [2026-10-20] mode TRX : les bits exacts du burst montant joue a la trame precedente,
-                 * dans la page de resultat que l'ARM lit apres ce DONE (calypso_bsp.c) */
-                calypso_bsp_trx_ul_prothese(dsp->data, m.a, (api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2] & B_GSM_PAGE) ? 1 : 0);
+                 * dans la page de resultat que l'ARM lit apres ce DONE (calypso_bsp.c), et les bursts
+                 * descendants de tous les slots TX de cette page, publies dans l'anneau */
+                {
+                    int w_page = (api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2] & B_GSM_PAGE) ? 1 : 0;
+                    if (trx_page_mode()) tx_page_publier(dsp, m.a, w_page);
+                    calypso_bsp_trx_ul_prothese(dsp->data, m.a, w_page);
+                }
                 envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                 t_done_a = chrono_ms();
                 bool go = false;
