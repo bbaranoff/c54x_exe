@@ -11,6 +11,30 @@
 #   grgsm            2. qosmo            l'ARM + layer1 avec la couche 1 gr-gsm (shunt)
 #                    3. osmocon  4. mobile  5. pont.py (PONT=1) bursts du BTS -> L1 gr-gsm
 # Le pont a besoin du BTS (osmo-bts-trx, TRXD 5700) : sans reseau il demarre et attend.
+#   OSMO_TRX=1       [2026-10-19] LE TELEPHONE EST LE TRX DE LA BTS#0 (start-native.sh --osmo-trx) :
+#                    2. qosmo sur trx.highram.elf (osmocom-bb-transceiver, appli « trx » de Sylvain Munaut)
+#                    4. transceiver (hote, osmocom-bb-transceiver, patches/osmocom-bb-transceiver-qemu-bench)
+#                       A LA PLACE de mobile : L1CTL sur $L2_SOCK, TRXD 5700-5702 face a osmo-bts-trx,
+#                       --no-sync (aucune cellule a ecouter), un seul timeslot RX (OSMO_TRX_TS_MASK=0x01) ;
+#                       le masque TX reste 0xe3 (TS 5,6,7,0,1) : prim_bts.c ne sert le TS0 BCCH que si
+#                       tx_start == 5 (fenetre TX decalee de 3 slots). [2026-10-20] -m 0x01 posait aussi
+#                       TX=0x01 -> tx_start 0 -> dummy a chaque trame (DUMMY 18000, FB 0, SB 0).
+#                    5. pas de pont : il tiendrait les memes ports 5700-5702 (PONT force a 0)
+#                    OSMO_TRX_ARGS (defaut « --no-sync -e 3 »), TRANSCEIVER (chemin du binaire).
+#   INSTANCE=2       [2026-10-19] UNE DEUXIEME CHAINE COMPLETE a cote de la premiere (banc-mobile pendant
+#                    que banc-trx tourne) : run.sh se relance dans un espace de montage prive ou
+#                    /dev/shm EST /dev/shm/calypso2 (vu de l'hote), et le vrai /dev/shm de l'hote est
+#                    visible en /run/calypso-shm-hote ; aucun chemin /dev/shm/... du code ne change.
+#                    RUNDIR /tmp/c54x-pont2, L1CTL /tmp/osmocom_l2_2, socket DSP /tmp/calypso_dsp2.sock,
+#                    moniteur, gdb 1235/44445, clavier /tmp/calypso_keys2.sock, BSP udp 6712, VTY mobile
+#                    +100, 4347 (copie de mobile_pont.cfg ; 4257 est a osmo-ggsn), PANNEAU_LOGS=none. AIR=1 (defaut en instance 2) :
+#                    etape 5 = pont/air.py, l'air entre les deux Calypsos (bursts TX de l'un vers le BSP
+#                    de l'autre) a la place du pont.
+#   FIRMWARE_APP=rssi  [2026-10-19] une appli firmware SEULE sur l'ARM + le DSP (rssi, menu,
+#                    hello_world, snake_game... : board/compal_e88/<app>.highram.elf) : etapes 1-3,
+#                    ni mobile ni pont. L'ecran et le clavier du C123 sont emules (qosmo :
+#                    calypso_st7558.c -> /dev/shm/calypso_lcd, calypso_armio.c <- /tmp/calypso_keys.sock) ;
+#                    la fenetre : /usr/bin/python3 /opt/GSM/osmo-operator/tools/osmo-c123-gtk.py
 #
 #   ./run.sh                 tout lancer            ./run.sh --status    qui tourne
 #   MODE=grgsm ./run.sh      montage gr-gsm         ./run.sh --logs      suivre les journaux
@@ -27,6 +51,32 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${MODE:-dsp}"
 PONT="${PONT:-0}"
+# [2026-10-19] INSTANCE=N (N != 1) : /dev/shm prive = /dev/shm/calypsoN de l'hote ; le vrai /dev/shm
+# reste lisible en /run/calypso-shm-hote (l'air y lit l'anneau TX de l'instance 1). Les processus
+# lances ici heritent de l'espace ; --stop/--status relances avec INSTANCE=N y entrent aussi.
+INSTANCE="${INSTANCE:-1}"
+HOTE_SHM=/run/calypso-shm-hote
+if [ "$INSTANCE" != 1 ] && [ -z "${CALYPSO_NS:-}" ]; then
+    command -v unshare >/dev/null || { echo "[run] ECHEC : unshare absent (util-linux)" >&2; exit 1; }
+    _d="/dev/shm/calypso$INSTANCE"; mkdir -p "$_d" "$HOTE_SHM" && chmod 1777 "$_d"
+    exec unshare -m --propagation private bash -c '
+        mount --bind /dev/shm "$4" && mount --bind "$1" /dev/shm && export CALYPSO_NS="$2" && exec bash "$3" "${@:5}"' \
+        _ "$_d" "$INSTANCE" "$0" "$HOTE_SHM" "$@"
+fi
+if [ "$INSTANCE" != 1 ]; then
+    RUNDIR="${RUNDIR:-/tmp/c54x-pont$INSTANCE}"
+    L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2_$INSTANCE}"
+    MONITOR="${MONITOR:-/tmp/qemu-monitor-pont$INSTANCE.sock}"
+    DSP_SOCK="${DSP_SOCK:-/tmp/calypso_dsp$INSTANCE.sock}"
+    GDB_STUB="${GDB_STUB:-$((1233 + INSTANCE))}"
+    GDB_TELNET="${GDB_TELNET:-$((44443 + INSTANCE))}"
+    PANNEAU_LOGS="${PANNEAU_LOGS:-none}"
+    export CALYPSO_BSP_PORT="${CALYPSO_BSP_PORT:-$((6702 + 10 * (INSTANCE - 1)))}"
+    export CALYPSO_KEYS_SOCK="${CALYPSO_KEYS_SOCK:-/tmp/calypso_keys$INSTANCE.sock}"
+    AIR="${AIR:-1}"
+fi
+AIR="${AIR:-0}"
+AIR_PY="${AIR_PY:-/opt/GSM/osmo-operator/pont/air.py}"
 QOSMO="${QOSMO:-/opt/GSM/qosmo}"
 QEMU="${QEMU:-$QOSMO/build/qemu-system-arm}"
 # Firmware : layer1.highram d'origine, non modifie. [2026-10-04] La variante layer1.highram_patched
@@ -34,6 +84,41 @@ QEMU="${QEMU:-$QOSMO/build/qemu-system-arm}"
 # retiree : le B_BFI de la ROM est juste depuis qosmo a19dde59, et le but est le firmware tel quel.
 # FIRMWARE_ELF=... pour un autre binaire.
 _FW=/opt/GSM/firmware/board/compal_e88
+# [2026-10-19] OSMO_TRX=1 : firmware trx.highram (le Calypso emet la BTS), appli hote transceiver.
+OSMO_TRX="${OSMO_TRX:-0}"
+FIRMWARE_APP="${FIRMWARE_APP:-}"
+if [ -n "$FIRMWARE_APP" ]; then
+    FIRMWARE_ELF="$_FW/$FIRMWARE_APP.highram.elf"   # s'impose aussi face a /etc/default/osmo-banc
+    FIRMWARE_BIN="${FIRMWARE_ELF%.elf}.bin"
+    PONT=0
+fi
+if [ "$OSMO_TRX" = 1 ]; then
+    # Le firmware trx S'IMPOSE : /etc/default/osmo-banc (profil GPRS) pose FIRMWARE_ELF=layer1.highram.gprs
+    # dans l'environnement, et un « ${FIRMWARE_ELF:-trx} » le laissait passer : le transceiver parlait
+    # BTS_MODE (0x1f) a un layer1 qui ne le connait pas. OSMO_TRX_FIRMWARE=<elf> pour un autre trx.
+    [ -n "${FIRMWARE_ELF:-}" ] && [ "${FIRMWARE_ELF##*/}" != "${OSMO_TRX_FIRMWARE:-trx.highram.elf}" ] \
+        && printf '\033[1m[run dsp]\033[0m OSMO_TRX=1 : firmware %s ignore, trx.highram.elf a la place\n' "$FIRMWARE_ELF"
+    FIRMWARE_ELF="${OSMO_TRX_FIRMWARE:-$_FW/trx.highram.elf}"
+    FIRMWARE_BIN="${FIRMWARE_ELF%.elf}.bin"
+    # BSIC de la cellule : osmo-bts-trx n'envoie que SETTSC (BCC), le NCC vient du bts 0 du BSC
+    OSMO_TRX_BSIC="${OSMO_TRX_BSIC:-$(awk '/^ *bts 0$/{f=1} f&&/base_station_id_code/{print $2; exit}' /etc/osmocom/osmo-bsc.cfg 2>/dev/null)}"
+    TRANSCEIVER="${TRANSCEIVER:-/opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver/transceiver}"
+    [ -x "$TRANSCEIVER" ] || TRANSCEIVER="$(command -v transceiver || echo "$TRANSCEIVER")"
+    OSMO_TRX_TS_MASK="${OSMO_TRX_TS_MASK:-0x01}"
+    # [2026-10-20] masque TX 0x01 : UNE fenetre TX (tx_start 0, slot TPU 5 = TS0 descendant), celle que la
+    # ROM joue comme un RACH et que c54x_exe capture (script TSP 0x3cbb). Le 0xe3 d'origine (fenetre
+    # multiple 5,6,7,0,1) n'est pas servi par le banc : seul le premier burst (dummy) sortait. Le firmware
+    # trx corrige (prim_bts.c, SLOT/tn) vise le TS0 quel que soit tx_start.
+    OSMO_TRX_TX_MASK="${OSMO_TRX_TX_MASK:-0x01}"
+    OSMO_TRX_ARGS="${OSMO_TRX_ARGS:---no-sync -e 3}"
+    PONT=0
+    # la BTS repete ses bursts (dummy, FB) : c54x_exe publie chaque trame avec tache TX, pas que les nouveaux
+    export MONTANT_ROM_TX_CHAQUE="${MONTANT_ROM_TX_CHAQUE:-1}"
+    # [2026-10-20] le BSP joue les bursts montants (air.py, fn GSM du mobile) a la trame du firmware trx,
+    # calee sur le fn du SB emis (pont.c -> calypso_bsp_trx_calage) ; CALYPSO_BSP_TRX_DELTA ajuste (defaut -2 avec le
+    # firmware patche BTS_RX_LAG 3 : le burst montant fn X est joue une trame apres la fenetre native, marge pour l'air)
+    export CALYPSO_BSP_TRX="${CALYPSO_BSP_TRX:-1}"
+fi
 FIRMWARE_ELF="${FIRMWARE_ELF:-$_FW/layer1.highram.elf}"
 FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
 OSMOCON="${OSMOCON:-/opt/GSM/osmocom-bb/src/host/osmocon/osmocon}"
@@ -73,7 +158,7 @@ renice_autres() {
 charge() {
     echo "chaine (pid %cpu nice politique) :"
     local n
-    for n in dsp qemu osmocon mobile pont; do
+    for n in dsp qemu osmocon mobile transceiver pont air; do
         if vivant "$n"; then printf '  %-8s %s\n' "$n" "$(ps -o pid=,pcpu=,ni=,cls= -p "$(pid_de "$n")" | tr -s ' ')"; else printf '  %-8s arrete\n' "$n"; fi
     done
     echo "processus les plus gourmands :"
@@ -98,7 +183,7 @@ LOCKSTEP="${LOCKSTEP:-1}"
 VERB="${VERB:--v}"
 IQ="${IQ:-none}"
 AMP="${AMP:-30000}"
-DSP_SOCK=/tmp/calypso_dsp.sock
+DSP_SOCK="${DSP_SOCK:-/tmp/calypso_dsp.sock}"
 DSP_SHM=/dev/shm/calypso_api_ram
 
 # [2026-09-23] LA VITRINE : LES MEMES JOURNAUX QU'EN MODE SHUNT. Le panneau
@@ -140,7 +225,7 @@ etape1() {   # le DSP (montage dsp seulement)
     rm -f /dev/shm/calypso_tch_cfg
     # [2026-09-23] Attendre (au plus 40 ms) une trame que la BTS livre en
     # retard plutot que la jouer en effacement (calypso_bsp.c, bsp_attendre_trame).
-    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm "$DSP_SOCK" --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
     # [2026-10-06] shm en 0666 : le umask rabaisse la demande 0666 de c54x_exe a 0644, ce qui empeche
@@ -154,7 +239,7 @@ etape2() {   # l'ARM
     [ -x "$QEMU" ] || rater "QEMU absent : $QEMU (ninja -C $QOSMO/build)"
     [ -r "$FIRMWARE_ELF" ] || rater "firmware absent : $FIRMWARE_ELF"
     local extern=""
-    if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "le DSP ne tourne pas (etape 1 d'abord)"; extern=1; fi
+    if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "le DSP ne tourne pas (etape 1 d'abord)"; extern="$DSP_SOCK"; fi
     rm -f "$MONITOR"
     vitrine qemu
     # [2026-09-23] gdb sur l'ARM : gdbstub QEMU en tcp::$GDB_STUB, et la console
@@ -228,6 +313,12 @@ etape2() {   # l'ARM
             fi
         fi
     fi
+    # [2026-10-19] QEMU_DEBUG_FLAGS=int,guest_errors : journal des exceptions de l'ARM (PC du
+    # Data Abort, acces a une adresse non mappee) dans $RUNDIR/qemu-debug.log. Sans
+    # ASSEMBLY_LOGS seulement (un seul -d/-D par ligne QEMU).
+    if [ -n "${QEMU_DEBUG_FLAGS:-}" ] && [ "${ASSEMBLY_LOGS:-0}" != 1 ]; then
+        gdb_opt+=(-d "$QEMU_DEBUG_FLAGS" -D "$RUNDIR/qemu-debug.log")
+    fi
     # [2026-10-19] QEMU_ICOUNT=auto|shift=N,... (start-native.sh --icount) : -icount.
     case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) gdb_opt+=(-icount "$QEMU_ICOUNT") ;; esac
     # [2026-09-23] Relance de QEMU vers le DSP toutes les trame/64 (0,07 ms) au
@@ -253,6 +344,7 @@ etape2() {   # l'ARM
     dire "2. qemu-system-arm  pid $(pid_de qemu)  pty modem $(cat "$RUNDIR/modem.pty")  moniteur $MONITOR  L1=$([ "$MODE" = dsp ] && echo "DSP externe" || echo "gr-gsm (udp 4730/4731)")"
     [ "$GDB" = 1 ] && dire "   gdb ARM : telnet 0 $GDB_TELNET  (stub tcp::$GDB_STUB, journal $RUNDIR/gdb.log)"
     case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) dire "   icount : $QEMU_ICOUNT" ;; esac
+    [ -n "${QEMU_DEBUG_FLAGS:-}" ] && [ "${ASSEMBLY_LOGS:-0}" != 1 ] && dire "   journal QEMU -d $QEMU_DEBUG_FLAGS : $RUNDIR/qemu-debug.log"
     # [2026-10-19] moniteur mailbox (CALYPSO_MAILBOX=1) : deux fichiers, un par cote
     if [ -n "${CALYPSO_MAILBOX:-}" ] && [ "${CALYPSO_MAILBOX}" != 0 ]; then
         local _mb="${CALYPSO_MAILBOX_FILE:-${LOG_DIR:-/tmp/calypso/logs}/mailbox.log}"
@@ -295,13 +387,74 @@ config_vocodeur_rom() {
     echo "$dst"
 }
 
+etape4_trx() {   # OSMO_TRX=1 : l'appli hote transceiver, a la place du mobile
+    vivant transceiver && { dire "4. transceiver deja lance (pid $(pid_de transceiver))"; return; }
+    [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
+    [ -x "$TRANSCEIVER" ] || rater "transceiver absent : $TRANSCEIVER (make -C /opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver)"
+    local p
+    # [2026-10-19] Colonne LOCALE de ss ($4 ; $5 est le peer), tous etats : avec « -uan | grep » la colonne peer matchait
+    # aussi (osmo-bts-trx 5800 -> 127.0.0.1:5700 passait pour un tenant), et « -uln » ne voit pas
+    # les sockets du transceiver, qui sont CONNECTEES (ESTAB) vers la BTS, pas en ecoute.
+    for p in 5700 5701 5702; do
+        ss -uanH 2>/dev/null | awk -v p="$p" '$4 ~ ("[:.]" p "$") {found=1} END {exit !found}' \
+            && rater "port UDP $p deja pris par $(ss -uanpH 2>/dev/null | awk -v p="$p" '$4 ~ ("[:.]" p "$")' | grep -o 'users:.*' | head -1) (un pont.py qui traine ? ./run.sh --stop)"
+    done
+    vitrine transceiver
+    # -l : socket L1CTL d'osmocon ; -m : masque de timeslots RX (un seul pour commencer) ; le masque TX
+    # garde son defaut 0xe3 (OSMO_TRX_TX_MASK pour le forcer : -M), voir l'en-tete
+    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$TRANSCEIVER" -l "$L2_SOCK" -m "$OSMO_TRX_TS_MASK" ${OSMO_TRX_TX_MASK:+-M "$OSMO_TRX_TX_MASK"} ${OSMO_TRX_BSIC:+-b "$OSMO_TRX_BSIC"} $OSMO_TRX_ARGS > "$RUNDIR/transceiver.log" 2>&1 &
+    echo $! > "$RUNDIR/transceiver.pid"
+    attendre 10 sh -c "ss -uanH 2>/dev/null | awk '\$4 ~ /[:.]5702\$/ {f=1} END {exit !f}'" || rater "transceiver n'ecoute pas en 5700-5702 (voir $RUNDIR/transceiver.log)"
+    vivant transceiver || rater "transceiver s'est arrete : $(tail -1 "$RUNDIR/transceiver.log")"
+    # [2026-10-20] osmo-bts-trx (BTS#0) SORT quand le transceiver disparait (« No more clock from
+    # transceiver », bts_shutdown exit 1) : apres un --stop la BTS n'est plus la, et le plan du fork
+    # (qosmo/run.sh --only bts) refuse de la relancer seule (dependance bsc). On la relance ici comme
+    # le module 60-bts.sh, dans le journal du panneau. OSMO_TRX_BTS_RELANCE=0 pour ne rien faire.
+    if [ "${OSMO_TRX_BTS_RELANCE:-1}" = 1 ]; then
+        local bts_cfg="${BTS_CFG:-/etc/osmocom/osmo-bts-trx.cfg}" bts_bin bts_log bts_pid _i
+        # La BTS d'avant peut etre encore en train de s'eteindre (bts_shutdown : jusqu'a 70 s mesures) :
+        # on attend qu'elle soit partie, ou qu'elle ait allume le firmware (POWERON -> « BTS MODE: 7 514 »).
+        for _i in $(seq 1 "${OSMO_TRX_BTS_ATTENTE:-90}"); do
+            pgrep -f -- "osmo-bts-trx -c $bts_cfg\$" >/dev/null 2>&1 || break
+            grep -aq 'BTS MODE: [0-9]* [1-9]' "$RUNDIR/osmocon.log" 2>/dev/null && break
+            [ "$_i" = 1 ] && dire "   BTS#0 presente mais muette : on attend qu'elle allume le firmware ou qu'elle finisse de s'eteindre (${OSMO_TRX_BTS_ATTENTE:-90} s max)"
+            sleep 1
+        done
+        if ! pgrep -f -- "osmo-bts-trx -c $bts_cfg\$" >/dev/null 2>&1; then
+            bts_bin="${OSMO_BTS_TRX_BIN:-$(command -v osmo-bts-trx || echo /usr/local/bin/osmo-bts-trx)}"
+            bts_log="$(ls -d /run/user/*/osmo-nitb/logs 2>/dev/null | head -1)"; bts_log="${bts_log:-$RUNDIR}/bts.log"
+            if [ -x "$bts_bin" ] && [ -r "$bts_cfg" ]; then
+                setsid stdbuf -oL -eL $(chrt -r 1 true 2>/dev/null && echo "chrt -r 1") "$bts_bin" -c "$bts_cfg" >> "$bts_log" 2>&1 </dev/null &
+                bts_pid=$!
+                for bts_piddir in /run/user/*/osmo-nitb; do [ -d "$bts_piddir" ] && echo "$bts_pid" > "$bts_piddir/bts.pid"; done
+                dire "4b. osmo-bts-trx relancee (BTS#0 absente : elle sort quand le transceiver disparait)  pid $bts_pid  $bts_cfg  journal $bts_log"
+            else
+                dire "4b. BTS#0 absente et non relancable (binaire $bts_bin ou config $bts_cfg) : ./start-native.sh --osmo-trx"
+            fi
+        fi
+    fi
+    dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)"
+}
+
 etape4() {   # le mobile
+    [ -n "$FIRMWARE_APP" ] && { dire "4. (FIRMWARE_APP=$FIRMWARE_APP : pas de mobile ; ecran /dev/shm/calypso_lcd, touches /tmp/calypso_keys.sock, fenetre : tools/osmo-c123-gtk.py)"; return; }
+    [ "$OSMO_TRX" = 1 ] && { etape4_trx; return; }
     vivant mobile && { dire "4. mobile deja lance (pid $(pid_de mobile))"; return; }
     if [ "${BANC_VOCODEUR:-hote}" = rom ]; then
         MOBILE_CFG="$(config_vocodeur_rom "$MOBILE_CFG")"
         dire "4. vocodeur ROM (BANC_VOCODEUR=rom) : tch-voice en l1phy -> $MOBILE_CFG"
     fi
     [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
+    if [ "$INSTANCE" != 1 ]; then
+        # [2026-10-19] sockets et VTY propres a l'instance (layer2/sap/ms_data suffixes _N, VTY +10 par instance)
+        local _src="$MOBILE_CFG" _dst="$RUNDIR/mobile_instance$INSTANCE.cfg"
+        # le port VTY est decale de 100 par instance (4257 = osmo-ggsn ; awk additionne, sed non ; sub() garde
+        # l'indentation : « $3 = ... » reconstruisait la ligne sans l'espace de tete et le VTY la refusait)
+        awk -v inc=$((100 * (INSTANCE - 1))) '/^[[:space:]]*bind 127\.0\.0\.1 [0-9]+/ { n = $3 + inc; sub(/[0-9]+$/, n) } { print }' "$_src" \
+            | sed -e "s#/tmp/osmocom_l2\b#$L2_SOCK#" -e "s#/tmp/osmocom_sap\b#/tmp/osmocom_sap_$INSTANCE#" -e "s#/tmp/ms_data\b#/tmp/ms_data_$INSTANCE#" > "$_dst"
+        MOBILE_CFG="$_dst"
+        dire "4. instance $INSTANCE : config mobile derivee -> $MOBILE_CFG"
+    fi
     [ -x "$MOBILE" ] || rater "mobile absent : $MOBILE"
     [ -r "$MOBILE_CFG" ] || rater "config mobile absente : $MOBILE_CFG"
     local vty; vty="$(sed -n 's/^ *bind 127.0.0.1 \([0-9]*\).*/\1/p' "$MOBILE_CFG" | head -1)"
@@ -324,7 +477,24 @@ etape4() {   # le mobile
     dire "4. mobile  pid $(pid_de mobile)  config $MOBILE_CFG  vty telnet 127.0.0.1 ${vty:-?}"
 }
 
+etape5_air() {   # AIR=1 : l'air entre les deux Calypsos (pont/air.py), a la place du pont
+    vivant air && { dire "5. air deja lance (pid $(pid_de air))"; return; }
+    [ -r "$AIR_PY" ] || rater "air.py absent : $AIR_PY"
+    local autre_shm="$HOTE_SHM" autre_port=6702
+    [ "$INSTANCE" = 1 ] && { autre_shm=/dev/shm/calypso2; autre_port=6712; }
+    vitrine air
+    # A = l'autre instance (son anneau TX, son port BSP), B = celle-ci
+    ${PRIO[@]+"${PRIO[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
+        --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" > "$RUNDIR/air.log" 2>&1 &
+    echo $! > "$RUNDIR/air.pid"
+    attendre 5 grep -aq "air :" "$RUNDIR/air.log" || rater "air.py ne s'est pas annonce (voir $RUNDIR/air.log)"
+    dire "5. air  pid $(pid_de air)  $autre_shm/calypso_tx_rom -> udp $CALYPSO_BSP_PORT (ici) ; /dev/shm/calypso_tx_rom (ici) -> udp $autre_port (l'autre)"
+}
+
 etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
+    [ "$AIR" = 1 ] && { etape5_air; return; }
+    [ "$OSMO_TRX" = 1 ] && { dire "5. (OSMO_TRX=1 : pas de pont, transceiver tient 5700-5702)"; return; }
+    [ -n "$FIRMWARE_APP" ] && { dire "5. (FIRMWARE_APP=$FIRMWARE_APP : pas de pont)"; return; }
     [ "$PONT" = 1 ] || { dire "5. (PONT=0 : pas de pont.py, aucun burst du BTS n'arrive)"; return; }
     vivant pont && { dire "5. pont.py deja lance (pid $(pid_de pont))"; return; }
     [ -r "$PONT_PY" ] || rater "pont.py absent : $PONT_PY"
@@ -356,7 +526,7 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
 
 arreter() {
     local n
-    for n in vsp pont bruit mobile osmocon gdb qemu dsp asmcat; do
+    for n in vsp pont air bruit mobile transceiver osmocon gdb qemu dsp asmcat; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done; bruit_arreter
@@ -385,7 +555,7 @@ arreter() {
 
 statut() {
     local n
-    for n in dsp qemu osmocon mobile pont; do
+    for n in dsp qemu osmocon mobile transceiver pont air; do
         if vivant "$n"; then printf '  %-8s pid %-7s  %s\n' "$n" "$(pid_de "$n")" "$RUNDIR/$n.log"
         else printf '  %-8s arrete\n' "$n"; fi
     done; bruit_statut
@@ -545,10 +715,10 @@ case "${1:-}" in
     --logs)   # [2026-10-19] en couleur a l'affichage (qosmo/tools/qosmo-couleurs.py, QOSMO_COULEURS=0 coupe)
               _coul="$QOSMO/tools/qosmo-couleurs.py"
               if [ "${QOSMO_COULEURS:-1}" != 0 ] && [ -f "$_coul" ] && [ -t 1 ]; then
-                  exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null | python3 -u "$_coul" --force
+                  exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/transceiver.log "$RUNDIR"/pont.log "$RUNDIR"/air.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null | python3 -u "$_coul" --force
               fi
-              exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/pont.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
-    --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; *) rater "--step 1|b|2|3|4|5";; esac ;;
+              exec tail -n 5 -F "$RUNDIR"/dsp.log "$RUNDIR"/qemu.log "$RUNDIR"/osmocon.log "$RUNDIR"/mobile.log "$RUNDIR"/transceiver.log "$RUNDIR"/pont.log "$RUNDIR"/air.log $([ -n "$BRUIT_MODE" ] || [ -f "$RUNDIR/bruit.pid" ] && echo "$RUNDIR/bruit.log") 2>/dev/null ;;
+    --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; a) etape5_air;; *) rater "--step 1|b|2|3|4|5|a";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;
     "")       garder_journaux; bruit_preparer; etape1; etapeb; etape2; etape3; etape4; etape5
               dire "tout tourne. Journaux : $RUNDIR/*.log   suivre : ./run.sh --logs   arreter : ./run.sh --stop" ;;

@@ -12,6 +12,10 @@ static const char *const TSC_ROM[8] = {
 };
 /* DROM 0xa0d9..0xa0db : la sequence de synchronisation de l'access-burst (41 bits, 05.02 5.2.7). */
 static const char SYNC_RACH[] = "01001011011111111001100110101010001111000";
+/* [2026-10-19] 05.02 5.2.5 : sequence d'apprentissage etendue du burst de synchronisation (64 bits,
+ * a l'offset 42 du burst) ; 5.2.6 : le dummy burst entier (148 bits, queues comprises). */
+static const char SYNC_SB[] = "1011100101100010000001000000111100101101010001010111011000011011";
+static const char DUMMY_BURST[] = "0001111101101110110000010100100111000001001000100000001111100011100010111000101110001010111010010100011001100111001111010011111000100101111101010000";
 
 static bool motif_a(const uint8_t *flux, int pos, const char *m, int n)
 {
@@ -43,6 +47,15 @@ bool tsp_tx_lire(const uint16_t *data, struct tsp_tx_burst *b, bool *nouveau)
             for (int t = 0; t < 8 && b->type == TSP_TX_INCONNU; t++)
                 for (int p = 61; p + 26 <= 160 && p - 61 + 148 <= 160; p++)
                     if (motif_a(b->flux, p, TSC_ROM[t], 26)) { b->type = TSP_TX_NB; b->tsc = t; b->offset = p - 61; break; }
+            /* [2026-10-19] bursts de BTS (firmware trx) : SB (training 64 bits a +42), dummy, FB (148 zeros) */
+            for (int p = 0; b->type == TSP_TX_INCONNU && p + 148 <= 160; p++) {
+                if (motif_a(b->flux, p + 42, SYNC_SB, 64)) { b->type = TSP_TX_SB; b->offset = p; }
+                else if (motif_a(b->flux, p, DUMMY_BURST, 148)) { b->type = TSP_TX_DUMMY; b->offset = p; }
+            }
+            if (b->type == TSP_TX_INCONNU) {
+                int zeros = 0; for (int i = 0; i < 160; i++) zeros += !b->flux[i];
+                if (zeros >= 148) { b->type = TSP_TX_FB; b->offset = 0; }
+            }
         }
         if (b->offset >= 0) memcpy(b->bits, b->flux + b->offset, 148);
         else memcpy(b->bits, b->flux, 148);

@@ -19,7 +19,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-enum tsp_tx_type { TSP_TX_INCONNU = 0, TSP_TX_RACH = 1, TSP_TX_NB = 2 };
+/* [2026-10-19] SB, DUMMY, FB : les bursts d'une BTS (firmware trx, start-native.sh --osmo-trx),
+ * emis par la tache RACH que l'extcode detourne ; publies dans calypso_tx_rom pour l'air. */
+enum tsp_tx_type { TSP_TX_INCONNU = 0, TSP_TX_RACH = 1, TSP_TX_NB = 2, TSP_TX_SB = 3, TSP_TX_DUMMY = 4, TSP_TX_FB = 5 };
 
 struct tsp_tx_burst {
     uint16_t mots[16];      /* les 16 mots BULDATA tels quels */

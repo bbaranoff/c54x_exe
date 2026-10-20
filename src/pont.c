@@ -686,7 +686,7 @@ static void tx_rom_pose(const uint16_t *api_ram, int blud_avant)
  * les pages sans tache RX/TX (RACH) gardent un a_a5fn perime : on prend alors tick + decalage, le
  * decalage etant celui de la derniere page datee. */
 #define GSM_HYPERFRAME 2715648u
-static struct { bool valide; uint32_t fn; bool dec_valide; int32_t dec; uint32_t tick; } g_tsp_fn;
+static struct { bool valide; uint32_t fn; bool dec_valide; int32_t dec; uint32_t tick; bool tache_tx; } g_tsp_fn;
 static uint32_t gsmtime2fn(unsigned t1, unsigned t2, unsigned t3)
 {
     return (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % GSM_HYPERFRAME;
@@ -699,9 +699,17 @@ static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
     const uint16_t *w = &api[API_W_PAGE(pg) / 2];
     bool datee = (w[WP_D_TASK_D / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0;
     g_tsp_fn.tick = tick; g_tsp_fn.valide = false;
+    /* [2026-10-19] une tache d'emission commandee cette trame (RACH : c'est elle que l'extcode
+     * du firmware trx detourne pour emettre FB/SB/dummy/NB) : tx_tsp_publier republie meme un
+     * burst identique au precedent quand MONTANT_ROM_TX_CHAQUE=1 */
+    g_tsp_fn.tache_tx = (v & B_GSM_TASK) && ((w[WP_D_TASK_RA / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0);
     if (!(v & B_GSM_TASK) || !datee) return;
     unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
     if (t2 >= 26 || t3 >= 51) return;
+    /* [2026-10-20] firmware trx (mode BTS) : il ne pose jamais a_a5fn (pas de dsp_load_tch_param),
+     * la page dit t1=t2=t3=0 a chaque trame et tous les bursts du TRX partaient avec fn=0 dans
+     * l'anneau calypso_tx_rom. On garde alors le tick nu (source 0), monotone. */
+    if (t1 == 0 && t2 == 0 && t3 == 0) return;
     g_tsp_fn.fn = gsmtime2fn(t1, t2, t3); g_tsp_fn.valide = true;
     g_tsp_fn.dec = (int32_t)((g_tsp_fn.fn + GSM_HYPERFRAME - (tick % GSM_HYPERFRAME)) % GSM_HYPERFRAME);
     g_tsp_fn.dec_valide = true;
@@ -719,15 +727,82 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
 {
     static int actif = -1, fd = -1;
     static uint32_t w_compte;
-    static unsigned n_rach, n_nb, n_inconnu;
+    static unsigned n_rach, n_nb, n_inconnu, n_sb, n_dummy, n_fb;
+    static int chaque = -1;
     if (actif < 0) {
         const char *e = calypso_getenv("MONTANT_ROM_TX"); actif = !(e && *e == '0');
+        e = calypso_getenv("MONTANT_ROM_TX_CHAQUE"); chaque = (e && *e == '1') ? 1 : 0;
+        if (chaque) printf("  [rom-tx] MONTANT_ROM_TX_CHAQUE=1 : un burst publie a CHAQUE trame avec tache TX (mode TRX)\n");
         printf("  [rom-tx] burst montant final de la ROM (script TSP 0x3cbb) -> %s : %s\n", ROM_TX_SHM,
                actif ? "actif" : "coupe (MONTANT_ROM_TX=0)");
     }
     if (!actif) return;
     struct tsp_tx_burst b; bool nouveau = false;
-    if (!tsp_tx_lire(dsp->data, &b, &nouveau) || !nouveau) return;
+    if (!tsp_tx_lire(dsp->data, &b, &nouveau)) return;
+    if (!nouveau && !(chaque && g_tsp_fn.tache_tx && g_tsp_fn.tick == fn)) return;
+    /* [2026-10-20] LE SCH DE L'EXTCODE (firmware trx) SORT A MOITIE FAUX SUR CE BANC. Mesure du jour
+     * (air TRX -> mobile, 999 SB livres dans la fenetre SB du mobile, 0 decode, [a_sch] crc_ko a TOA 23) :
+     * compares a gsm0503_sch_encode() des mots sch[0..1] de la page etendue (0x2000/0x2200 + 32), les
+     * 39 premiers bits codes du burst sont EXACTS et les 39 derniers (bits 106..144 : haut de l'info,
+     * parite CRC-10, queue) sont faux a ~50 %. L'encodeur SCH est dans l'extcode du DSP (dsp_extcode.c,
+     * 0x015c), pas dans la ROM : c'est une instruction de ce code-la que le coeur emule mal (a trouver :
+     * la boucle de parite). En attendant, prothese derriere MONTANT_ROM_TX_SB_RECODE (1 par defaut en
+     * mode TRX, 0 pour la couper) : on recode le SCH a partir des mots sch de la page dont la premiere
+     * moitie correspond bit a bit au burst capture, et on remplace la seconde moitie dans ce qu'on
+     * publie. Le compteur dit combien de bits differaient : l'ecart a surveiller quand le coeur sera
+     * corrige (0 = la prothese ne sert plus). */
+    if (b.type == TSP_TX_SB && chaque) {
+        static int recode = -1; static unsigned n_sb, n_recodes, n_sans_page, n_bits_faux;
+        if (recode < 0) { const char *e = calypso_getenv("MONTANT_ROM_TX_SB_RECODE"); recode = !(e && *e == '0'); }
+        if (recode) {
+            n_sb++;
+            /* Les deux pages portent chacune un mot sch : celui de ce SB et celui du SB d'avant (10 ou
+             * 11 trames plus tot). La premiere moitie codee ne les distingue pas toujours (elle ne porte
+             * pas T2 ni le bit bas de T1/T3') : on prend, parmi les pages dont la premiere moitie colle,
+             * celle au fn le plus recent. Mesure du jour avec « la premiere qui colle » : un SB sur
+             * trois portait le fn du SB precedent (fn decode 234601 puis 234233 a 10 trames d'ecart). */
+            int fait = 0; uint32_t fn_best = 0; ubit_t code_best[78];
+            for (unsigned base = 0x2000; base <= 0x2200; base += 0x200) {
+                uint32_t sch = dsp->data[base + 32] | ((uint32_t)dsp->data[base + 33] << 16);
+                uint8_t info[4] = { sch & 0xff, (sch >> 8) & 0xff, (sch >> 16) & 0xff, (sch >> 24) & 0xff };
+                ubit_t code[78];
+                if (gsm0503_sch_encode(code, info) < 0) continue;
+                if (memcmp(code, b.bits + 3, 39) != 0) continue;         /* pas la page de ce burst */
+                /* inverse de sb_build() (prim_bts.c) : t1&1 -> bit 23, t1&0x1fe -> bits 8..15, t1&0x600 -> bits 0..1,
+                 * t2 -> bits 18..22, t3'&1 -> bit 24, t3'&6 -> bits 16..17, bsic -> bits 2..7.
+                 * Verifie sur 0x005a1c1c = BSIC 7, T1 56, T2 22, T3 41 (le SB que le mobile a decode). */
+                uint32_t t1 = ((sch >> 23) & 1) | ((sch >> 7) & 0x1fe) | ((sch & 3) << 9);
+                uint32_t t2 = (sch >> 18) & 0x1f, t3 = (((sch >> 24) & 1) | (((sch >> 16) & 3) << 1)) * 10 + 1;
+                /* 05.02 3.3.2.2.1 : FN = 51 ((T3 - T2) mod 26) + T3 + 51 x 26 x T1 (le premier jet avait T2 - T3 :
+                 * fn decode qui RECULAIT de 51 par 51 trames, offset de calage faux) */
+                uint32_t fnsb = 51 * 26 * t1 + 51 * ((t3 + 26 - t2) % 26) + t3;
+                if (!fait || (int32_t)(fnsb - fn_best) > 0) { fn_best = fnsb; memcpy(code_best, code, sizeof code); }
+                fait = 1;
+            }
+            if (fait) {
+                int faux = 0;
+                for (int k = 0; k < 39; k++) faux += (b.bits[106 + k] != code_best[39 + k]);
+                n_bits_faux += (unsigned)faux;
+                if (faux) { memcpy(b.bits + 106, code_best + 39, 39); n_recodes++; }
+                /* [2026-10-20] CALAGE DU MONTANT DU TRX. Ce SB (fn GSM fn_best) part au tick `fn` : on
+                 * connait donc l'horloge du firmware trx. Le BSP de cette instance recoit les bursts du
+                 * mobile tagues de leur fn GSM (a_a5fn du mobile) et doit les jouer a la trame ou le
+                 * firmware les attend (calypso_bsp_trx_calage, CALYPSO_BSP_TRX=1). On n'applique que
+                 * quand deux SB consecutifs donnent le meme ecart (les deux pages ne portent pas
+                 * toujours le sch de CE burst : fn decode faux d'un SB sur trois sinon). */
+                static int32_t ecart_prec = INT32_MIN; static unsigned n_cal;
+                int32_t ecart = (int32_t)(fn_best - fn);
+                if (ecart == ecart_prec) {
+                    if (calypso_bsp_trx_calage(fn_best, fn) && (++n_cal <= 5 || n_cal % 500 == 0))
+                        printf("  [rom-tx] calage TRX : SB fn=%u emis au tick %u (fn - tick = %d) -> BSP montant cale (%u)\n", fn_best, fn, ecart, n_cal);
+                }
+                ecart_prec = ecart;
+            } else n_sans_page++;
+            if (n_sb <= 3 || n_sb % 1000 == 0)
+                printf("  [rom-tx] SB recode (prothese SCH) : %u SB, %u recodes, %u sans page sch, %.1f bits faux/SB en moyenne\n",
+                       n_sb, n_recodes, n_sans_page, n_sb ? (double)n_bits_faux / n_sb : 0.0);
+        }
+    }
     if (fd < 0) {
         fd = open(ROM_TX_SHM, O_RDWR | O_CREAT, 0666);
         if (fd < 0 || ftruncate(fd, 8 + ROM_TX_SLOTS * ROM_TX_SZ) < 0) { actif = 0; return; }
@@ -754,15 +829,15 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     memcpy(slot + 12, b.bits, 148);
     off_t off = 8 + (off_t)((w_compte - 1) % ROM_TX_SLOTS) * ROM_TX_SZ;
     if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
-    if (b.type == TSP_TX_RACH) n_rach++; else if (b.type == TSP_TX_NB) n_nb++; else n_inconnu++;
+    if (b.type == TSP_TX_RACH) n_rach++; else if (b.type == TSP_TX_NB) n_nb++; else if (b.type == TSP_TX_SB) n_sb++; else if (b.type == TSP_TX_DUMMY) n_dummy++; else if (b.type == TSP_TX_FB) n_fb++; else n_inconnu++;
     static int nlog;
     if (nlog++ < 6 || (b.type == TSP_TX_RACH && n_rach <= 3))
         printf("  [rom-tx] #%u tick=%u fn=%u (%s) %s%s offset=%d @%04x : %s...\n", w_compte, fn, fn_gsm,
                src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : "TICK NU",
-               b.type == TSP_TX_RACH ? "RACH" : b.type == TSP_TX_NB ? "NB" : "?", b.type == TSP_TX_NB ? (char[]){' ', 'T', 'S', 'C', (char)('0' + b.tsc), 0} : "",
+               b.type == TSP_TX_RACH ? "RACH" : b.type == TSP_TX_NB ? "NB" : b.type == TSP_TX_SB ? "SB" : b.type == TSP_TX_DUMMY ? "DUMMY" : b.type == TSP_TX_FB ? "FB" : "?", b.type == TSP_TX_NB ? (char[]){' ', 'T', 'S', 'C', (char)('0' + b.tsc), 0} : "",
                b.offset, b.adresse, (char[]){ '0' + b.bits[0], '0' + b.bits[1], '0' + b.bits[2], '0' + b.bits[3], '0' + b.bits[4], '0' + b.bits[5], '0' + b.bits[6], '0' + b.bits[7], 0 });
-    if ((n_rach + n_nb + n_inconnu) % 2000 == 0)
-        printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, inconnus %u\n", n_rach + n_nb + n_inconnu, n_rach, n_nb, n_inconnu);
+    if ((n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu) % 2000 == 0)
+        printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, SB %u, DUMMY %u, FB %u, inconnus %u\n", n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu, n_rach, n_nb, n_sb, n_dummy, n_fb, n_inconnu);
 }
 
 static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
@@ -1898,6 +1973,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 sonde_pages("A", m.a, dsp, api_ram);
                 enreg_api_prendre(api_ram);
                 ombre_descendante(api_ram, m.a);
+                /* [2026-10-20] mode TRX : les bits exacts du burst montant joue a la trame precedente,
+                 * dans la page de resultat que l'ARM lit apres ce DONE (calypso_bsp.c) */
+                calypso_bsp_trx_ul_prothese(dsp->data, m.a, (api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2] & B_GSM_PAGE) ? 1 : 0);
                 envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                 t_done_a = chrono_ms();
                 bool go = false;
