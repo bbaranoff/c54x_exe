@@ -885,7 +885,30 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
  * relance). Le modele de puissance du banc (calypso_bsp_rssi_apm) ne passe que sur les ecritures du DSP ;
  * un a_pm laisse a 0 par la ROM partait tel quel. Avant de rendre la trame a l'ARM, chaque mot a_pm nul
  * des deux pages R recoit le modele (plancher 64). */
+/* [2026-10-22 00:20] sonde [apmT] (voir calypso_apm_trace_on) : pages R au TICK (ce que le DSP a laisse
+ * apres la trame precedente et ce que la L1 a remis a zero), puis au DONE avant/apres le modele. */
+static uint16_t g_apm_tick_r[2][4];
+static void apm_trace_tick(const uint16_t *api_ram, uint32_t tick, uint32_t b)
+{
+    for (int pg = 0; pg < 2; pg++) {
+        const uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
+        g_apm_tick_r[pg][0] = r[4]; g_apm_tick_r[pg][1] = r[12]; g_apm_tick_r[pg][2] = r[13]; g_apm_tick_r[pg][3] = r[14];
+    }
+    (void)tick; (void)b;
+}
+static void apm_trace_done(const uint16_t *api_ram, uint16_t avant[2][4]);
+static void apm_jamais_nul_corps(uint16_t *api_ram);
 static void apm_jamais_nul(uint16_t *api_ram)
+{
+    uint16_t done_avant[2][4];
+    for (int pg = 0; pg < 2; pg++) {
+        const uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
+        done_avant[pg][0] = r[4]; done_avant[pg][1] = r[12]; done_avant[pg][2] = r[13]; done_avant[pg][3] = r[14];
+    }
+    apm_jamais_nul_corps(api_ram);
+    apm_trace_done(api_ram, done_avant);
+}
+static void apm_jamais_nul_corps(uint16_t *api_ram)
 {
     static int on = -1;
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_BSP_BRUIT_FOND"); on = (e && *e == '1'); }
@@ -954,6 +977,21 @@ static void apm_jamais_nul(uint16_t *api_ram)
             printf(" | mav %s\n", t);
         }
     }
+}
+
+static void apm_trace_done(const uint16_t *api_ram, uint16_t avant[2][4])
+{
+    if (!calypso_apm_trace_on()) return;
+    const uint16_t *w0 = &api_ram[0], *w1 = &api_ram[0x14];
+    printf("  [apmT] fn=%u dsp_page=%04x W md %04x/%04x |", g_c54x_exe_fn,
+           api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2], w0[4], w1[4]);
+    for (int pg = 0; pg < 2; pg++) {
+        const uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
+        printf(" R%d tick md=%04x pm=%04x,%04x,%04x done md=%04x pm=%04x,%04x,%04x -> %04x,%04x,%04x |", pg,
+               g_apm_tick_r[pg][0], g_apm_tick_r[pg][1], g_apm_tick_r[pg][2], g_apm_tick_r[pg][3],
+               avant[pg][0], avant[pg][1], avant[pg][2], avant[pg][3], r[12], r[13], r[14]);
+    }
+    printf("\n");
 }
 
 void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
@@ -2150,6 +2188,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
         case PONT_TICK: {
             g_c54x_exe_fn = m.a;
             g_tick_irq_trame = (m.b & CALYPSO_PONT_TICK_IRQ_TRAME) != 0;
+            apm_trace_tick(api_ram, m.a, m.b);
             bool deux_phases = (m.b & CALYPSO_PONT_TICK_DEUX_PHASES) != 0;
             bool done_envoye = false;
             double t_tick = chrono_ms(), t_done_a = t_tick, t_go = t_tick, t_done = 0;
