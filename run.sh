@@ -71,7 +71,9 @@ if [ "$INSTANCE" != 1 ]; then
     GDB_STUB="${GDB_STUB:-$((1233 + INSTANCE))}"
     GDB_TELNET="${GDB_TELNET:-$((44443 + INSTANCE))}"
     PANNEAU_LOGS="${PANNEAU_LOGS:-none}"
-    export CALYPSO_BSP_PORT="${CALYPSO_BSP_PORT:-$((6702 + 10 * (INSTANCE - 1)))}"
+    # [2026-10-21] instance >= 3 : +30, car 6722 (= 6702 + 20) est le port TRXD « MS » de fake_trx.py (-p 6720, sidecar de
+    # la BTS 1) : il se liait sur 127.0.0.1:6722 et volait les bursts montants du telephone 2 (instance 3 : 6752).
+    export CALYPSO_BSP_PORT="${CALYPSO_BSP_PORT:-$((6702 + 10 * (INSTANCE - 1) + (INSTANCE >= 3 ? 30 : 0)))}"
     export CALYPSO_KEYS_SOCK="${CALYPSO_KEYS_SOCK:-/tmp/calypso_keys$INSTANCE.sock}"
     AIR="${AIR:-1}"
 fi
@@ -95,10 +97,13 @@ fi
 # [2026-10-20] OSMO_TRX_TS1=1 (instance 1, avec OSMO_TRX=1) : un DEUXIEME Calypso TRX pour le TS1 (TCH/F, les appels) :
 # l'instance OSMO_TRX_TS1_INSTANCE (3) est lancee avant le transceiver (etapes 1-3 seules, OSMO_TRX_PHONE=2 : firmware trx,
 # L1CTL /tmp/osmocom_l2_3, pas de transceiver, pas d'air) et le transceiver prend « -2 -L /tmp/osmocom_l2_3 » (telephone 2 =
-# TS1 TX+RX, prim_bts.c SLOT 0 / tn 1). Son BSP (udp 6722) n'a pas de SB pour se caler : CALYPSO_BSP_TRX_OFFSET=-1 (fn du
+# TS1 TX+RX, prim_bts.c SLOT 0 / tn 1). Son BSP (udp 6752 depuis le 21/10, 6722 avant) n'a pas de SB pour se caler : CALYPSO_BSP_TRX_OFFSET=-1 (fn du
 # firmware = tick - 1, mesure sur le telephone 1). L'air (instance 2) relie aussi cet anneau (--c-ring/--c-port).
 # [2026-10-20 23:10] -2 par defaut : OSMO_TRX_TS1=1 (start-native.sh --ts 1 ou OSMO_TRX_TS1=0 pour un seul telephone)
-OSMO_TRX_TS1="${OSMO_TRX_TS1:-1}"
+# [2026-10-21] retour a OSMO_TRX_TS1=0 par defaut : le 2e telephone a un fn independant (TCH descendant a ~80 bits
+# faux pour le mobile, ASSIGNMENT FAILURE), seul le montage UN Calypso TS0+TS1 (OSMO_TRX_TCH=1) passe un appel.
+# start-native.sh --ts 2 (ou OSMO_TRX_TS1=1) pour le montage a deux telephones.
+OSMO_TRX_TS1="${OSMO_TRX_TS1:-0}"
 OSMO_TRX_TS1_INSTANCE="${OSMO_TRX_TS1_INSTANCE:-3}"
 OSMO_TRX_PHONE="${OSMO_TRX_PHONE:-1}"
 # [2026-10-20] Le mobile par l'air (INSTANCE=N, AIR=1) n'est jamais le TRX : start-native.sh --bts exporte OSMO_TRX=1
@@ -530,7 +535,7 @@ etape5_air() {   # AIR=1 : l'air entre les deux Calypsos (pont/air.py), a la pla
     local args_c=""
     if [ -S "/tmp/osmocom_l2_${OSMO_TRX_TS1_INSTANCE}" ] && [ -f "/tmp/c54x-pont${OSMO_TRX_TS1_INSTANCE}/dsp.pid" ] \
        && kill -0 "$(cat "/tmp/c54x-pont${OSMO_TRX_TS1_INSTANCE}/dsp.pid" 2>/dev/null)" 2>/dev/null; then
-        args_c="--c-ring $HOTE_SHM/calypso${OSMO_TRX_TS1_INSTANCE}/calypso_tx_rom --c-port $((6702 + 10 * (OSMO_TRX_TS1_INSTANCE - 1)))"
+        args_c="--c-ring $HOTE_SHM/calypso${OSMO_TRX_TS1_INSTANCE}/calypso_tx_rom --c-port $((6702 + 10 * (OSMO_TRX_TS1_INSTANCE - 1) + (OSMO_TRX_TS1_INSTANCE >= 3 ? 30 : 0)))"
     fi
     ${PRIO[@]+"${PRIO[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
         --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" $args_c --tch-cfg /dev/shm/calypso_tch_cfg > "$RUNDIR/air.log" 2>&1 &

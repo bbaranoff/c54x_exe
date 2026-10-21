@@ -577,6 +577,13 @@ static void scruter_dcch(uint32_t fn)
      * le firmware y revient). */
     if (genre == 2 || genre == 3) {
         g_tn_tch_sb = tn;   /* [2026-10-20] le TS du TCH, pour etiqueter les bursts montants publies (air) */
+        /* [2026-10-21] le SDCCH est chiffre (A5/1) : ni le pont ni l'air ne lisent plus l'ASSIGNMENT COMMAND,
+         * calypso_tch_cfg ne vient jamais. Le tap QEMU, lui, voit le TS que le firmware programme : on le prend
+         * comme intervalle du TCH quand personne ne l'a annonce ; suivre_tache_tch bascule le BSP a la tache suivante. */
+        if (!g.tch_tn && tn >= 1 && tn <= 7) {
+            g.tch_tn = tn;
+            printf("  [montant] TCH : intervalle TS%d pris sur le side-band (pas d'annonce calypso_tch_cfg)\n", tn);
+        }
         printf("  [montant] canal dedie (side-band seq=%u) : TCH/%c TS%d SS=%d, firmware sur le TCH "
                "(%s%s)\n", seq, genre == 2 ? 'F' : 'H', tn, ss,
                g.sur_tch ? "BSP deja sur le TCH" : "BSP pas encore bascule",
@@ -794,12 +801,21 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
 
     if (tache_tch && !g.sur_tch) {
         if (!g.tch_tn) {
-            if (!sans_annonce_dit) {
-                sans_annonce_dit = true;
-                printf("  [montant] TCH : tache %u postee a fn=%u sans annonce du pont "
-                       "(calypso_tch_cfg) : intervalle inconnu, BSP inchange\n", t, fn);
+            /* [2026-10-21] pas d'annonce (SDCCH chiffre A5/1 : l'air ne lit plus l'ASSIGNMENT COMMAND) :
+             * l'intervalle est celui de la fenetre RX que le firmware a programmee au TPU. */
+            int tn_tpu = calypso_bsp_fenetre_tn();
+            if (tn_tpu >= 1 && tn_tpu <= 7) {
+                g.tch_tn = tn_tpu;
+                printf("  [montant] TCH : tache %u postee a fn=%u sans annonce (calypso_tch_cfg) : "
+                       "intervalle TS%d lu sur la fenetre TPU\n", t, fn, tn_tpu);
+            } else {
+                if (!sans_annonce_dit) {
+                    sans_annonce_dit = true;
+                    printf("  [montant] TCH : tache %u postee a fn=%u sans annonce du pont "
+                           "(calypso_tch_cfg) : intervalle inconnu (TPU %d), BSP inchange\n", t, fn, tn_tpu);
+                }
+                return;
             }
-            return;
         }
         sans_annonce_dit = false;
         printf("  [montant] TCH : le firmware poste la tache %u a fn=%u, BSP bascule sur TS%d (TSC=%d)\n",
