@@ -892,8 +892,35 @@ static void apm_jamais_nul(uint16_t *api_ram)
     if (!on) return;
     for (int pg = 0; pg < 2; pg++) {
         uint16_t *a = &api_ram[(API_R_PAGE(pg) + RP_A_PM) / 2];
+        uint16_t avant[3] = { a[0], a[1], a[2] };
+        int depile[3] = { -2, -2, -2 };
+        /* [2026-10-21] une mesure par fenetre, dans l'ordre des fenetres livrees (file, voir calypso_bsp.c) */
         for (int k = 0; k < 3; k++)
-            if ((a[k] >> 5) == 0) a[k] = calypso_bsp_rssi_apm_k(k);   /* [2026-10-21] une mesure par fenetre */
+            if ((a[k] >> 5) == 0) a[k] = calypso_bsp_rssi_apm_suivante(&depile[k]);
+        /* [2026-10-21 23:58] SONDE [apm-fort] : PM remplacees avec le MAV d'un VRAI burst (veille, ARFCN 1),
+         * ou trame ou une fenetre en a recu un. 200 lignes. */
+        /* bilan toutes les 255 trames (periode de paging du banc) : PM remplacees avec un burst, du bruit,
+         * ou sans fenetre en file -- c'est la veille qui compte, la sonde detaillee s'epuise au balayage */
+        {
+            static unsigned long b_burst, b_bruit, b_vide, b_t0; static uint32_t b_tick;
+            for (int k = 0; k < 3; k++) {
+                if (depile[k] >= 5000) b_burst++; else if (depile[k] >= 0) b_bruit++; else if (depile[k] == -1) b_vide++;
+            }
+            if (g_c54x_exe_fn - b_tick >= 255) {
+                b_tick = g_c54x_exe_fn;
+                printf("  [apm-bilan] fn=%u sur 255 trames : PM <- burst %lu, <- bruit %lu, file vide %lu\n",
+                       g_c54x_exe_fn, b_burst, b_bruit, b_vide);
+                b_burst = b_bruit = b_vide = 0; (void)b_t0;
+            }
+        }
+        static unsigned n_fort;
+        if ((calypso_bsp_pm_mav_fort() || depile[0] >= 5000 || depile[1] >= 5000 || depile[2] >= 5000) &&
+            (n_fort++ < 20 || n_fort % 50 == 0)) {
+            char t[256]; calypso_bsp_pm_mav_texte(t, sizeof t);
+            uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
+            printf("  [apm-fort] page=%d d_task_md=%04x d_task_d=%04x a_pm %04x->%04x %04x->%04x %04x->%04x depiles %d %d %d | mav %s\n",
+                   pg, r[4], r[0], avant[0], a[0], avant[1], a[1], avant[2], a[2], depile[0], depile[1], depile[2], t);
+        }
     }
     /* [2026-10-21 20:00] MESURE PLEINE LISTE (RXL_R 548) : la L1 TI (DSP 36) programme d_task_md = 0x200 + n
      * (n <= 8 mesures, l1_sync.c) et lit les n PM dans les mots 12..12+n-1 de la page R (l1ddsp_meas_read,
@@ -913,8 +940,19 @@ static void apm_jamais_nul(uint16_t *api_ram)
         uint16_t md = r[4];
         if (!(md & 0x200)) continue;
         int n = md & 0xff; if (n > 8) n = 8;
+        uint16_t avant[8];
+        for (int k = 0; k < n; k++) avant[k] = r[12 + k];
         for (int k = 0; k < n; k++)
-            if ((r[12 + k] >> 5) == 0) r[12 + k] = calypso_bsp_rssi_apm_k(k);
+            if ((r[12 + k] >> 5) == 0) r[12 + k] = calypso_bsp_rssi_apm_suivante(NULL);
+        /* [2026-10-21 23:55] SONDE [apm] : en veille (Magnetite) la mesure BA de l'ARFCN 1 tombe au plancher
+         * meme avec un MAV par fenetre. PM rendues par le DSP (avant) et apres le modele, MAV des fenetres. */
+        static unsigned long n_apm;
+        if (++n_apm <= 60 || n_apm % 200 == 0) {
+            char t[256]; calypso_bsp_pm_mav_texte(t, sizeof t);
+            printf("  [apm] #%lu page=%d md=%04x n=%d :", n_apm, pg, md, n);
+            for (int k = 0; k < n; k++) printf(" %04x->%04x", avant[k], r[12 + k]);
+            printf(" | mav %s\n", t);
+        }
     }
 }
 
