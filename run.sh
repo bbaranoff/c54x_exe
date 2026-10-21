@@ -55,6 +55,14 @@ PONT="${PONT:-0}"
 # reste lisible en /run/calypso-shm-hote (l'air y lit l'anneau TX de l'instance 1). Les processus
 # lances ici heritent de l'espace ; --stop/--status relances avec INSTANCE=N y entrent aussi.
 INSTANCE="${INSTANCE:-1}"
+# [2026-10-21] REGLAGES PAR INSTANCE : instances/instance-$INSTANCE.env (ecrit par la page web tools/osmo-reglages.py,
+# patron instances/instance.env.example). Lignes `: "${VAR:=valeur}"` : l'environnement (start-native.sh, ligne de
+# commande) garde la priorite, puis le fichier, puis les defauts ci-dessous. Exporte (set -a) pour c54x_exe/QEMU/pont.
+INSTANCE_ENV="${INSTANCE_ENV:-/opt/GSM/osmo-operator/instances/instance-$INSTANCE.env}"
+if [ -r "$INSTANCE_ENV" ]; then
+    set -a; . "$INSTANCE_ENV"; set +a
+    printf '\033[1m[run dsp]\033[0m instance %s : reglages de %s\n' "$INSTANCE" "$INSTANCE_ENV"
+fi
 HOTE_SHM=/run/calypso-shm-hote
 if [ "$INSTANCE" != 1 ] && [ -z "${CALYPSO_NS:-}" ]; then
     command -v unshare >/dev/null || { echo "[run] ECHEC : unshare absent (util-linux)" >&2; exit 1; }
@@ -151,6 +159,10 @@ if [ "$OSMO_TRX" = 1 ]; then
     # calee sur le fn du SB emis (pont.c -> calypso_bsp_trx_calage) ; CALYPSO_BSP_TRX_DELTA ajuste (defaut -2 avec le
     # firmware patche BTS_RX_LAG 3 : le burst montant fn X est joue une trame apres la fenetre native, marge pour l'air)
     export CALYPSO_BSP_TRX="${CALYPSO_BSP_TRX:-1}"
+    # [2026-10-21] firmware trx BTS_RX_LAG 12 (prim_bts.c) : le burst montant fn X est joue 11 trames apres sa fenetre
+    # native ; marge pour la latence aller-retour de l'air + le retard du mobile emule (RACH du Magnetite arrives
+    # 27 trames trop tard avec LAG 4 / delta -3)
+    export CALYPSO_BSP_TRX_DELTA="${CALYPSO_BSP_TRX_DELTA:--11}"
     # telephone 2 (TS1) : pas de SB emis, offset fn/tick fixe (voir OSMO_TRX_TS1)
     [ "$OSMO_TRX_PHONE" = 2 ] && export CALYPSO_BSP_TRX_OFFSET="${CALYPSO_BSP_TRX_OFFSET:--1}"
 fi
@@ -170,7 +182,46 @@ if [ -n "$FIRMWARE_FLASH" ] && { [ "$OSMO_TRX" = 1 ] || [ "$OSMO_TRX_PHONE" = 2 
     printf '\033[1m[run dsp]\033[0m OSMO_TRX=1 : FIRMWARE_FLASH=%s ignore, cette instance est le TRX de la BTS (firmware trx)\n' "$FIRMWARE_FLASH"
     FIRMWARE_FLASH=""
 fi
+# [2026-10-21] Magnetite (vrai firmware TI en flash) : pas de rattrapage du pacer. Avec le rattrapage (20),
+# l ARM enchaine les trames en retard, la L1 sature et le chien de garde reset le firmware (gel).
 if [ -n "$FIRMWARE_FLASH" ]; then
+    export CALYPSO_PACER_RATTRAPAGE="${CALYPSO_PACER_RATTRAPAGE:-0}"
+    export CALYPSO_PONT_ARM_LOCK="${CALYPSO_PONT_ARM_LOCK:-1}"
+    # [2026-10-21] L1 TI : fenetre SB ouverte en fin de trame precedente (sinon BCCH decale d'une trame,
+    # CRC KO sur chaque bloc) et TOA NB vise a 3 (marge 1) ; voir calypso_bsp.c sb_fin_trame()
+    export CALYPSO_BSP_SB_FIN_TRAME="${CALYPSO_BSP_SB_FIN_TRAME:-1}"
+    export CALYPSO_BSP_NB_MARGE="${CALYPSO_BSP_NB_MARGE:-1}"
+    # TOA NB canne a la cible TI (pont.c). [21/10 17:05] coupe par defaut tant que c54x_exe n'est pas
+    # recompile avec la garde init_done : sans elle le cannage ecrase le code DSP pendant le boot.
+    export PONT_CAN_NB_TOA="${PONT_CAN_NB_TOA:-}"
+    # [21/10] faux air : bruit hors de l'ARFCN de la cellule (calypso_bsp.c faux_air_*), ARFCN du plan radio
+    # [21/10 19:50] SB module comme FB/NB : les reglages SB du 30/09 (instant 0.35, elargissement 1.0, bruit 3000,
+    # faits pour la layer1 osmocom qui ignore l'angle du SB) biaisaient l'angle mesure (+166 a 0 Hz) ; la L1 TI
+    # s'en sert pour l'AFC (-700 -> -673, ~224 Hz de vrai decalage) et perdait SB puis BCCH
+    export CALYPSO_BSP_SB_DEC="${CALYPSO_BSP_SB_DEC:-0.5}" CALYPSO_BSP_SB_SYM="${CALYPSO_BSP_SB_SYM:-0.3}" CALYPSO_BSP_SB_NOISE="${CALYPSO_BSP_SB_NOISE:-0}"
+    export CALYPSO_BSP_BRUIT_FOND="${CALYPSO_BSP_BRUIT_FOND:-1}"   # bruit au lieu de zeros (PM = 0 -> recovery L1)
+    # rattraper le direct du BTS (calypso_bsp.c) : PAR L'AIR SEULEMENT (AIR=1, la BTS a sa propre horloge). [21/10 21:37]
+    # en BTS classique pont_dsp.py cadence osmo-bts sur les trames livrees par le DSP : chaque saut de +33 accelerait la
+    # BTS (pont a ~350 trames/s), d'ou plus de retard et plus de sauts ; RA_C 1708/1933/2165 contre RACH du pont a
+    # 1737/2059/2457, IMM ASS jamais reconnues.
+    export CALYPSO_BSP_RATTRAPE="${CALYPSO_BSP_RATTRAPE:-$AIR}"
+    export CALYPSO_RACH_VERS_AIR="${CALYPSO_RACH_VERS_AIR:-1}"   # RACH du firmware TI publie vers l'air (pont.c)
+    # [21/10 21:55] BTS classique : les bursts SDCCH/SACCH du firmware TI sont bien dans calypso_tx_rom (TSC 7, fn de
+    # la ROM), mais pont_dsp les jetait faute de canal dedie annonce (calypso_dcch_cfg vient du tap L1CTL de QEMU,
+    # absent sans layer1 osmocom) : « aucun canal dedie connu apres 300 ms, perdu », « DL: >N200 of SABM ».
+    # PONT_UL_TN_DEFAUT=0 : TS0 (SDCCH/4 du banc) faute d'annonce. PONT_UL_RAW_DCCH_HOTE=1 (codage hote) reste dispo.
+    export PONT_UL_TN_DEFAUT="${PONT_UL_TN_DEFAUT:-0}"
+    # [21/10 23:05] TCH montant par l'HOTE (FACCH, SACCH/T, parole codees par le pont depuis a_fu/a_du) : le script TSP
+    # de la ROM ne sort que 2 bursts « inconnus » sur le TCH du firmware TI, le SABM FACCH n'atteignait jamais la BTS
+    # (BSC : rll_ready=no, ASSIGNMENT FAILURE, « >N200 of SABM »). 14-demarrage.sh exporte PONT_UL_RAW_TCH=1 pour le
+    # vocodeur ROM du mobile osmocom : on force 0 ici (PONT_UL_RAW_TCH_MAGNETITE pour revenir dessus).
+    export PONT_UL_RAW_TCH="${PONT_UL_RAW_TCH_MAGNETITE:-0}"
+    # [21/10 21:35] PAS de correction de fn ni de RA (AIR_B_FN_DELTA, MONTANT_RACH_DIFFERE : 0). Les ecarts vus a 21:05
+    # et 21:25 comparaient au RA_R de la L1 TI, qui trace la DEMANDE (MPHC_RA_REQ) ; le RACH part apres le tirage
+    # aleatoire, juste avant RA_C (RA_R 9394 ra 12 -> RA_C 9403 ; c54x_exe publie ra 12 a 9403) : fn et RA etaient justes.
+    export AIR_B_FN_DELTA="${AIR_B_FN_DELTA:-0}"
+    export MONTANT_RACH_DIFFERE="${MONTANT_RACH_DIFFERE:-0}"
+    export CALYPSO_FAUX_AIR="${CALYPSO_FAUX_AIR:-$( . /etc/osmocom/radio-plan.env 2>/dev/null; echo "${PLAN_ARFCN:-}")}"
     [ -r "$FIRMWARE_FLASH" ] || { printf '\033[1;31m[run] ECHEC :\033[0m image flash absente : %s\n' "$FIRMWARE_FLASH" >&2; exit 1; }
     QEMU_CPU="${QEMU_CPU:-ti925t}"
     export CALYPSO_LCD="${CALYPSO_LCD:-c139}"
@@ -226,7 +277,9 @@ GDB="${GDB:-1}"                              # gdbstub QEMU + console telnet (et
 GDB_STUB="${GDB_STUB:-1234}"
 GDB_TELNET="${GDB_TELNET:-44444}"
 GDB_TELNET_PY="${GDB_TELNET_PY:-$QOSMO/tools/gdb-telnet.py}"   # [2026-10-03] etait /opt/GSM/qosmo-dsp/... (depot disparu)
-INSNS="${INSNS:-16000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-native.sh
+# [2026-10-21] 120000 par defaut : c est le budget du DSP du TRX (instance 1, boote au premier IDLE) ;
+# 16000 laissait le DSP de l instance Magnetite en « occupe boot » pour toujours.
+INSNS="${INSNS:-120000}"   # [2026-09-23] 60000 debordait en TCH (jusqu a 87000 insn/trame), voir start-native.sh
 # [2026-09-20] Pas-a-pas DSP/QEMU par defaut (LOCKSTEP=0 pour le mode horloge murale) :
 # le C54x emule coute ~6,7 ms par trame contre 4,615 ms de temps reel, QEMU sautait
 # donc 3 trames sur 4 (« DSP en retard, tick saute »), la ROM ne voyait qu'une trame
@@ -539,6 +592,9 @@ etape4() {   # le mobile
         # l'indentation : « $3 = ... » reconstruisait la ligne sans l'espace de tete et le VTY la refusait)
         awk -v inc=$((100 * (INSTANCE - 1))) '/^[[:space:]]*bind 127\.0\.0\.1 [0-9]+/ { n = $3 + inc; sub(/[0-9]+$/, n) } { print }' "$_src" \
             | sed -e "s#/tmp/osmocom_l2\b#$L2_SOCK#" -e "s#/tmp/osmocom_sap\b#/tmp/osmocom_sap_$INSTANCE#" -e "s#/tmp/ms_data\b#/tmp/ms_data_$INSTANCE#" > "$_dst"
+        # [2026-10-21] « stick » suit l'ARFCN du plan radio (BTS#0) quand il a change (gabarit : 514)
+        local _arfcn; _arfcn="$( . /etc/osmocom/radio-plan.env 2>/dev/null; echo "${PLAN_ARFCN:-}")"
+        [ -n "$_arfcn" ] && sed -i "s|^\([[:space:]]*\)stick [0-9]*\$|\1stick $_arfcn|" "$_dst"
         MOBILE_CFG="$_dst"
         dire "4. instance $INSTANCE : config mobile derivee -> $MOBILE_CFG"
     fi

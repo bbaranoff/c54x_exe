@@ -967,8 +967,11 @@ int montant_tn_dedie(void)
     return g_tn_tch_sb;
 }
 
+void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick);   /* pont.c */
+
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
 {
+    tx_rach_vers_air(ra, bsic, fn);   /* [2026-10-21] Magnetite : vers l'air (CALYPSO_RACH_VERS_AIR) */
     static int fd = -2;
     static uint32_t seq;
     if (fd == -2) {
@@ -1138,6 +1141,9 @@ static void publier_kc(uint16_t *api_ram)
     fflush(stdout);
 }
 
+void calypso_bsp_set_dedie_ti(int actif);   /* calypso_bsp.c */
+static bool g_ti_dedie;                      /* firmware TI en dedie (taches ALLC), voir plus bas */
+
 void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
 {
     static int coupe = -1;
@@ -1220,12 +1226,16 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     {
         static int sonde = -1;
         if (sonde < 0) { const char *e = calypso_getenv("MONTANT_ACD"); sonde = (e && *e == '0') ? 0 : 1; }
-        if (sonde && g.dedie_arme) {
+        if (sonde && (g.dedie_arme || g_ti_dedie)) {
             static uint16_t prec;
             static unsigned long ok, ko;
             uint16_t etat = api_ram[(API_NDB + NDB_A_CD) / 2];
-            if ((etat & B_BLUD) && etat != prec) {
-                const uint8_t *d = (const uint8_t *)api_ram + API_NDB + NDB_A_CD + 6;
+            /* [22:15] en dedie TI : chaque bloc (le filtre etat != prec cachait les FIRE KO consecutifs) */
+            static uint8_t d_prec[4];
+            const uint8_t *d = (const uint8_t *)api_ram + API_NDB + NDB_A_CD + 6;
+            bool nouveau = (etat != prec) || (g_ti_dedie && memcmp(d, d_prec, 4) != 0);
+            if ((etat & B_BLUD) && nouveau) {
+                memcpy(d_prec, d, 4);
                 bool fire = (etat & 0x0040) != 0;
                 if (fire) ko++; else ok++;
                 if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
@@ -1243,6 +1253,46 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     uint16_t task_u  = taches ? wp[WP_D_TASK_U / 2] : 0;
     uint16_t task_ra = wp[WP_D_TASK_RA / 2];
     uint16_t d_rach  = api_ram[(API_NDB + NDB_D_RACH) / 2];
+
+    /* [2026-10-21 21:50] SONDE DU MONTANT DEDIE (Magnetite, BTS classique). Apres l'IMM ASS la L1 TI passe sur
+     * le SDCCH (DBA_I) mais aucun bloc montant n'a ete publie : capture_sdcch_ul n'etait meme jamais appelee
+     * (task_u toujours 0 ici). A la premiere tache ALLC vue dans une page W, 300 lignes : taches des deux pages,
+     * d_dsp_page, page choisie, en-tete de a_cu. Et si a_cu porte B_BLUD sans tache montante vue, on le prend
+     * quand meme (la L1 TI le pose avec le bloc a emettre, l1ddsp_load_info). */
+    {
+        static unsigned reste;
+        static bool arme;
+        uint16_t td0 = api_ram[(API_W_PAGE(0) + WP_D_TASK_D) / 2] & 0x7fffu;
+        uint16_t td1 = api_ram[(API_W_PAGE(1) + WP_D_TASK_D) / 2] & 0x7fffu;
+        uint16_t cu0 = api_ram[(API_NDB + NDB_A_CU) / 2];
+        if (!arme && (td0 == ALLC_DSP_TASK || td1 == ALLC_DSP_TASK)) {
+            arme = true;
+            reste = 300;
+            printf("  [ul-dedie] premiere tache ALLC (tick %u) : sonde du montant sur 300 trames\n", fn);
+        }
+        if (reste) {
+            reste--;
+            printf("  [ul-dedie] tick=%u dsp_page=%04x pg=%u W0 d=%u u=%u W1 d=%u u=%u a_cu[0]=%04x\n", fn, v_page, pg,
+                   td0, api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2] & 0x7fffu,
+                   td1, api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2] & 0x7fffu, cu0);
+        }
+        if (arme && task_u == 0 && (cu0 & B_BLUD))
+            capture_sdcch_ul(api_ram, 0, fn);
+        /* [2026-10-21 22:05] etat dedie du firmware TI : actif tant qu'une tache ALLC a ete vue dans les 102
+         * dernieres trames. Arme la sonde a_cd et le decalage BSP en dedie (CALYPSO_BSP_DEDIE_DECAL). */
+        /* [22:15] sur les TACHES MONTANTES (d_task_u, 11/12 vus a la sonde) : ALLC (24) sert aussi au BCCH et
+         * au CCCH en veille (a_cd : SI3, paging lus « en dedie »), le decalage aurait frappe la veille. */
+        static uint32_t derniere_allc;
+        static bool vu_allc;
+        uint16_t tu0 = api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2] & 0x7fffu;
+        uint16_t tu1 = api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2] & 0x7fffu;
+        if (tu0 || tu1) { derniere_allc = fn; vu_allc = true; }
+        bool dedie = vu_allc && (uint32_t)(fn - derniere_allc) < 102u;
+        if (dedie != g_ti_dedie) {
+            g_ti_dedie = dedie;
+            calypso_bsp_set_dedie_ti(dedie);
+        }
+    }
 
     /* RACH : la tache, pas la valeur.
      *
@@ -1300,9 +1350,29 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     }
     bool nouveau_rach = !front_seul || !tache_avant || front_valeur;
     tache_avant = tache_rach;
+    /* [2026-10-21 21:25] RACH DIFFERE (MONTANT_RACH_DIFFERE=N trames, Magnetite : 1 par run.sh). La L1 TI pose
+     * d_task_ra AVANT d'ecrire le d_rach de la tentative : lu au front, d_rach etait celui de la tentative
+     * PRECEDENTE (capture CCCH du 21/10 21:17 : RA_R 9868 ra 4 publie ra 8, 10114 ra 8 publie ra 4...), l'IMM ASS
+     * portait le bon fn mais le RA d'avant et Magnetite l'ignorait. On garde le tick du front et on lit d_rach
+     * N trames plus tard. */
+    static int differe = -1;
+    static bool rach_attente;
+    static uint32_t fn_attente;
+    if (differe < 0) {
+        const char *e = calypso_getenv("MONTANT_RACH_DIFFERE");
+        differe = (e && *e) ? atoi(e) : 0;
+        if (differe > 0) printf("  [montant] RACH differe de %d trame(s) : d_rach lu apres le front de d_task_ra\n", differe);
+    }
+    if (rach_attente && (uint32_t)(fn - fn_attente) >= (uint32_t)differe) {
+        rach_attente = false;
+        if (d_rach != 0)
+            publier_rach((uint8_t)(d_rach >> 8), (uint8_t)((d_rach & 0xff) >> 2), fn_attente);
+        g.prev_rach = d_rach;
+    }
     if (d_rach != 0 && (tache_rach || (sur_drach && front_valeur)) && nouveau_rach &&
         (!g.rach_vu || (uint32_t)(fn - g.fn_rach) >= RACH_GARDE_TRAMES)) {
-        publier_rach((uint8_t)(d_rach >> 8), (uint8_t)((d_rach & 0xff) >> 2), fn);
+        if (differe > 0) { rach_attente = true; fn_attente = fn; }
+        else publier_rach((uint8_t)(d_rach >> 8), (uint8_t)((d_rach & 0xff) >> 2), fn);
         g.prev_rach = d_rach;
         g.fn_rach = fn;
         g.rach_vu = true;
