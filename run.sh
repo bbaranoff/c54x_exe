@@ -156,6 +156,26 @@ if [ "$OSMO_TRX" = 1 ]; then
 fi
 FIRMWARE_ELF="${FIRMWARE_ELF:-$_FW/layer1.highram.elf}"
 FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
+# [2026-10-21] FIRMWARE_FLASH=<image 4 MiB> : un VRAI firmware en flash (FreeCalypso Magnetite,
+# cible c139 : bootloader Compal en secteur 0 + fwimage.bin a 0x10000, voir
+# osmo-operator/scripts/magnetite-c139.sh et doc/magnetite.md) a la place du layer1 osmocom-bb.
+# QEMU demarre a 0 dans la flash (pas de -kernel, CPU ti925t = ARMv4T comme l'ARM7TDMI),
+# l'ecran est celui du C139 (CALYPSO_LCD=c139, uWire), la pile L23 et l'UI sont DANS le
+# firmware : pas d'osmocon (rvinterf decode les traces RVTMUX sur le pty modem, socket
+# $RUNDIR/rvinterf.sock pour fc-shell / fc-fsio), pas de mobile. Le DSP (etape 1) et l'air
+# ou le pont (etape 5) sont inchanges. start-native.sh --ms-magnetite le pose.
+FIRMWARE_FLASH="${FIRMWARE_FLASH:-}"
+# [2026-10-21 11:10] le TRX de la BTS (OSMO_TRX=1) ou le telephone 2 du TRX ne sont JAMAIS Magnetite
+if [ -n "$FIRMWARE_FLASH" ] && { [ "$OSMO_TRX" = 1 ] || [ "$OSMO_TRX_PHONE" = 2 ]; }; then
+    printf '\033[1m[run dsp]\033[0m OSMO_TRX=1 : FIRMWARE_FLASH=%s ignore, cette instance est le TRX de la BTS (firmware trx)\n' "$FIRMWARE_FLASH"
+    FIRMWARE_FLASH=""
+fi
+if [ -n "$FIRMWARE_FLASH" ]; then
+    [ -r "$FIRMWARE_FLASH" ] || { printf '\033[1;31m[run] ECHEC :\033[0m image flash absente : %s\n' "$FIRMWARE_FLASH" >&2; exit 1; }
+    QEMU_CPU="${QEMU_CPU:-ti925t}"
+    export CALYPSO_LCD="${CALYPSO_LCD:-c139}"
+    RVINTERF_BIN="${RVINTERF_BIN:-/opt/GSM/fc-host-tools/rvinterf/lowlevel/rvinterf}"
+fi
 OSMOCON="${OSMOCON:-/opt/GSM/osmocom-bb/src/host/osmocon/osmocon}"
 MOBILE="${MOBILE:-$(command -v mobile || echo /usr/local/bin/mobile)}"
 MOBILE_CFG="${MOBILE_CFG:-$HERE/mobile_pont.cfg}"
@@ -193,7 +213,7 @@ renice_autres() {
 charge() {
     echo "chaine (pid %cpu nice politique) :"
     local n
-    for n in dsp qemu osmocon mobile transceiver pont air; do
+    for n in dsp qemu osmocon rvinterf mobile transceiver pont air; do
         if vivant "$n"; then printf '  %-8s %s\n' "$n" "$(ps -o pid=,pcpu=,ni=,cls= -p "$(pid_de "$n")" | tr -s ' ')"; else printf '  %-8s arrete\n' "$n"; fi
     done
     echo "processus les plus gourmands :"
@@ -360,9 +380,19 @@ etape2() {   # l'ARM
     # lieu de trame/16 (0,29 ms) : la partie en serie d'une trame (DONE de la
     # phase A, GO) payait deux fois cette latence -- mesure [chrono] en TCH.
     CALYPSO_PONT_RETRY_DIV="${CALYPSO_PONT_RETRY_DIV:-64}" \
-    CALYPSO_DSP_EXTERN="$extern" ${PRIO[@]+"${PRIO[@]}"} "$QEMU" -M calypso -cpu arm946 -display none -parallel none \
+    # [2026-10-21] FIRMWARE_FLASH : la flash (copie de travail dans $RUNDIR, gardee entre deux
+    # lancements pour le FFS ; FLASH_RESET=1 ou une image plus recente la remplacent) remplace -kernel
+    local fw_opt=(-kernel "$FIRMWARE_ELF")
+    if [ -n "$FIRMWARE_FLASH" ]; then
+        if [ "${FLASH_RESET:-0}" != 0 ] || [ ! -f "$RUNDIR/flash.img" ] || [ "$FIRMWARE_FLASH" -nt "$RUNDIR/flash.img" ]; then
+            cp "$FIRMWARE_FLASH" "$RUNDIR/flash.img" || rater "copie de $FIRMWARE_FLASH impossible"
+            dire "   flash de travail $RUNDIR/flash.img (re)creee depuis $FIRMWARE_FLASH"
+        fi
+        fw_opt=(-drive "if=pflash,file=$RUNDIR/flash.img,format=raw")
+    fi
+    CALYPSO_DSP_EXTERN="$extern" ${PRIO[@]+"${PRIO[@]}"} "$QEMU" -M calypso -cpu "${QEMU_CPU:-arm946}" -display none -parallel none \
         -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" "${gdb_opt[@]}" \
-        -kernel "$FIRMWARE_ELF" > "$RUNDIR/qemu.log" 2>&1 &
+        "${fw_opt[@]}" > "$RUNDIR/qemu.log" 2>&1 &
     echo $! > "$RUNDIR/qemu.pid"
     if [ "$GDB" = 1 ] && [ -f "$GDB_TELNET_PY" ] && ! vivant gdb; then
         python3 "$GDB_TELNET_PY" --port "$GDB_TELNET" --stub "$GDB_STUB" --elf "$FIRMWARE_ELF" \
@@ -388,7 +418,17 @@ etape2() {   # l'ARM
     [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   trace asm ARM : $(readlink -f "$RUNDIR/qemu-asm.log") (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE}${ASSEMBLY_LOGS_FIFO:+, via FIFO}, QEMU_LOG_BUFFERED=$QEMU_LOG_BUFFERED)$([ "${ASSEMBLY_LOGS_RING:-1}" = 1 ] && echo " ; anneau des blocs executes : $(readlink -f "$RUNDIR/qemu-tbring" 2>/dev/null) (tbring-dump)")"
 }
 
+etape3_rvinterf() {   # FIRMWARE_FLASH : rvinterf (FreeCalypso) a la place d'osmocon
+    vivant rvinterf && { dire "3. rvinterf deja lance (pid $(pid_de rvinterf))"; return; }
+    [ -x "$RVINTERF_BIN" ] || { dire "3. (rvinterf absent : $RVINTERF_BIN ; pas de traces RVTMUX)"; return; }
+    local pty; pty="$(cat "$RUNDIR/modem.pty")"
+    rm -f "$RUNDIR/rvinterf.sock"
+    "$RVINTERF_BIN" -n -l "$RUNDIR/rvinterf.log" -s "$RUNDIR/rvinterf.sock" "$pty" > "$RUNDIR/rvinterf.out" 2>&1 &
+    echo $! > "$RUNDIR/rvinterf.pid"
+    dire "3. rvinterf  pid $(pid_de rvinterf)  traces RVTMUX -> $RUNDIR/rvinterf.log  socket $RUNDIR/rvinterf.sock (fc-shell -s / fc-fsio -s)"
+}
 etape3() {   # osmocon
+    [ -n "$FIRMWARE_FLASH" ] && { etape3_rvinterf; return; }
     vivant osmocon && { dire "3. osmocon deja lance (pid $(pid_de osmocon))"; return; }
     vivant qemu || rater "QEMU ne tourne pas (etape 2 d'abord)"
     [ -x "$OSMOCON" ] || rater "osmocon absent : $OSMOCON"
@@ -483,6 +523,7 @@ etape4_trx() {   # OSMO_TRX=1 : l'appli hote transceiver, a la place du mobile
 }
 
 etape4() {   # le mobile
+    [ -n "$FIRMWARE_FLASH" ] && { dire "4. (FIRMWARE_FLASH : pile L23 et UI dans le firmware Magnetite, pas de mobile ; ecran C139 : tools/osmo-c123-gtk.py --modele c139 --instance $INSTANCE)"; return; }
     [ -n "$FIRMWARE_APP" ] && { dire "4. (FIRMWARE_APP=$FIRMWARE_APP : pas de mobile ; ecran /dev/shm/calypso_lcd, touches /tmp/calypso_keys.sock, fenetre : tools/osmo-c123-gtk.py)"; return; }
     [ "$OSMO_TRX" = 1 ] && { etape4_trx; return; }
     vivant mobile && { dire "4. mobile deja lance (pid $(pid_de mobile))"; return; }
@@ -592,7 +633,7 @@ etape5() {   # le pont TRX (PONT=1) : bursts du BTS vers la couche 1
 
 arreter() {
     local n
-    for n in vsp pont air bruit mobile transceiver osmocon gdb qemu dsp asmcat; do
+    for n in vsp pont air bruit mobile transceiver osmocon rvinterf gdb qemu dsp asmcat; do
         if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done; bruit_arreter
@@ -621,7 +662,7 @@ arreter() {
 
 statut() {
     local n
-    for n in dsp qemu osmocon mobile transceiver pont air; do
+    for n in dsp qemu osmocon rvinterf mobile transceiver pont air; do
         if vivant "$n"; then printf '  %-8s pid %-7s  %s\n' "$n" "$(pid_de "$n")" "$RUNDIR/$n.log"
         else printf '  %-8s arrete\n' "$n"; fi
     done; bruit_statut
