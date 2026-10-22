@@ -722,16 +722,53 @@ static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
  * ignoree, le mobile renvoie un RACH. Donc : un nouveau RACH sans entree en dedie depuis le precedent (moins de
  * 1000 trames) -> correction suivante parmi 0, +1, -1 ; un dedie obtenu -> la correction reste.
  * CALYPSO_RACH_CORR=0 pour couper. */
+/* [2026-10-22 12:10] RA_C : la trace L1 TI (rvinterf, CALYPSO_RVINTERF_LOG) dit a quel fn le MOBILE a emis
+ * chaque RACH. Lue a chaque RACH (le RA_C du precedent est arrive depuis) ; le tick du RACH correspondant
+ * vient de la file des derniers RACH. Apprend l'offset du mobile (calypso_bsp_off_mobile_rac) et remet la
+ * correction tournante a 0. */
+static uint32_t g_rach_ticks[16]; static unsigned g_rach_w;
+static int rach_corr_idx_reset;
+static void scruter_ra_c(void)
+{
+    static FILE *f; static long pos = -1;
+    if (!f) {
+        const char *e = calypso_getenv("CALYPSO_RVINTERF_LOG");
+        f = fopen(e && *e ? e : "/tmp/c54x-pont/rvinterf.log", "r");
+        if (!f) return;
+        fseek(f, 0, SEEK_END); pos = ftell(f);
+    }
+    char l[256];
+    clearerr(f); fseek(f, pos, SEEK_SET);
+    while (fgets(l, sizeof l, f)) {
+        pos = ftell(f);
+        const char *p = strstr(l, "L1: RA_C");
+        if (!p) continue;
+        unsigned r = (unsigned)strtoul(p + 8, NULL, 10) % 42432u;
+        /* le RACH dont le tick est le plus proche de r (mod 42432), parmi les 16 derniers */
+        int best = -1; long bd = 1L << 30;
+        for (unsigned k = 0; k < 16 && k < g_rach_w; k++) {
+            uint32_t t = g_rach_ticks[(g_rach_w - 1 - k) % 16];
+            uint32_t f0; if (!calypso_bsp_fn_mobile_du_tick(t, &f0)) f0 = t;
+            long d = (long)((r + 42432u - f0 % 42432u) % 42432u); if (d > 21216) d -= 42432; if (d < 0) d = -d;
+            if (d < bd) { bd = d; best = (int)((g_rach_w - 1 - k) % 16); }
+        }
+        if (best >= 0 && bd < 40) { calypso_bsp_off_mobile_rac(g_rach_ticks[best], r); rach_corr_idx_reset = 1; }
+    }
+}
 static int rach_corr(uint32_t tick)
 {
     static int on = -1, idx; static uint32_t t_prec; static unsigned dedie_prec; static bool vu;
-    static const int seq[3] = { 0, +1, -1 };
+    if (rach_corr_idx_reset) { idx = 0; rach_corr_idx_reset = 0; }
+    static const int seq[5] = { 0, +1, -1, +2, -2 };   /* [2026-10-22] +-2 vus entre deux acces */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_CORR"); on = !(e && *e == '0'); }
     if (!on) return 0;
     if (!vu || (uint32_t)(tick - t_prec) > 8) {      /* un nouveau RACH (les deux chemins tombent au meme tick) */
+        scruter_ra_c();
+        if (rach_corr_idx_reset) { idx = 0; rach_corr_idx_reset = 0; vu = false; }
+        g_rach_ticks[g_rach_w++ % 16] = tick;
         unsigned d = calypso_bsp_dedie_entrees();
         if (vu && d == dedie_prec && (uint32_t)(tick - t_prec) < 1000) {
-            idx = (idx + 1) % 3;
+            idx = (idx + 1) % 5;
             printf("  [rach-corr] RACH sans canal depuis le tick %u : correction %+d\n", t_prec, seq[idx]);
         }
         dedie_prec = d; t_prec = tick; vu = true;
