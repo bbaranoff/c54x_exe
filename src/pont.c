@@ -714,6 +714,29 @@ static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
     g_tsp_fn.dec = (int32_t)((g_tsp_fn.fn + GSM_HYPERFRAME - (tick % GSM_HYPERFRAME)) % GSM_HYPERFRAME);
     g_tsp_fn.dec_valide = true;
     g_tsp_fn.tick_dec = tick;
+    calypso_bsp_off_mobile_a5fn(tick, g_tsp_fn.fn);   /* [2026-10-22] l'offset de veille suit le dedie */
+}
+/* [2026-10-22] RACH DATE A UNE TRAME PRES. En veille le fn du mobile n'est connu que par le dernier SB ou le
+ * dernier a_a5fn ; la L1 TI recale sa base de temps (tpu_offset) et revient d'un dedie avec l'un ou l'autre, a
+ * une trame pres (22/10 : 494 a_a5fn, 495 attendu ; run precedent l'inverse). Un RACH date faux = IMM ASS
+ * ignoree, le mobile renvoie un RACH. Donc : un nouveau RACH sans entree en dedie depuis le precedent (moins de
+ * 1000 trames) -> correction suivante parmi 0, +1, -1 ; un dedie obtenu -> la correction reste.
+ * CALYPSO_RACH_CORR=0 pour couper. */
+static int rach_corr(uint32_t tick)
+{
+    static int on = -1, idx; static uint32_t t_prec; static unsigned dedie_prec; static bool vu;
+    static const int seq[3] = { 0, +1, -1 };
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_CORR"); on = !(e && *e == '0'); }
+    if (!on) return 0;
+    if (!vu || (uint32_t)(tick - t_prec) > 8) {      /* un nouveau RACH (les deux chemins tombent au meme tick) */
+        unsigned d = calypso_bsp_dedie_entrees();
+        if (vu && d == dedie_prec && (uint32_t)(tick - t_prec) < 1000) {
+            idx = (idx + 1) % 3;
+            printf("  [rach-corr] RACH sans canal depuis le tick %u : correction %+d\n", t_prec, seq[idx]);
+        }
+        dedie_prec = d; t_prec = tick; vu = true;
+    }
+    return seq[idx];
 }
 static uint32_t tx_tsp_fn(uint32_t tick, int *source)
 {
@@ -730,7 +753,7 @@ static uint32_t tx_tsp_fn(uint32_t tick, int *source)
     }
     /* [2026-10-21 23:15] firmware sans a_a5fn en veille (L1 TI) : le fn que le MOBILE croit, appris au dernier SB
      * livre en fenetre SB (calypso_bsp.c g_off_mobile) ; c'est a lui que l'IMM ASS doit correspondre. */
-    { uint32_t f; if (calypso_bsp_fn_mobile_du_tick(tick, &f)) { *source = 4; return f; } }
+    { uint32_t f; if (calypso_bsp_fn_mobile_du_tick(tick, &f)) { *source = 4; return (uint32_t)((f + GSM_HYPERFRAME + rach_corr(tick)) % GSM_HYPERFRAME); } }
     /* [2026-10-21 18:45] firmware sans a_a5fn (L1 TI, Magnetite) : la trame BTS du calage TS0 */
     { uint32_t f; if (calypso_bsp_fn_bts_du_tick(tick, &f)) { *source = 3; return f; } }
     *source = 0; return tick;

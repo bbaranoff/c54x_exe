@@ -446,6 +446,8 @@ fini:
         Tick *t = &ticks[it];
         g_c54x_exe_fn = t->tick;
         long budget = t->budget;
+        /* [2026-10-22] REJEU_BUDGET=n : budget par tick impose (le banc enregistre INSNS) */
+        if (getenv("REJEU_BUDGET")) budget = atol(getenv("REJEU_BUDGET"));
         uint32_t dernier_livre = 0xffffffffu;
         /* ecritures ARM, fenetre 0 */
         for (size_t q = t->debut; q < t->fin;) {
