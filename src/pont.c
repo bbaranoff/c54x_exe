@@ -691,6 +691,12 @@ static uint32_t gsmtime2fn(unsigned t1, unsigned t2, unsigned t3)
 {
     return (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % GSM_HYPERFRAME;
 }
+static void rach_dfn_noter(const C54xState *dsp, uint32_t tick);
+static void scruter_ra_c(void);
+static void rach_pend_echeance(uint32_t tick);
+static struct { bool actif; uint32_t tick; uint8_t bits[148]; } g_rach_pend;
+static uint32_t g_rom_emis_tick = 0xffffffffu;   /* dernier burst non NB emis par la ROM (RACH) */
+static void rach_pend_publier(uint32_t tick_emis, const char *quoi);
 static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
 {
     const uint16_t *api = &dsp->data[0x800];
@@ -703,6 +709,9 @@ static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
      * du firmware trx detourne pour emettre FB/SB/dummy/NB) : tx_tsp_publier republie meme un
      * burst identique au precedent quand MONTANT_ROM_TX_CHAQUE=1 */
     g_tsp_fn.tache_tx = (v & B_GSM_TASK) && ((w[WP_D_TASK_RA / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0);
+    if (v & B_GSM_TASK) rach_dfn_noter(dsp, tick);
+    rach_pend_echeance(tick);
+    if ((tick % 64u) == 0) scruter_ra_c();   /* [2026-10-22 14:15] RA_C lu au fil de l'eau, pas seulement au RACH suivant */
     if (!(v & B_GSM_TASK) || !datee) return;
     unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
     if (t2 >= 26 || t3 >= 51) return;
@@ -758,22 +767,65 @@ static void scruter_ra_c(void)
 static int rach_corr(uint32_t tick)
 {
     static int on = -1, idx; static uint32_t t_prec; static unsigned dedie_prec; static bool vu;
-    if (rach_corr_idx_reset) { idx = 0; rach_corr_idx_reset = 0; }
+    /* [2026-10-22 13:20] l'apprentissage RA_C ne remet PLUS la rotation a 0 : l'offset RA_C oscille de +-1 (766/767)
+     * et chaque RACH repartait a la correction 0, sans jamais explorer +1/-1 -- dix RACH sans canal, acces abandonne,
+     * reselection (13:16). La rotation continue tant qu'aucun dedie n'est obtenu, et garde la valeur gagnante. */
+    rach_corr_idx_reset = 0;
     static const int seq[5] = { 0, +1, -1, +2, -2 };   /* [2026-10-22] +-2 vus entre deux acces */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_CORR"); on = !(e && *e == '0'); }
     if (!on) return 0;
+    /* [2026-10-22 14:05] ROTATION COUPEE PAR DEFAUT. Run de 14:02 : RA_C - tick = 760 pour les six RACH d'un meme
+     * acces, offset appris des le 2e (« [off-mobile] 758 -> 760 ») ; c'est la rotation ajoutee par-dessus qui
+     * datait faux les suivants (5630/5631, 5848/5850, 6097/6096, 6311/6309) : 5 SDCCH en Timeout a la BSC.
+     * On garde la file des RACH et la lecture RA_C (apprentissage), sans correction. CALYPSO_RACH_ROTATION=1. */
+    static int rot = -1;
+    if (rot < 0) { const char *e = calypso_getenv("CALYPSO_RACH_ROTATION"); rot = (e && *e == '1'); }
     if (!vu || (uint32_t)(tick - t_prec) > 8) {      /* un nouveau RACH (les deux chemins tombent au meme tick) */
         scruter_ra_c();
-        if (rach_corr_idx_reset) { idx = 0; rach_corr_idx_reset = 0; vu = false; }
+        rach_corr_idx_reset = 0;
         g_rach_ticks[g_rach_w++ % 16] = tick;
         unsigned d = calypso_bsp_dedie_entrees();
         if (vu && d == dedie_prec && (uint32_t)(tick - t_prec) < 1000) {
             idx = (idx + 1) % 5;
-            printf("  [rach-corr] RACH sans canal depuis le tick %u : correction %+d\n", t_prec, seq[idx]);
+            if (rot) printf("  [rach-corr] RACH sans canal depuis le tick %u : correction %+d\n", t_prec, seq[idx]);
         }
         dedie_prec = d; t_prec = tick; vu = true;
     }
-    return seq[idx];
+    return rot ? seq[idx] : 0;
+}
+/* [2026-10-22 14:05] RACH DATE PAR d_fn. Run de 13:57 : 5 RACH pour une IMM ASS acceptee (BSC : « lchan allocation
+ * failed ... WAIT_RLL_RTP_ESTABLISH: Timeout » pour chaque SDCCH perdu). Publie 2070/2290/2523/2747/2977, le
+ * mobile (RA_C) 2069/2289/2521/2749/2977 : seul le 5e concordait. Le fn du tick (offset RA_C, 768..770) glisse
+ * d'une trame a l'autre et la rotation en ajoute. La page W du RACH porte d_fn = fn_report | (fn%104) << 8, le
+ * fn du MOBILE : on prend le fn le plus proche de l'estimation qui a ce reste modulo 104 (+ CALYPSO_RACH_DFN_K).
+ * CALYPSO_RACH_DFN=0 : ancienne voie (estimation + rotation). */
+static struct { bool valide; uint32_t tick; unsigned fn104; } g_rach_dfn;
+static void rach_dfn_noter(const C54xState *dsp, uint32_t tick)
+{
+    if (!dsp) return;
+    const uint16_t *api = &dsp->data[0x800];
+    uint16_t v = api[(API_NDB + NDB_D_DSP_PAGE) / 2];
+    const uint16_t *w = &api[API_W_PAGE((v & B_GSM_PAGE) ? 1u : 0u) / 2];
+    if (!(w[WP_D_TASK_RA / 2] & 0x7fff)) return;
+    unsigned f104 = (unsigned)(w[WP_D_FN / 2] >> 8);
+    if (f104 >= 104 || w[WP_D_FN / 2] == 0) return;
+    g_rach_dfn.valide = true; g_rach_dfn.tick = tick; g_rach_dfn.fn104 = f104;
+}
+static bool rach_dfn_caler(uint32_t tick, uint32_t estime, uint32_t *fn)
+{
+    static int on = -1, k = 0;
+    /* 14:05 : le firmware TI ne pose pas d_fn sur la tache RACH (0 -> calage faux de +6) : coupe par defaut */
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_DFN"); on = (e && *e == '1');
+                  e = calypso_getenv("CALYPSO_RACH_DFN_K"); k = (e && *e) ? atoi(e) : 0; }
+    if (!on || !g_rach_dfn.valide || (uint32_t)(tick - g_rach_dfn.tick + 2) > 4) return false;
+    int d = ((int)g_rach_dfn.fn104 + k - (int)(estime % 104) + 2 * 104) % 104;
+    if (d >= 52) d -= 104;
+    if (d < -6 || d > 6) return false;
+    *fn = (estime + GSM_HYPERFRAME + (uint32_t)d) % GSM_HYPERFRAME;
+    static unsigned n;
+    if (++n <= 40 || n % 100 == 0)
+        printf("  [rach-dfn] tick=%u d_fn%%104=%u estime=%u -> fn %u (%+d)\n", tick, g_rach_dfn.fn104, estime, *fn, d);
+    return true;
 }
 static uint32_t tx_tsp_fn(uint32_t tick, int *source)
 {
@@ -790,7 +842,10 @@ static uint32_t tx_tsp_fn(uint32_t tick, int *source)
     }
     /* [2026-10-21 23:15] firmware sans a_a5fn en veille (L1 TI) : le fn que le MOBILE croit, appris au dernier SB
      * livre en fenetre SB (calypso_bsp.c g_off_mobile) ; c'est a lui que l'IMM ASS doit correspondre. */
-    { uint32_t f; if (calypso_bsp_fn_mobile_du_tick(tick, &f)) { *source = 4; return (uint32_t)((f + GSM_HYPERFRAME + rach_corr(tick)) % GSM_HYPERFRAME); } }
+    scruter_ra_c();   /* [2026-10-22 14:15] le RA_C du RACH precedent AVANT d'estimer (il arrivait un RACH trop tard) */
+    { uint32_t f, c; if (calypso_bsp_fn_mobile_du_tick(tick, &f)) { *source = 4;
+          if (rach_dfn_caler(tick, f, &c)) { rach_corr(tick); return c; }   /* rach_corr : file des RACH pour RA_C */
+          return (uint32_t)((f + GSM_HYPERFRAME + rach_corr(tick)) % GSM_HYPERFRAME); } }
     /* [2026-10-21 18:45] firmware sans a_a5fn (L1 TI, Magnetite) : la trame BTS du calage TS0 */
     { uint32_t f; if (calypso_bsp_fn_bts_du_tick(tick, &f)) { *source = 3; return f; } }
     *source = 0; return tick;
@@ -906,6 +961,9 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
                        n_sb, n_recodes, n_sans_page, n_sb ? (double)n_bits_faux / n_sb : 0.0);
         }
     }
+    if (b.type != TSP_TX_NB) g_rom_emis_tick = fn;
+    if (g_rach_pend.actif && b.type != TSP_TX_NB && (uint32_t)(fn - g_rach_pend.tick) <= 2)
+        rach_pend_publier(fn, "emission ROM");
     int src = 0;
     uint32_t fn_gsm = tx_tsp_fn(fn, &src);
     uint8_t octet_src = (uint8_t)src;
@@ -1060,6 +1118,35 @@ static void apm_trace_done(const uint16_t *api_ram, uint16_t avant[2][4])
     printf("\n");
 }
 
+/* [2026-10-22 14:25] LE RACH DATE PAR SON EMISSION. Run de 14:21 : RA_C = tick ou la ROM EMET le burst (script TSP,
+ * [rom-tx] 1304/1549/1761) + l'offset de livraison (762) : 2066/2311/2523, exact les trois fois. Le tick ou la tache
+ * est POSEE (montant.c) precede l'emission de 0 ou 1 trame selon l'acces : c'etait toute la gigue (RACH datés fn-1,
+ * IMM ASS ignorees, SDCCH en Timeout a la BSC). Le burst attend donc l'emission de la ROM (tx_tsp_publier) ; sans
+ * emission sous 3 ticks, il part au tick de pose + 1. CALYPSO_RACH_EMISSION=0 : ancienne voie. */
+static int rach_emission_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_EMISSION"); on = !(e && *e == '0'); }
+    return on;
+}
+static void rach_pend_publier(uint32_t tick_emis, const char *quoi)
+{
+    if (!g_rach_pend.actif) return;
+    g_rach_pend.actif = false;
+    uint32_t f; int src = 3;
+    if (!calypso_bsp_fn_bts_du_tick(tick_emis, &f)) { f = tx_tsp_fn(tick_emis, &src); }
+    rach_corr(g_rach_pend.tick);   /* file des RACH (lecture RA_C) */
+    if (!ring_publier(TSP_TX_RACH, g_rach_pend.bits, -1, 8, (uint8_t)src, f)) return;
+    static unsigned n;
+    if (++n <= 40 || n % 100 == 0)
+        printf("  [rach-air] RACH pose tick=%u, emis tick=%u (%s) -> fn BTS %u publie vers l'air [%u]\n",
+               g_rach_pend.tick, tick_emis, quoi, f, n);
+}
+static void rach_pend_echeance(uint32_t tick)
+{
+    if (g_rach_pend.actif && (uint32_t)(tick - g_rach_pend.tick) >= 3)
+        rach_pend_publier(g_rach_pend.tick + 1, "sans emission vue, pose+1");
+}
 void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
 {
     static int actif = -1;
@@ -1075,7 +1162,14 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
     for (int i = 0; i < 8; i++) bits[i] = (uint8_t)(queue[i] - '0');
     for (int i = 0; i < 41; i++) bits[8 + i] = (uint8_t)(sync[i] - '0');
     memcpy(bits + 49, code, 36);
+    if (rach_emission_on()) {
+        if (g_rach_pend.actif) rach_pend_publier(g_rach_pend.tick + 1, "remplace");
+        g_rach_pend.actif = true; g_rach_pend.tick = tick; memcpy(g_rach_pend.bits, bits, 148);
+        if (g_rom_emis_tick == tick) rach_pend_publier(tick, "emission ROM, meme tick");   /* deja emis (14:25, RACH #1) */
+        return;
+    }
     int src = 0;
+    rach_dfn_noter(dsp_global_tx, tick);
     uint32_t fn_gsm = tx_tsp_fn(tick, &src);
     if (!ring_publier(TSP_TX_RACH, bits, -1, 8, (uint8_t)src, fn_gsm)) return;
     static unsigned n;
@@ -1102,7 +1196,8 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
         "10100111110110001010011111", "11101111000100101110111100" };
     if (nslots < 0) {
         const char *e = calypso_getenv("CALYPSO_TRX_TX_SLOTS"); nslots = (e && *e) ? atoi(e) : 1;
-        if (nslots < 1) nslots = 1; if (nslots > 8) nslots = 8;
+        if (nslots < 1) nslots = 1;
+        if (nslots > 8) nslots = 8;
         e = calypso_getenv("CALYPSO_TRX_TX_START"); tx_start = (e && *e) ? atoi(e) & 7 : 0;
         printf("  [rom-tx] publication depuis la page de l'extcode : %d slot(s) TX a partir du TS%d\n", nslots, tx_start);
     }
@@ -1337,6 +1432,12 @@ static void enreg_base(FILE *f, const C54xState *dsp, const uint16_t *api_ram, u
     fwrite(h, 1, 5, f);
     fwrite(&r, sizeof r, 1, f);
     fwrite(dsp->data, sizeof(uint16_t), C54X_DATA_SIZE, f);
+    /* [2026-10-22 14:45] 'P' : la memoire PROGRAMME basse 0x0000-0x7FFF. La ROM y ecrit du code a l'execution
+     * (prog_write : 0x2800-0x7FFF ne va que dans prog[]) ; sans lui le rejeu appelait 0x2EC5 vide a la 1re
+     * tache TCH (« trou-prog ... depuis pc=0xbc43 »), pile perdue, DSP mort : aucun TCH rejouable. */
+    h[0] = 'P';
+    fwrite(h, 1, 5, f);
+    fwrite(dsp->prog, sizeof(uint16_t), 0x8000, f);
 }
 static void enreg_tick(const C54xState *dsp, const uint16_t *api_ram, uint32_t tick, bool irq, bool deux, long budget)
 {
@@ -1477,8 +1578,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
              * FIRE=0 « 07 00 03 », FACCH 10/10 bonnes (contre 6/12). Hors TCH
              * (FB, SB, SDCCH) on garde l'arret a l'armement.
              * PONT_TCH_DEPOT_IDLE=0 retablit l'ancien comportement. */
-            static int tch_idle = -1;
-            if (tch_idle < 0) { const char *e = calypso_getenv("PONT_TCH_DEPOT_IDLE"); tch_idle = (e && *e == '0') ? 0 : 1; }
+            int tch_idle = calypso_reglage("PONT_TCH_DEPOT_IDLE", 1);   /* [2026-10-22] a chaud */
             bool jusqua_idle = tch_idle && montant_sur_tch();
             while (!dsp->idle && (jusqua_idle || !calypso_rhea_dma_rx_armed()) && fait < (int)budget / 2)
                 fait += c54x_run_profile(dsp, 256);
@@ -1506,6 +1606,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
             }
 phase_b:
             fait = fait_a;
+            if (dsp->api_ram) montant_capter_fu(dsp->api_ram, g_c54x_exe_fn);   /* avant que la ROM lise a_fu */
             /* PONT_NB_DEBUG: flags at the burst's entry, and a snapshot of the
              * data memory to list what the demod writes (regions), see
              * sonde_bits(). */

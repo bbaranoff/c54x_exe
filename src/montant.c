@@ -61,6 +61,8 @@
 #include "hw/arm/calypso/calypso_debug.h"
 #include "calypso_bsp.h"
 #include "montant.h"
+#include <osmocom/core/bits.h>
+#include <osmocom/coding/gsm0503_coding.h>   /* prothese FACCH descendante */
 
 #define SHM_RACH        "/dev/shm/calypso_rach"
 #define SHM_SDCCH_UL    "/dev/shm/calypso_sdcch_ul"
@@ -335,10 +337,50 @@ static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
         fr[i] = (uint8_t)((canon[i - 1] << 4) | (canon[i] >> 4));
 }
 
+static int fd_facch = -2;
+static uint32_t seq_facch;
+
+/* [2026-10-22 13:50] LA FACCH MONTANTE AU GO. L'ARM pose a_fu (B_BLUD) entre la phase A et le GO ; la ROM le
+ * lit et efface B_BLUD des la phase B de la MEME trame, montant_scruter (fin de trame) le trouvait le plus
+ * souvent deja retombe : appel de 13:34, firmware « DL: >N200 of SABM » (34 SABM poses), un seul bloc FACCH
+ * publie (et pas le SABM) -> la BTS n'a jamais repondu UA. Appele par pont.c au GO, avant que la ROM tourne ;
+ * l'anti-doublon de prendre_ul() empeche montant_scruter de republier le meme bloc. MONTANT_FU_AU_GO=0 coupe. */
+void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = calypso_getenv("MONTANT_FU_AU_GO"); on = !(e && *e == '0'); }
+    if (!on || !g.sur_tch) return;
+    uint8_t l2[23];
+    if (prendre_ul(api_ram, NDB_A_FU, l2, 23)) {
+        publier_l2(&fd_facch, SHM_FACCH_UL, &seq_facch, l2, TCHT_DSP_TASK, fn);
+        if (g.facch++ < (unsigned long)journal())
+            printf("  [montant] FACCH UL fn=%u (au GO)\n", fn);
+    }
+    /* [2026-10-22] LA PAROLE MONTANTE AU GO. a_du (NDB_A_DU_1) souffre du meme mal que a_fu : la ROM
+     * pose B_BLUD puis l'efface des la phase B de la trame ; capture_tch_ul (montant_scruter, fin de
+     * trame) arrivait trop tard, prendre_ul() rendait false -> publier_parole() jamais appelee, SHM parole
+     * absent, pont ul=0 (aucune voix montante). On la capte ici au GO, symetrique a la FACCH ci-dessus.
+     * L'anti-doublon de prendre_ul() (dedup par contenu, vu[]) empeche le double envoi quand
+     * capture_tch_ul la retente en fin de trame. MONTANT_DU_AU_GO=0 coupe. */
+    static int du = -1;
+    if (du < 0) { const char *e = calypso_getenv("MONTANT_DU_AU_GO"); du = !(e && *e == '0'); }
+    if (du) {
+        uint8_t fr[FR_BYTES];
+        if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
+            noter_ul(fn, 1, TCHT_DSP_TASK, fr, FR_BYTES);   /* brute, format TI (a_du) */
+            parole_ti_vers_fr(fr);
+            noter_ul(fn, 0, TCHT_DSP_TASK, fr, FR_BYTES);   /* convertie FR, ce que recoit le pont */
+            publier_parole(fr, fn);
+            if (g.parole++ < (unsigned long)journal())
+                printf("  [montant] parole UL fn=%u (au GO)\n", fn);
+        }
+    }
+}
+
 static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
 {
-    static int fd_facch = -2, fd_sacch = -2;
-    static uint32_t seq_facch, seq_sacch;
+    static int fd_sacch = -2;
+    static uint32_t seq_sacch;
     uint8_t l2[23], fr[FR_BYTES];
 
     switch (task_u & 0x7FFF) {
@@ -826,8 +868,41 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
         g.dedie_arme = true;
         return;
     }
+    /* [2026-10-22 21:50] FIRMWARE TI : ALLC APRES LE TCH N'EST PAS FORCEMENT LE SDCCH. La L1 TI lit aussi la BCCH et
+     * le paging en ALLC : apres le CHANNEL RELEASE d'un appel (run de 21:42), « revenu sur le SDCCH » rendait le BSP
+     * au SDCCH/8 TS1, qui remplace TS0 sur toutes les trames tant que le dedie TI dure (CALYPSO_BSP_SDCCH8_TOUT) :
+     * NP_I tous en erreur des la sortie du dedie, RECOVERY, DSP relance en 2,4 s, cellule perdue. Ici le BSP
+     * revient d'abord a TS0 ; on ne retourne au SDCCH que si une tache MONTANTE suit dans les 102 trames (echec
+     * d'assignation : la L1 renvoie sur son SDCCH) ; en veille il n'y en a pas. MONTANT_TI_ALLC_DIRECT=1 :
+     * ancien comportement. */
+    static int ti = -1, direct = -1;
+    static bool attente_ul; static uint32_t attente_fn;
+    if (ti < 0) { ti = calypso_getenv("MS_MAGNETITE") != NULL;
+                  const char *e = calypso_getenv("MONTANT_TI_ALLC_DIRECT"); direct = (e && *e == '1'); }
     if (tache_bloc && g.sur_tch) {
-        revenir_sdcch("le firmware est revenu sur le SDCCH (tache ALLC)", fn);
+        if (!ti || direct) {
+            revenir_sdcch("le firmware est revenu sur le SDCCH (tache ALLC)", fn);
+        } else {
+            g.sur_tch = false;
+            g.dedie_arme = false;
+            calypso_bsp_set_dedie(0, 0xFF, 0);
+            attente_ul = g.sd_valide;
+            attente_fn = fn;
+            printf("  [montant] firmware TI : tache ALLC apres le TCH a fn=%u : BSP rendu a TS0, retour au SDCCH "
+                   "seulement sur une tache montante%s\n", fn, g.sd_valide ? "" : " (aucun SDCCH connu)");
+            fflush(stdout);
+        }
+        return;
+    }
+    if (attente_ul) {
+        uint16_t u = api_ram[(API_W_PAGE(pg) + WP_D_TASK_U) / 2] & 0x7fffu;
+        if (u) {
+            attente_ul = false;
+            revenir_sdcch("firmware TI : tache montante apres le TCH (echec d'assignation)", fn);
+        } else if ((uint32_t)(fn - attente_fn) > 102u) {
+            attente_ul = false;
+            printf("  [montant] firmware TI : aucune tache montante 102 trames apres le TCH (fn=%u) : en veille\n", fn);
+        }
     }
 }
 
@@ -1144,6 +1219,81 @@ static void publier_kc(uint16_t *api_ram)
 void calypso_bsp_set_dedie_ti(int actif);   /* calypso_bsp.c */
 static bool g_ti_dedie;                      /* firmware TI en dedie (taches ALLC), voir plus bas */
 
+/* [2026-10-22] PROTHESE FACCH DESCENDANTE (firmware TI). Sous la L1 TI de Magnetite la ROM decode la FACCH/F
+ * avec les deux derniers bursts du bloc absents : l'UA qui repond au SABM de l'ASSIGNMENT sort « 01 8b 01 2b »
+ * au lieu de « 01 73 01 2b » (reproduit hors ligne par libosmocoding en mettant les bursts 6 et 7 a zero),
+ * Fire KO, RR Assignment Failure sur tous les appels du 22/10. Les bursts TS2 que le BSP livre, eux, portent
+ * l'UA intact. On les decode ici a chaque fin de bloc FACCH/F (fn % 13 % 4 == 3) et, si c'est une FACCH au CRC
+ * bon, on la pose dans a_fd : la L1 TI la lit a la trame suivante (l1_cmplx.c, fn_mod13 % 4 == 0), apres la
+ * fin de ce tick. Le reste (parole) reste a la ROM. CALYPSO_PROTHESE_FACCH_DL=0 coupe (a chaud). */
+/* [2026-10-22 21:00] PROTHESE PAROLE DESCENDANTE (firmware TI), meme mal que la FACCH : appel au 600 de 20:58,
+ * vocodeur ROM arme (VSP rint 36923, SPC 0x00c8) mais toute la parole decodee par la ROM en BFI (a_dd 1500/1500,
+ * ~30 bits faux par trame), crete DL 0. Le bloc FR decode ici des bursts du BSP (CRC bon) est pose dans a_dd au
+ * format TI (inverse de parole_ti_vers_fr : gsm_to_canon puis ti_fr_from_canon), BFI a 0, pour que le decodeur
+ * de parole de la ROM le prenne a la place du sien. Ne remplace que les trames que la ROM a jugees mauvaises.
+ * CALYPSO_PROTHESE_PAROLE_DL=0 coupe (a chaud), =2 remplace aussi les bonnes. */
+static void prothese_parole_dl(uint16_t *api_ram, const uint8_t fr[FR_BYTES], int ne, uint32_t e)
+{
+    static unsigned n_ok;
+    int mode = calypso_reglage("CALYPSO_PROTHESE_PAROLE_DL", 1);
+    if (!mode) return;
+    uint16_t *dd = &api_ram[(API_NDB + NDB_A_DD_0) / 2];
+    if (mode == 1 && (dd[0] & B_BLUD) && !(dd[0] & 0x0004)) return;   /* la ROM l'a deja bonne */
+    uint8_t canon[FR_BYTES], ti[FR_BYTES + 1];
+    memset(canon, 0, sizeof canon);
+    for (int i = 0; i < 260; i++)                   /* gsm_to_canon : le quartet 0xd en tete saute */
+        mettre_bit_msb(canon, i, bit_msb(fr, i + 4));
+    memset(ti, 0, sizeof ti);
+    for (int i = 0; i < 260; i++) {                 /* ti_fr_from_canon */
+        int si = i >= 182 ? i + 4 : i;
+        mettre_bit_msb(ti, si, bit_msb(canon, gsm610_bitorder[i]));
+    }
+    dd[0] = (uint16_t)((dd[0] & ~0x0044u) | B_BLUD);   /* bloc present, ni FIRE ni BFI */
+    dd[2] = (uint16_t)ne;
+    for (int k = 0; k < FR_BYTES; k += 2)              /* octet fort d'abord, comme sonde_add */
+        dd[3 + k / 2] = (uint16_t)((ti[k] << 8) | (k + 1 < FR_BYTES ? ti[k + 1] : 0));
+    if (n_ok++ < 40 || n_ok % 500 == 0)
+        printf("  [parole-dl] fn=%u : trame FR de la BTS posee dans a_dd (%d err) [%u]\n", e, ne, n_ok);
+}
+
+static void prothese_facch_dl(uint16_t *api_ram)
+{
+    static uint32_t deja = 0xffffffffu;
+    static unsigned n_ok;
+    uint32_t e;
+    if (!calypso_reglage("CALYPSO_PROTHESE_FACCH_DL", 1) || !g_ti_dedie) return;
+    if (!calypso_bsp_tch_dernier_fn(&e) || e == deja) return;
+    deja = e;
+    if (e % 26u == 12u || e % 26u == 25u || (e % 13u) % 4u != 3u) return;
+    uint32_t seq[8]; int n = 0;
+    for (uint32_t f = e; n < 8; f--) {
+        if (f % 26u == 12u || f % 26u == 25u) continue;
+        seq[7 - n++] = f;
+    }
+    sbit_t soft[8 * 116];
+    for (int k = 0; k < 8; k++) {
+        uint8_t b[148];
+        if (!calypso_bsp_tch_burst(seq[k], b)) return;
+        for (int j = 0; j < 58; j++) {
+            soft[k * 116 + j]      = b[3 + j]  ? -127 : 127;
+            soft[k * 116 + 58 + j] = b[87 + j] ? -127 : 127;
+        }
+    }
+    uint8_t l2[33]; int ne = 0, nb = 0;
+    int rc = gsm0503_tch_fr_decode(l2, soft, 1, 0, &ne, &nb);
+    if (rc == FR_BYTES) { prothese_parole_dl(api_ram, l2, ne, e); return; }
+    if (rc != 23) return;
+    uint16_t *fd = &api_ram[(API_NDB + NDB_A_FD) / 2];
+    fd[0] = B_BLUD;                 /* bloc present, B_FIRE1/B_FIRE0 a 0 : CRC bon */
+    fd[2] = (uint16_t)ne;
+    for (int k = 0; k < 12; k++)
+        fd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < 23 ? l2[2 * k + 1] << 8 : 0));
+    if (n_ok++ < 40 || n_ok % 100 == 0)
+        printf("  [facch-dl] fn=%u : FACCH de la BTS posee dans a_fd (%02x %02x %02x %02x, %d err) [%u]\n",
+               e, l2[0], l2[1], l2[2], l2[3], ne, n_ok);
+    fflush(stdout);
+}
+
 void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
 {
     static int coupe = -1;
@@ -1183,6 +1333,59 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     scruter_tch(fn);      /* l'annonce du TCH par le pont                  */
     suivre_tache_tch(api_ram, pg, taches, fn);   /* la bascule, par le firmware */
     sonde_dfn(api_ram, pg, taches, fn);
+    if (taches) calypso_bsp_dfn_observe(fn, api_ram[(API_W_PAGE(pg) + WP_D_FN) / 2], api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2]);
+
+    /* [2026-10-22] B_SYNC_TCH_DL POUR LA L1 TI. osmocom (calypso/dsp.c dsp_load_tch_param) pose au premier TCH
+     * B_SYNC_TCH_UL (bit 8 de d_ctrl_tch) ET B_SYNC_TCH_DL (bit 9) ; la L1 TI de Magnetite pose le bit 8 seul, son
+     * bit 9 s'appelle B_SYNC_AMR et reste a 0 (d_ctrl_tch 0x01d1 puis 0x0091). Sans synchro descendante la ROM
+     * garde une phase de bloc TCH arbitraire : chaque FACCH (l'UA du SABM d'ASSIGNMENT) decodee avec ses deux
+     * derniers bursts absents (« 01 8b 01 2b » au lieu de « 01 73 01 2b », reproduit hors ligne), Fire KO,
+     * RR Assignment Failure (appels au 600 du 22/10). Pose ici, en fin de tick, sur la page W que la ROM lira au
+     * tick suivant. CALYPSO_TI_SYNC_DL=0 coupe. */
+    {
+        /* n = 1 : sur la page du bit 8 ; n > 1 : sur la (n-1)-ieme page a tache suivante (decaler la phase). */
+        int sync_dl = calypso_reglage("CALYPSO_TI_SYNC_DL", 1);   /* a chaud, /dev/shm/calypso_reglages */
+        static int attente = -1;
+        static bool fait_tch;   /* [2026-10-22 21:00] une fois par TCH */
+        uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, mot 9 de la page W */
+        uint16_t td = api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2] & 0x7fffu;
+        if (!g.sur_tch) fait_tch = false;
+        if (sync_dl > 0 && taches) {
+            /* [2026-10-22 21:00] AUSSI SUR LA PREMIERE TACHE TCH. Appels de 20:52 et 20:58 : la L1 TI pose
+             * d_ctrl_tch=0x0091 (sans le bit 8) des la premiere page TCH, le declencheur ne partait jamais
+             * (0 [sync-dl]) et toute la parole descendante sortait en BFI (1500/1500, ~30 bits faux). */
+            if ((*ctrl & 0x0100) && !(*ctrl & 0x0200)) attente = sync_dl - 1;
+            else if (td == TCHT_DSP_TASK && !fait_tch && !(*ctrl & 0x0200)) { attente = sync_dl - 1; fait_tch = true; }
+            else if (attente > 0) attente--;
+            if (attente == 0) {
+                *ctrl |= 0x0200;
+                printf("  [sync-dl] tick=%u page W%u : d_ctrl_tch |= B_SYNC_TCH_DL -> %04x (reglage %d)\n", fn, pg, *ctrl, sync_dl);
+                fflush(stdout);
+                attente = -1;
+            }
+        }
+    }
+    /* [2026-10-22 22:40] VOIX PAR L'HOTE : PAS DE CODEC ROM. Avec PONT_VOIX_HOTE=1 (pont/voix_hote.py, libgsm) la
+     * parole ne passe plus par la ROM, mais la L1 TI pose B_VOCODER_ON (bit 7 de d_ctrl_tch, 0x0091) : la ROM
+     * codait et decodait quand meme chaque trame (profil PDROM eb00/eec0/e8c0, PROM0 c6xx/cf00/d9c0), 8,4 ms par
+     * trame pour 4,62, horloge du pont asservie au DSP -> tout le reseau a 55 % (DL 27 trames/s). Bit efface sur
+     * la page W a tache. CALYPSO_TI_VOCODEUR_OFF (a chaud) : defaut 1 si PONT_VOIX_HOTE=1, sinon 0. */
+    {
+        static int defaut = -1;
+        if (defaut < 0) { const char *e = calypso_getenv("PONT_VOIX_HOTE"); defaut = (e && *e == '1'); }
+        if (taches && calypso_reglage("CALYPSO_TI_VOCODEUR_OFF", defaut)) {
+            uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, mot 9 de la page W */
+            if (*ctrl & 0x0080) {
+                static unsigned n_voc;
+                *ctrl &= (uint16_t)~0x0080u;
+                if (n_voc++ == 0) {
+                    printf("  [vocodeur-off] tick=%u : B_VOCODER_ON efface de d_ctrl_tch (voix par l'hote) -> %04x\n", fn, *ctrl);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    prothese_facch_dl(api_ram);   /* [2026-10-22] voir plus haut */
 
     /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
      * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;

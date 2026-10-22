@@ -13,6 +13,9 @@
  * bit 0 de d_dsp_page, celui que QEMU transporte deja dans PONT_TICK.m.b. */
 void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page);
 
+/* [2026-10-22] FACCH montante lue au GO, avant que la ROM n'efface B_BLUD de a_fu. */
+void montant_capter_fu(uint16_t *api_ram, uint32_t fn);
+
 /* Le canal dedie est libere : oublier le dernier bloc SDCCH publie. */
 void montant_canal_libere(void);
 

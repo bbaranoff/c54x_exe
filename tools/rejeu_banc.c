@@ -394,6 +394,7 @@ int main(int argc, char **argv)
         switch (k) {
         case 'S': l = 5 + (size_t)ENREG_API_WORDS * 2; break;
         case 'D': l = 5 + sizeof(EnregRegs) + C54X_DATA_SIZE * 2; break;
+        case 'P': l = 5 + 0x8000 * 2; break;   /* [2026-10-22] memoire programme 0x0000-0x7FFF */
         case 'T': l = 10; break;
         case 'A': l = 8 + 4 * (size_t)be16(fichier + p + 6); break;
         case 'B': l = 15 + 2 * (size_t)be16(fichier + p + 13); break;
@@ -403,6 +404,9 @@ int main(int argc, char **argv)
         if (k == 'S') {
             memcpy(api, fichier + p + 5, API_WORDS * 2);
             printf("etat 'S' pose (tick %u)\n", be32(fichier + p + 1));
+        } else if (k == 'P' && !getenv("REJEU_SANS_D")) {
+            memcpy(dsp->prog, fichier + p + 5, 0x8000 * 2);
+            printf("etat 'P' pose : memoire programme 0x0000-0x7FFF\n");
         } else if (k == 'D' && !getenv("REJEU_SANS_D")) {
             EnregRegs r; memcpy(&r, fichier + p + 5, sizeof r);
             uint16_t sauve_api[API_WORDS]; memcpy(sauve_api, api, sizeof sauve_api);
@@ -485,6 +489,22 @@ fini:
          * la ROM ne lance la tache 34 (commandes audio -> tache 64 -> decodeur de parole 0xc4f7)
          * que si ce bit est pose (PROM0 0xb0f9, 0x3fb0 = copie de d_dsp_page). */
         if (getenv("REJEU_MISC_TASK") && (api[NDB + 0] & 0x0002)) api[NDB + 0] |= 0x0008;
+        /* [2026-10-22] REJEU_SYNC_DL=1 : la L1 TI pose B_SYNC_TCH_UL (bit 8 de d_ctrl_tch, W mot 9) au premier
+         * TCH mais jamais le bit 9 (B_SYNC_AMR chez TI, B_SYNC_TCH_DL pour la ROM et osmocom dsp.c) : le poser. */
+        /* [2026-10-22 21:40] REJEU_SYNC_DL=2 : comme montant.c, aussi sur la premiere page a tache TCH (task_d 13) :
+         * la L1 TI de Magnetite pose d_ctrl_tch=0x0091, sans le bit 8. */
+        if (getenv("REJEU_SYNC_DL")) {
+            static bool fait;
+            int mode2 = atoi(getenv("REJEU_SYNC_DL")) == 2;
+            for (int pg = 0; pg < 2; pg++) {
+                uint16_t *c = &api[W_PAGE(pg) + 9];
+                bool tch = (api[W_PAGE(pg) + 0] & 0x7fff) == 13;
+                if (!(*c & 0x0200) && ((*c & 0x0100) || (mode2 && tch && !fait))) {
+                    *c |= 0x0200; fait = true;
+                    printf("tick=%u : d_ctrl_tch page %d |= B_SYNC_TCH_DL (%04x)\n", t->tick, pg, *c);
+                }
+            }
+        }
         {   /* [2026-10-15] REJEU_DU1_VERS_DU0=1 : la trame de parole que le firmware pose dans a_du_1
              * (prim_tch.c : tch_sub ? a_du_0 : a_du_1) est recopiee dans a_du_0 -- la ROM relit a_du_0
              * a PC 0x909c une fois par bloc, jamais a_du_1 au-dela de l'aiguillage (phase C1). */
@@ -560,8 +580,26 @@ fini:
             if (k == 'B') {
                 int n = be16(fichier + q + 13);
                 static int16_t iq[1024];
-                memcpy(iq, fichier + q + 15, 2 * (size_t)(n > 1024 ? 1024 : n));
-                calypso_bsp_rx_burst(fichier[q + 5], be32(fichier + q + 6), iq, n);
+                size_t qb = q;
+                /* [2026-10-22] REJEU_IQ_DECAL=n : sur les ticks de tache TCH (td=0x000d), livrer les I/Q
+                 * enregistres au tick +n (fenetre 0) -- quel calage fait lire a la ROM l'UA de la FACCH ? */
+                {   static int dec = 9999;
+                    if (dec == 9999) { const char *e = getenv("REJEU_IQ_DECAL"); dec = e ? atoi(e) : 0; }
+                    if (dec && fichier[q + 5] == 0 && g_page_it_td == 0x000d && it + dec >= 0 && it + dec < nt) {
+                        Tick *u = &ticks[it + dec];
+                        for (size_t r = u->debut; r < u->fin;) {
+                            uint8_t kk = fichier[r];
+                            size_t ll = kk == 'T' ? 10 : kk == 'A' ? 8 + 4 * (size_t)be16(fichier + r + 6)
+                                      : kk == 'B' ? 15 + 2 * (size_t)be16(fichier + r + 13) : 0;
+                            if (!ll) break;
+                            if (kk == 'B' && fichier[r + 5] == 0) { qb = r; break; }
+                            r += ll;
+                        }
+                    }
+                }
+                n = be16(fichier + qb + 13);
+                memcpy(iq, fichier + qb + 15, 2 * (size_t)(n > 1024 ? 1024 : n));
+                calypso_bsp_rx_burst(fichier[q + 5], be32(fichier + qb + 6), iq, n);
                 if (fichier[q + 5] == 0) dernier_livre = be32(fichier + q + 6);
                 if (fichier[q + 5] == 0 && getenv("REJEU_SONDE")) {
                     int nwin = be16(fichier + q + 11) / 2, marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;

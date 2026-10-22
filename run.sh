@@ -454,7 +454,7 @@ etape2() {   # l'ARM
     fi
     attendre 10 grep -aq "label serial0" "$RUNDIR/qemu.log" || rater "QEMU n'a pas publie son pty (voir $RUNDIR/qemu.log)"
     if [ "$MODE" = dsp ]; then
-        grep -aq "pont DSP : API RAM partagee" "$RUNDIR/qemu.log" || rater "QEMU n'a pas rejoint le DSP (voir $RUNDIR/qemu.log)"
+        attendre 10 grep -aq "pont DSP : API RAM partagee" "$RUNDIR/qemu.log" || rater "QEMU n'a pas rejoint le DSP (voir $RUNDIR/qemu.log)"
     else
         attendre 5 grep -aq "backend gr-gsm" "$RUNDIR/qemu.log" || rater "la couche 1 gr-gsm ne s'est pas annoncee (voir $RUNDIR/qemu.log)"
     fi
