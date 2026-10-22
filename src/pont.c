@@ -918,8 +918,11 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
         uint16_t avant[3] = { a[0], a[1], a[2] };
         int depile[3] = { -2, -2, -2 };
         /* [2026-10-21] une mesure par fenetre, dans l'ordre des fenetres livrees (file, voir calypso_bsp.c) */
+        /* [2026-10-22 00:20] les mots 12..14 sont ecrits par le DSP et servis dans l'ordre par c54x_mem.c
+         * (calypso_bsp_rssi_apm_suivante) ; un zero ici est une page remise a zero par la L1 : plancher sans
+         * consommer la file (jamais 0 : l1_check_pm_error). */
         for (int k = 0; k < 3; k++)
-            if ((a[k] >> 5) == 0) a[k] = calypso_bsp_rssi_apm_suivante(&depile[k]);
+            if ((a[k] >> 5) == 0) a[k] = calypso_bsp_rssi_apm();
         /* [2026-10-21 23:58] SONDE [apm-fort] : PM remplacees avec le MAV d'un VRAI burst (veille, ARFCN 1),
          * ou trame ou une fenetre en a recu un. 200 lignes. */
         /* bilan toutes les 255 trames (periode de paging du banc) : PM remplacees avec un burst, du bruit,
@@ -956,7 +959,10 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
      * Meme plancher que a_pm, des qu'une tache descendante (d_task_d, mot 0) est rapportee. */
     for (int pg = 0; pg < 2; pg++) {
         uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
-        if ((r[0] & 0x7fff) && (r[9] >> 5) == 0) r[9] = calypso_bsp_rssi_apm();
+        /* [2026-10-22 00:58] + les taches de synchro (d_task_md : SB2, SBCONF...) : la L1 TI lit aussi leur PM dans
+         * a_serv_demod[D_PM] (l1_cmplx.c, l1s_read_mon_result) ; mot 9 laisse a 0 -> 4 « > PM » (tache 8) a chaque
+         * relecture SB de la cellule en veille, compteur cumule -> RECOVERY au bout de quelques minutes. */
+        if (((r[0] & 0x7fff) || (r[4] & 0xff)) && (r[9] >> 5) == 0) r[9] = calypso_bsp_rssi_apm();
     }
     for (int pg = 0; pg < 2; pg++) {
         uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
@@ -965,7 +971,7 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
         int n = md & 0xff; if (n > 8) n = 8;
         uint16_t avant[8];
         for (int k = 0; k < n; k++) avant[k] = r[12 + k];
-        for (int k = 0; k < n; k++)
+        for (int k = 3; k < n; k++)      /* 15..19 : pas ecrits par le DSP sur ce chemin, suite de la file */
             if ((r[12 + k] >> 5) == 0) r[12 + k] = calypso_bsp_rssi_apm_suivante(NULL);
         /* [2026-10-21 23:55] SONDE [apm] : en veille (Magnetite) la mesure BA de l'ARFCN 1 tombe au plancher
          * meme avec un MAV par fenetre. PM rendues par le DSP (avant) et apres le modele, MAV des fenetres. */
