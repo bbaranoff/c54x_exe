@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ ${#DESTS[@]} -gt 0 ] || DESTS=("$ICI")
-URL="${FREECALYPSO_URL:-ftp://ftp.freecalypso.org/pub/GSM/Calypso}/dsp-rom-${VERSION}-dump.txt"
+URL="${FREECALYPSO_URL:-https://raw.githubusercontent.com/bbaranoff/fc-magnetite/main/freecalypso-env}/dsp-rom-${VERSION}-dump.txt"
 SOMMES="$ICI/SHA256SUMS.$VERSION"
 ROMS="DROM PDROM PROM0 PROM1 PROM2 PROM3"
 
