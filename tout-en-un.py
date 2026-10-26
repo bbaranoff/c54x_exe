@@ -15,8 +15,10 @@ docs, logs) d'un ou plusieurs dossiers dans UN fichier Markdown, raccourci SANS 
     SORTIE=/chemin.md  EXT="sh py c"  (restreint aux extensions ; defaut : tout fichier texte)
     SEUIL=3 (taille mini d'un groupe)
 
-  Sont ecartes : .git et caches, binaires (ELF, images, .pyc, archives), sauvegardes
-  (.bak*, ~, .orig), LICENSE/COPYING et les sorties precedentes de ce script.
+  Sont ecartes : .git, dossiers caches et caches, binaires (ELF, images, .pyc, archives),
+  sauvegardes (.bak*, ~, .orig, .avant-*), build-tic54x et binutils-*, desassemblage (.dis)
+  et dumps (-dump.txt) de la ROM, signatures (.asc, .sha256), LICENSE/COPYING et les
+  sorties precedentes de ce script.
 """
 import glob
 import hashlib
@@ -32,7 +34,11 @@ SORTIE = os.environ.get("SORTIE") or "/root/c54x_exe-%s.%s" % (time.strftime("%Y
 AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv", "venv",
            "rom", "roms",                              # dumps de ROM (DSP Calypso) : pas a nous, pas dans le dossier
-           "osmo-operator-qmd"}                        # compilation du depot par un autre outil : tout en double
+           "osmo-operator-qmd",                        # compilation du depot par un autre outil : tout en double
+           "build-tic54x"}                             # arbre de construction binutils (config.log, Makefile...)
+IGNORES_PREFIXES = (".", "binutils-")                  # dossiers caches (.avant-isa-*...), sources binutils
+# Fichiers texte inutiles : desassemblage et dumps de la ROM DSP, signatures/empreintes, sauvegardes .avant-*
+INUTILES = re.compile(r"(\.dis|-dump\.txt|\.asc|\.sha256|\.avant-[\w-]+)$")
 BINAIRES = set("png jpg jpeg gif bmp ico webp pdf zip gz tgz bz2 xz 7z tar bin elf o a so pyc pyo pyd "
                "wav mp3 ogg mp4 sqlite db img iso woff woff2 ttf otf".split())
 SAUVEGARDES = re.compile(r"(~|\.orig|\.rej|\.swp|\.bak(-\w+)?)$")
@@ -106,7 +112,7 @@ def langage(chemin):
 
 def texte_legitime(chemin, nom):
     """Fichier texte a nous : ni binaire, ni sauvegarde, ni licence, ni sortie de ce script."""
-    if extension(nom) in BINAIRES or SAUVEGARDES.search(nom) or nom in ("LICENSE", "COPYING"):
+    if extension(nom) in BINAIRES or SAUVEGARDES.search(nom) or INUTILES.search(nom) or nom in ("LICENSE", "COPYING"):
         return False
     if nom.startswith("tout-en-un-"):
         return False
@@ -123,14 +129,14 @@ def texte_legitime(chemin, nom):
 
 
 def dossiers_par_defaut():
-    runs = sorted(glob.glob("/root/grgsm_exe-*"), key=os.path.getmtime)
+    runs = sorted(glob.glob("/root/c54x_exe-*"), key=os.path.getmtime)
     runs = [r for r in runs if os.path.isdir(r)]
     return ["/opt/GSM/c54x_exe"] + ([runs[-1]] if runs else [])
 
 
 def fichiers(dossier):
     for racine, dirs, noms in os.walk(dossier):
-        dirs[:] = sorted(d for d in dirs if d not in IGNORES)
+        dirs[:] = sorted(d for d in dirs if d not in IGNORES and not d.startswith(IGNORES_PREFIXES))
         for n in sorted(noms):
             chemin = os.path.join(racine, n)
             if EXT and extension(n) not in EXT:
