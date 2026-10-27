@@ -1,18 +1,18 @@
 #!/bin/bash
 # fetch-rom.sh [--dest DIR]... [--version 3606|3311] [--force]
 #
-# Recupere la ROM du DSP TI Calypso chez FreeCalypso et la convertit en
-# calypso_dsp.{DROM,PDROM,PROM0..3}.bin, ce que lisent c54x_exe (--rom-dir) et
-# QEMU. Le depot ne contient PAS la ROM : elle est telechargee a la demande, et
-# la conversion (tools/dsp_txt2bin.py) est verifiee contre SHA256SUMS.<version>.
+# Fetches the TI Calypso DSP ROM from FreeCalypso and converts it into
+# calypso_dsp.{DROM,PDROM,PROM0..3}.bin, which c54x_exe (--rom-dir) and QEMU
+# read. The repository does NOT contain the ROM: it is downloaded on demand,
+# and the conversion (tools/dsp_txt2bin.py) is checked against SHA256SUMS.<version>.
 #
-#   --dest DIR   ou ecrire les .bin (repetable ; defaut : ce dossier rom/)
-#   --version V  3606 (defaut, celle de ce depot) ou 3311 (D-Sample)
-#   --force      retelecharger meme si les .bin sont deja la et corrects
+#   --dest DIR   where to write the .bin files (repeatable; default: this rom/ dir)
+#   --version V  3606 (default, the one of this repository) or 3311 (D-Sample)
+#   --force      download again even if the .bin files are present and correct
 #
-# Registers n'est pas de la ROM : calypso_dsp.Registers.bin (instantane de
-# registres, etat de reset du coeur) reste dans le depot et est copie tel quel
-# vers chaque --dest.
+# Registers is not ROM: calypso_dsp.Registers.bin (register snapshot, reset
+# state of the core) stays in the repository and is copied as is to each
+# --dest.
 set -u
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION=3606; FORCE=0; DESTS=()
@@ -31,8 +31,8 @@ URL="${FREECALYPSO_URL:-https://raw.githubusercontent.com/bbaranoff/fc-magnetite
 SOMMES="$ICI/SHA256SUMS.$VERSION"
 ROMS="DROM PDROM PROM0 PROM1 PROM2 PROM3"
 
-# Deja en place et correct dans TOUTES les destinations ? Rien a faire.
-bon() {   # $1 = dossier
+# Already in place and correct in ALL destinations? Nothing to do.
+bon() {   # $1 = directory
     [ -f "$SOMMES" ] || return 1
     local r; for r in $ROMS; do [ -f "$1/calypso_dsp.$r.bin" ] || return 1; done
     ( cd "$1" && sha256sum -c --quiet "$SOMMES" ) >/dev/null 2>&1
@@ -47,8 +47,8 @@ echo "telechargement : $URL"
 if   command -v curl >/dev/null 2>&1; then curl -fsS --retry 2 -o "$TMP/dump.txt" "$URL"
 elif command -v wget >/dev/null 2>&1; then wget -q -O "$TMP/dump.txt" "$URL"
 else echo "ni curl ni wget" >&2; exit 1; fi || { echo "telechargement impossible : $URL" >&2; exit 1; }
-# tools/dsp_txt2bin.py : une sortie par section (calypso_dsp.<SECTION>.bin) ; seules les six
-# sections de ROM sont gardees plus bas, pas « Registers » (instantane de registres).
+# tools/dsp_txt2bin.py: one output per section (calypso_dsp.<SECTION>.bin); only the six
+# ROM sections are kept below, not "Registers" (register snapshot).
 python3 "$ICI/../tools/dsp_txt2bin.py" "$TMP/dump.txt" "$TMP/bin/calypso_dsp.bin" >/dev/null \
     || { echo "conversion du dump impossible" >&2; exit 1; }
 if [ -f "$SOMMES" ]; then

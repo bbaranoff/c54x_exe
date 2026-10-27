@@ -506,9 +506,9 @@ static void sbdet_resp(int attempt)
         }
     }
     if (trace) { unsigned p = fn_cur % 51;
-        /* [2026-09-30] mot decode MEME en CRC faux, et les mesures de la ROM sur le
-         * burst (a_serv_demod : TOA, PM, ANGLE, SNR) : c'est la matiere pour
-         * comparer les SCH decodes aux rates (voir MAILBOX 2026-09-30). */
+        /* Decoded word EVEN on a failed CRC, plus the ROM's measurements on the
+         * burst (a_serv_demod: TOA, PM, ANGLE, SNR): the material for comparing
+         * decoded SCHs against missed ones. */
         printf("  SBresp att=%d fn=%u p51=%u crc=%s a_sch=%04x %04x %04x %04x %04x toa=%d pm=%d angle=%d snr=%d sb_cmd_fn=%u\n", attempt, fn_cur, p,
                (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "FAUX" : "OK",
                dbr()[R_SCH + 0], dbr()[R_SCH + 1], dbr()[R_SCH + 2], dbr()[R_SCH + 3], dbr()[R_SCH + 4],
@@ -948,7 +948,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   }
                   printf("  [vie] fn=%-4u APRES depot en 0x%04x : shift0=%d/280  meilleur shift=%+d avec %d/280\n",
                          fn_cur, ad, ex, best, bex);
-                  if (bex < 200) {   /* pas trouve la : ou est le burst ? */
+                  if (bex < 200) {   /* not there: locate the burst */
                       int ba = -1, bn = 0;
                       for (unsigned a = 0; a + 280 < 0x4000; a++) {
                           int e = 0;
@@ -1439,12 +1439,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                               uint32_t hdr[4] = { g_sb_cmd_fn, (uint32_t)ri,
                                                   g_reels_fn[ri], g_reels_bsic[ri] };
                               fwrite(hdr, 4, 4, fb);
-                              fwrite(g_reels[ri], 2, 296, fb);          /* le burst injecte */
-                              fwrite(&dsp->data[0x0cce], 2, 380, fb);   /* depot BSP */
-                              fwrite(&dsp->data[0x2a00], 2, 256, fb);   /* tampon 1 */
-                              fwrite(&dsp->data[0x2ac0], 2, 256, fb);   /* tampon 2 */
-                              fwrite(&dsp->data[0x2c72], 2, 78, fb);    /* bits souples */
-                              fwrite(g_reels_code[ri], 1, 78, fb);      /* bits emis */
+                              fwrite(g_reels[ri], 2, 296, fb);          /* injected burst */
+                              fwrite(&dsp->data[0x0cce], 2, 380, fb);   /* BSP deposit */
+                              fwrite(&dsp->data[0x2a00], 2, 256, fb);   /* buffer 1 */
+                              fwrite(&dsp->data[0x2ac0], 2, 256, fb);   /* buffer 2 */
+                              fwrite(&dsp->data[0x2c72], 2, 78, fb);    /* soft bits */
+                              fwrite(g_reels_code[ri], 1, 78, fb);      /* transmitted bits */
                               fflush(fb);
                           }
                       }

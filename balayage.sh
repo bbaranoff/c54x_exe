@@ -1,27 +1,25 @@
 #!/usr/bin/env bash
-# balayage.sh - explore les parametres du rejeu dont on n'est PAS sur, et classe
-# les combinaisons par le seul critere qui compte : le nombre de SB VRAIES
-# (CRC OK ET BSIC = celui injecte ET T3 valide ET FN = la trame).
+# balayage.sh - sweep the replay parameters that are not known for sure, and
+# rank the combinations by the only criterion that matters: the number of TRUE
+# SBs (CRC OK AND BSIC = the injected one AND valid T3 AND FN = the frame).
 #
-# [2026-09-18] NE PAS CLASSER SUR crc_ok. Le CRC de la SCH fait 10 bits : une
-# entree aleatoire passerait ~0,1 % du temps, or on mesurait 20 %. Un tel taux
-# ne vient pas du hasard mais d'une entree DEGENERee (quasi constante) sur
-# laquelle le Viterbi converge toujours vers le meme mot. Classer sur crc_ok
-# recompense donc le figement : c'est ainsi qu'une phase de 0,75 est sortie en
-# tete alors qu'elle produisait 12 CRC OK pour UN SEUL mot distinct. Le critere
-# secondaire est le nombre de mots DISTINCTS decodes : lui mesure si la sortie
-# depend de l'entree.
+# Do not rank on crc_ok. The SCH CRC is 10 bits: random input would pass
+# ~0.1 % of the time, while a degenerate (near-constant) input makes the
+# Viterbi converge to the same word every time and passes far more often.
+# Ranking on crc_ok would therefore reward a frozen output. The secondary
+# criterion is the number of DISTINCT decoded words: it measures whether the
+# output depends on the input.
 #
-# Pourquoi : plusieurs boutons du banc sont des hypotheses non verifiees --
-# la phase d'echantillonnage (0,5 = centre du symbole), la marge de tete, le
-# calage de la commande SB (le DSP demodule le burst de la DERNIERE trame de
-# commande, mesure du 18/09), le nombre de commandes, l'ordre RX, la longueur
-# de fenetre DMA. Les regler un par un fait rater les interactions.
+# Several bench knobs are unverified hypotheses: the sampling phase (0.5 =
+# symbol centre), the head margin, the alignment of the SB command (the DSP
+# demodulates the burst of the LAST command frame), the number of commands,
+# the RX order, the DMA window length. Tuning them one at a time misses the
+# interactions, hence a full grid.
 #
-#   ./balayage.sh              balayage complet, resultats dans balayage.tsv
-#   ./balayage.sh --rapide     grille reduite
-#   TRAMES=1200 ./balayage.sh  plus de trames par essai (defaut 600)
-#   sort -t$'\t' -k6,6nr -k5,5nr balayage.tsv | head   relire le classement
+#   ./balayage.sh              full sweep, results in balayage.tsv
+#   ./balayage.sh --rapide     reduced grid
+#   TRAMES=1200 ./balayage.sh  more frames per trial (default 600)
+#   sort -t$'\t' -k6,6nr -k5,5nr balayage.tsv | head   re-read the ranking
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXE="$HERE/c54x_exe"

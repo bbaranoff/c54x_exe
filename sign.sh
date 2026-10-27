@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# sign.sh - empreinte SHA-256 et signature GPG detachee d'un fichier (par defaut proof_toa_23.md).
+# sign.sh - SHA-256 digest and detached GPG signature of a file (default proof_toa_23.md).
 #
-#   ./sign.sh                      signe proof_toa_23.md
-#   ./sign.sh FICHIER              signe FICHIER
-#   ./sign.sh --verify [FICHIER]   verifie l'empreinte et la signature
+#   ./sign.sh                      sign proof_toa_23.md
+#   ./sign.sh FILE                 sign FILE
+#   ./sign.sh --verify [FILE]      verify the digest and the signature
 #
-# Cle : si aucune cle secrete GPG ne correspond a SIGN_UID, une cle ed25519 (signature seule, sans
-# expiration) est generee. Variables : SIGN_UID (identite), SIGN_PASSPHRASE (vide par defaut),
-# GNUPGHOME (trousseau, defaut ~/.gnupg). Produits, a cote du fichier :
-#   FICHIER.sha256     empreinte (format sha256sum)
-#   FICHIER.asc        signature detachee ASCII
-#   FICHIER.pubkey.asc cle publique a diffuser avec le document
+# Key: if no GPG secret key matches SIGN_UID, an ed25519 key (signing only, no expiration)
+# is generated. Variables: SIGN_UID (identity), SIGN_PASSPHRASE (empty by default),
+# GNUPGHOME (keyring, default ~/.gnupg). Outputs, next to the file:
+#   FILE.sha256     digest (sha256sum format)
+#   FILE.asc        ASCII detached signature
+#   FILE.pubkey.asc public key to distribute with the document
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIGN_UID="${SIGN_UID:-proof_toa_23 <bastienbaranoff@gmail.com>}"
@@ -32,11 +32,11 @@ if [ "$verify" = 1 ]; then
     exit $?
 fi
 
-# 1. empreinte
+# 1. digest
 (cd "$D" && sha256sum "$B" > "$B.sha256")
 cat "$F.sha256"
 
-# 2. cle (generee une seule fois)
+# 2. key (generated once)
 if ! gpg --batch --list-secret-keys "=$SIGN_UID" >/dev/null 2>&1; then
     echo "aucune cle secrete pour « $SIGN_UID » : generation d'une cle ed25519 (signature, sans expiration)"
     "${GPG[@]}" --quick-gen-key "$SIGN_UID" ed25519 sign 0
@@ -44,7 +44,7 @@ fi
 FPR="$(gpg --batch --with-colons --list-secret-keys "=$SIGN_UID" | awk -F: '$1=="fpr"{print $10; exit}')"
 echo "cle : $FPR  ($SIGN_UID)"
 
-# 3. signature detachee + cle publique
+# 3. detached signature + public key
 "${GPG[@]}" --armor --detach-sign --local-user "$FPR" --output "$F.asc" "$F"
 gpg --batch --armor --export "$FPR" > "$F.pubkey.asc"
 echo "signature : $F.asc"

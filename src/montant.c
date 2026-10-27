@@ -1,54 +1,49 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * montant.c - le lien montant du montage DSP : RACH, SDCCH, SACCH, FACCH, parole.
+ * montant.c - uplink side of the DSP setup: RACH, SDCCH, SACCH, FACCH, speech.
  *
- * POURQUOI CE FICHIER EXISTE
- * --------------------------
- * Sous CALYPSO_DSP_EXTERN=1, calypso_l1_do_init() appelle calypso_l1_disable()
- * (« couche 1 « grgsm » desactivee (DSP externe) ») : plus aucune couche 1
- * n'est enregistree dans QEMU, donc calypso_l1_do_rach_written() et
- * calypso_l1_do_page_written() (calypso_l1_dispatch.c) sont des no-op. Or
- * c'etaient eux qui, en montage grgsm, publiaient le montant dans les
- * side-bands /dev/shm que pont.py consomme (pont/uplink.py) :
+ * WHY THIS FILE EXISTS
+ * --------------------
+ * Under CALYPSO_DSP_EXTERN=1, calypso_l1_do_init() calls calypso_l1_disable():
+ * no layer 1 is registered in QEMU, so calypso_l1_do_rach_written() and
+ * calypso_l1_do_page_written() (calypso_l1_dispatch.c) are no-ops. In the
+ * grgsm setup those were the functions publishing the uplink into the
+ * /dev/shm side-bands that pont.py consumes (pont/uplink.py):
  *
  *   /dev/shm/calypso_rach           RACH        (ra, bsic)
- *   /dev/shm/calypso_sdcch_ul       SDCCH UL    (bloc L2 de 23 octets)
+ *   /dev/shm/calypso_sdcch_ul       SDCCH UL    (23-byte L2 block)
  *   /dev/shm/calypso_tch_facch_ul   FACCH UL
  *   /dev/shm/calypso_tch_sacch_ul   SACCH UL
- *   /dev/shm/calypso_tch_ul         parole (anneau de trames FR)
+ *   /dev/shm/calypso_tch_ul         speech (ring of FR frames)
  *
- * Resultat mesure le 2026-09-21 : le firmware emettait bien ses
- * L1CTL_RACH_REQ, le mobile comptait ses « RANDOM ACCESS (requests left 8..4) »,
- * mais pont.py affichait « UL bursts=0 rach=0 » et /dev/shm/calypso_rach
- * n'existait meme pas. Sans RACH il n'y a pas d'IMM ASS, donc pas de SDCCH,
- * donc jamais de LOCATION UPDATING ACCEPT.
+ * Without the RACH there is no IMM ASS, hence no SDCCH and never a LOCATION
+ * UPDATING ACCEPT.
  *
- * COMMENT
- * -------
- * Ce processus tient l'API RAM partagee : on reprend donc, a l'identique, les
- * captures de qosmo-grgsm/hw/arm/calypso/calypso_l1_grgsm.c, mais declenchees
- * par SCRUTATION une fois par trame au lieu des callbacks d'ecriture de QEMU.
- * Le point d'appel (pont.c, fin du PONT_TICK) correspond a la fin du scenario
- * de l'ARM : dsp_end_scenario() vient d'ecrire d_dsp_page = B_GSM_TASK | page,
- * et les mots de tache de cette page W sont a jour.
+ * HOW
+ * ---
+ * This process holds the shared API RAM, so the captures of
+ * qosmo-grgsm/hw/arm/calypso/calypso_l1_grgsm.c are reproduced as is, but
+ * triggered by POLLING once per frame instead of QEMU's write callbacks. The
+ * call site (pont.c, end of PONT_TICK) matches the end of the ARM scenario:
+ * dsp_end_scenario() has just written d_dsp_page = B_GSM_TASK | page, and the
+ * task words of that W page are current.
  *
- * Le RACH est le seul cas ou la scrutation n'est pas equivalente a un
- * callback : le firmware ecrit d_rach (prim_rach.c:72) puis d_task_ra, et
- * personne ne les efface ensuite (sync.c:307 ne les remet a zero que sur
- * ABORT). On declenche donc sur FRONT : premiere valeur non nulle, ou valeur
- * differente de la precedente. Angle mort assume : deux tentatives de suite
- * avec le meme (RA, BSIC), soit ~1/256 puisque la RA est tiree au hasard par
- * gsm48_rr ; la tentative suivante passe. MONTANT_CONSOMME_RACH=1 remet d_rach
- * a zero apres publication, ce qui rend le declenchement exact — au prix d'une
- * ecriture dans la fenetre API que la ROM pourrait lire.
+ * The RACH is the only case where polling is not equivalent to a callback:
+ * the firmware writes d_rach (prim_rach.c:72) then d_task_ra, and nobody
+ * clears them afterwards (sync.c:307 only zeroes them on ABORT). Triggering
+ * is therefore EDGE based: first non-zero value, or a value different from
+ * the previous one. Accepted blind spot: two consecutive attempts with the
+ * same (RA, BSIC), about 1/256 since gsm48_rr draws the RA at random; the
+ * next attempt goes through. MONTANT_CONSOMME_RACH=1 zeroes d_rach after
+ * publication, which makes the trigger exact at the cost of a write into the
+ * API window the ROM might read.
  *
- * Ce module ne parle pas TRXD : calypso_bsp_send_rach_ra() existe (code mort
- * depuis le refactor « couche 1 enregistree ») mais enverrait l'access-burst
- * sur 127.0.0.1:5702, c'est-a-dire la socket DESCENDANTE de pont.py, dont
- * run_data() fait « self.bts_data = addr » sur tout paquet recu : le burst
- * serait relu comme une descente et l'adresse de la BTS ecrasee. La voie des
- * side-bands passe par la machinerie montante de pont.py, celle qui est deja
- * eprouvee en montage grgsm.
+ * This module does not speak TRXD: calypso_bsp_send_rach_ra() exists (dead
+ * code) but would send the access burst to 127.0.0.1:5702, the DOWNLINK
+ * socket of pont.py, whose run_data() does "self.bts_data = addr" on every
+ * packet received: the burst would be read back as downlink and the BTS
+ * address overwritten. The side-band path goes through the uplink machinery
+ * of pont.py, the one already proven in the grgsm setup.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +57,7 @@
 #include "calypso_bsp.h"
 #include "montant.h"
 #include <osmocom/core/bits.h>
-#include <osmocom/coding/gsm0503_coding.h>   /* prothese FACCH descendante */
+#include <osmocom/coding/gsm0503_coding.h>   /* downlink FACCH prosthesis */
 
 #define SHM_RACH        "/dev/shm/calypso_rach"
 #define SHM_SDCCH_UL    "/dev/shm/calypso_sdcch_ul"
@@ -71,78 +66,70 @@
 #define SHM_TCH_UL      "/dev/shm/calypso_tch_ul"
 #define SHM_KC          "/dev/shm/calypso_kc_l1"
 
-/* Tailles et dispositions : pont/uplink.py. */
-#define REC_RACH        16      /* lu 12 : seq(4) ra(1) bsic(1) ..(2) fn(4)   */
-#define REC_L2          48      /* lu 39 : seq(4) l1s(4) fn(4) task(2) . p51(1) . l2(23) */
+/* Sizes and layouts: pont/uplink.py. */
+#define REC_RACH        16      /* 12 read: seq(4) ra(1) bsic(1) ..(2) fn(4)   */
+#define REC_L2          48      /* 39 read: seq(4) l1s(4) fn(4) task(2) . p51(1) . l2(23) */
 #define TCH_UL_SLOTS    16
 #define TCH_UL_SLOT_SZ  64      /* TCH_UL_SLOT       */
 #define TCH_UL_FR_OFS   16      /* TCH_UL_FR_OFS     */
 #define FR_BYTES        33
 
-/* Fenetre de recherche de l'en-tete L2 dans a_cu (SDCCH_UL_WINDOW_OFS de
+/* Search window for the L2 header in a_cu (SDCCH_UL_WINDOW_OFS of
  * calypso_l1_grgsm.c). */
 #define SDCCH_UL_WINDOW_OFS  6
 
-/* Anti-doublon SDCCH montant.
+/* Uplink SDCCH duplicate filter (heuristic path).
  *
- * [2026-09-21, mesure] La couche 1 gr-gsm republiait un bloc identique passe
- * 60 trames (SDCCH_UL_DEDUP_TICKS). Repris tel quel ici, ca tuait la
- * connexion : le firmware laisse son bloc dans a_cu, on le republiait, le
- * pont le reemettait, et le BSC repondait
+ * The firmware leaves its block in a_cu; republishing it would make the bridge
+ * resend it and the BSC would see a second SABM on an already established
+ * link ("SABM frame with information not allowed in this state"), dropping
+ * the channel in the middle of the procedure.
  *
- *   lchan(0-0-1-SDCCH8-0){ESTABLISHED}: ERROR INDICATION
- *     cause=SABM frame with information not allowed in this state
- *
- * -- un deuxieme SABM sur un lien deja etabli. Le canal tombait, le MSC
- * passait en MSC_A_ST_RELEASING et repondait LOCATION UPDATING REJECT au
- * milieu de la procedure, apres avoir pourtant mene l'IDENTITY REQUEST et
- * l'AUTHENTICATION REQUEST a bien.
- *
- * Donc : un bloc n'est publie QUE si son contenu change. MONTANT_SDCCH_REPETE
- * = N retablit une republication du meme bloc au bout de N trames (0 = jamais,
- * le defaut). Une retransmission LAPDm du mobile porte les memes octets et
- * serait donc avalee ; c'est le compromis assume, l'inverse casse le lien a
- * coup sur. */
+ * So a block is published ONLY when its content changes. MONTANT_SDCCH_REPETE
+ * = N re-enables republication of the same block after N frames (0 = never,
+ * the default). A LAPDm retransmission by the mobile carries the same bytes
+ * and is therefore swallowed; this is the accepted trade-off. */
 #define SDCCH_UL_REPETE_DEFAUT 0
 
-/* Nombre de trames minimum entre deux RACH publies : une tentative du mobile
- * dure plusieurs trames et le meme d_rach reste lisible entre-temps. */
+/* Minimum number of frames between two published RACHs: one attempt by the
+ * mobile spans several frames and the same d_rach stays readable meanwhile. */
 #define RACH_GARDE_TRAMES 4
 
 static struct {
     unsigned long rach, sdcch, facch, sacch, parole;
     uint16_t prev_rach;
     uint32_t fn_rach;
-    bool     rach_vu;      /* au moins un RACH publie              */
-    bool     base_rach;    /* la valeur de reference a ete prise   */
-    /* Dernier bloc SDCCH montant publie, pour l'anti-doublon. */
+    bool     rach_vu;      /* at least one RACH published          */
+    bool     base_rach;    /* the reference value has been taken   */
+    /* Last uplink SDCCH block published, for the duplicate filter. */
     uint8_t  sdcch_dernier[23];
     uint32_t sdcch_trame;
     bool     sdcch_a_dernier;
-    bool     blud_vu;          /* a_cu a deja annonce un bloc par B_BLUD   */
-    unsigned sans_blud;        /* taches montantes vues sans B_BLUD        */
+    bool     blud_vu;          /* a_cu has already announced a block via B_BLUD */
+    unsigned sans_blud;        /* uplink tasks seen without B_BLUD         */
     bool     dedie_arme;
-    /* [2026-09-23] Bascule SDCCH <-> TCH suivie par le firmware (voir
-     * suivre_tache_tch). Le dernier SDCCH lu dans calypso_dcch_cfg est garde
-     * pour y revenir ; l'annonce du TCH vient du pont (calypso_tch_cfg). */
+    /* SDCCH <-> TCH switch followed from the firmware tasks (see
+     * suivre_tache_tch). The last SDCCH read from calypso_dcch_cfg is kept to
+     * return to it; the TCH announcement comes from the bridge
+     * (calypso_tch_cfg). */
     int      sd_tn, sd_genre, sd_ss;
-    bool     sd_valide;        /* un SDCCH est connu (dcch_cfg arme)       */
-    int      tch_tn, tch_tsc;  /* annonce du pont : 0 = pas de TCH annonce */
-    bool     sur_tch;          /* le BSP joue l'intervalle du TCH          */
+    bool     sd_valide;        /* an SDCCH is known (dcch_cfg armed)       */
+    int      tch_tn, tch_tsc;  /* bridge announcement: 0 = no TCH announced */
+    bool     sur_tch;          /* the BSP plays the TCH timeslot           */
 } g;
-static int g_tn_tch_sb;   /* TS du TCH vu par le side-band (0 : TS0 / pas de TCH) */
+static int g_tn_tch_sb;   /* TCH TS seen on the side-band (0: TS0 / no TCH) */
 
-/* Taches de lecture que l'ARM pose dans d_task_d de la page W
- * (osmocom-bb firmware, include/calypso/l1_environment.h:45-52). La lecture
- * d'un bloc SDCCH/SACCH passe par ALLC (prim_rx_nb.c:200), comme la BCCH et
- * la CCCH ; DDL/ADL sont gardees par prudence. */
+/* Read tasks the ARM posts in d_task_d of the W page (osmocom-bb firmware,
+ * include/calypso/l1_environment.h:45-52). Reading an SDCCH/SACCH block goes
+ * through ALLC (prim_rx_nb.c:200), like the BCCH and the CCCH; DDL/ADL are
+ * kept as a precaution. */
 #ifndef DDL_DSP_TASK
 #define DDL_DSP_TASK 26
 #endif
 #ifndef ADL_DSP_TASK
 #define ADL_DSP_TASK 27
 #endif
-/* d_tch_mode : quatrieme mot du NDB (dsp_api.h:121, rejouer.c:623). */
+/* d_tch_mode: fourth word of the NDB (dsp_api.h:121, rejouer.c:623). */
 #define NDB_D_TCH_MODE 0x006u
 
 static int journal(void)
@@ -150,7 +137,7 @@ static int journal(void)
     static int n = -1;
     if (n < 0) {
         const char *e = calypso_getenv("MONTANT_DEBUG");
-        n = (e && *e) ? atoi(e) : 20;   /* les 20 premiers evenements, par defaut */
+        n = (e && *e) ? atoi(e) : 20;   /* the first 20 events, by default */
     }
     return n;
 }
@@ -190,18 +177,11 @@ static void publier_l2(int *fdp, const char *chemin, uint32_t *seq,
     sb_ecrire(*fdp, buf, sizeof(buf), 0);
 }
 
-/* [2026-09-30] LA PAROLE MONTANTE, ENREGISTREE. Run banc-max de 00:07 : l'appel
- * s'etablit, mais le ton 1 kHz injecte au micro ne revient pas ; les trames
- * descendantes a_dd, bit-exactes avec ce que la BTS a emis
- * (tools/comparer_parole.py, 1116/1117), decodees par libgsm ne le contiennent
- * pas non plus : ce qu'Asterisk a renvoye etait deja du bruit, le defaut est
- * MONTANT. La conversion TI -> FR ci-dessous est l'inverse exact de gapk
- * (aller-retour identique au bit pres, verifie) et le firmware ecrit a_du en
- * octet fort d'abord comme prendre_ul le lit. Reste : la capture GAPK, le
- * firmware, ou le pont (codage, A5 montant). Pour trancher au prochain appel,
- * chaque trame montante est notee ici, brute TI (type 1) et convertie FR
- * (type 0), meme format de 48 octets que noter_dl : tools/decoder_add.py les
- * decode avec libgsm et cherche le ton. */
+/* UPLINK SPEECH RECORDING. Every uplink frame is logged here, raw TI (type 1)
+ * and converted to FR (type 0), in the same 48-byte record format as noter_dl;
+ * tools/decoder_add.py decodes them with libgsm and looks for the test tone.
+ * The file is reset at each call (more than 500 frames without a record),
+ * 16000 records at most. */
 static void noter_ul(uint32_t fn, uint8_t type, uint16_t etat, const uint8_t *data, int n)
 {
     static FILE *f;
@@ -239,28 +219,26 @@ static void publier_parole(const uint8_t *fr, uint32_t fn)
     memcpy(buf + 4, &fn, 4);
     memcpy(buf + 8, &fn, 4);
     memcpy(buf + TCH_UL_FR_OFS, fr, FR_BYTES);
-    /* L'entete (le compteur d'ecriture) en dernier : pont.py lit d'abord
-     * l'entete, puis la case ; l'inverse lui livrerait une case a moitie ecrite. */
+    /* Header (the write counter) last: pont.py reads the header first, then
+     * the slot; the other order would hand it a half-written slot. */
     sb_ecrire(fd, buf, sizeof(buf), 8 + (off_t)((seq - 1) % TCH_UL_SLOTS) * TCH_UL_SLOT_SZ);
     sb_ecrire(fd, &seq, 4, 0);
 }
 
-/* Bloc montant depose par le firmware dans le NDB : mot 0 = en-tete (B_BLUD
- * signale « bloc pret »), donnees a partir du mot 3. Les 33 octets de parole
- * sont ranges octet fort d'abord, les 23 octets L2 octet faible d'abord.
+/* Uplink block deposited by the firmware in the NDB: word 0 = header (B_BLUD
+ * flags "block ready"), data from word 3 on. The 33 speech bytes are stored
+ * high byte first, the 23 L2 bytes low byte first.
  *
- * [2026-10-04] B_BLUD EST A LA ROM, PAS A L'HOTE. Cette fonction effacait le drapeau
- * « comme le ferait le DSP » -- mais AVANT lui. Pour a_cu (SDCCH, SACCH) la ROM n'en a
- * pas besoin : elle code le bloc des la tache DUL/AUL posee, et le drapeau tombe au tick
- * suivant (rejeu REJEU_BLUD : pose a T, efface par la ROM a T+1, bursts de T+1 a T+4).
- * Pour a_fu (FACCH) et a_du (parole), la tache TCHT s'en sert pour decider FACCH ou
- * parole, et la ROM ne le lit qu'au tick suivant : montant_scruter, en fin de tick T,
- * l'avait deja efface -> la ROM n'a jamais emis UN SEUL burst FACCH ni de parole
- * (appels de 18:30, 18:31, 18:59, 19:02 : la BTS ne recoit sur le TS2 que les bursts
- * SACCH, fn%26 = 12, pas de UA au SABM, retour sur le SDCCH apres 6 SABM ; le rejeu, qui
- * ne joue pas montant.c, montre les 8 bursts FACCH a fn%26 = 4..11). Le drapeau est donc
- * laisse a la ROM ; un bloc n'est publie qu'une fois par pose (le drapeau vu retombe entre
- * deux, ou contenu different). MONTANT_CONSOMME_BLUD=1 : ancien comportement. */
+ * B_BLUD BELONGS TO THE ROM, NOT TO THE HOST. For a_cu (SDCCH, SACCH) the ROM
+ * encodes the block as soon as the DUL/AUL task is posted and the flag drops
+ * at the next tick (posted at T, cleared by the ROM at T+1, bursts from T+1 to
+ * T+4). For a_fu (FACCH) and a_du (speech) the TCHT task uses the flag to
+ * choose between FACCH and speech, and the ROM only reads it at the next
+ * tick: clearing it here at the end of tick T would prevent the ROM from ever
+ * sending a FACCH or speech burst. The flag is therefore left to the ROM; a
+ * block is published once per posting (flag seen dropping in between, or
+ * different content). MONTANT_CONSOMME_BLUD=1: the host clears the flag after
+ * reading. */
 static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
 {
     uint16_t *w = &api_ram[(API_NDB + off) / 2];
@@ -278,7 +256,7 @@ static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
     for (k = 0; k < nvu && vu[k].off != off; k++) { }
     if (k == nvu && nvu < 4) { vu[nvu].off = off; vu[nvu].publie = false; nvu++; }
     if (!(w[0] & B_BLUD)) {
-        if (k < nvu) vu[k].publie = false;     /* la ROM a consomme : la prochaine pose se publie */
+        if (k < nvu) vu[k].publie = false;     /* the ROM consumed it: the next posting is published */
         return false;
     }
     for (int i = 0; i < n; i += 2) {
@@ -295,25 +273,22 @@ static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
         return true;
     }
     if (k < nvu) {
-        if (vu[k].publie && memcmp(vu[k].contenu, out, (size_t)n) == 0) return false;   /* deja publie, pas encore consomme */
+        if (vu[k].publie && memcmp(vu[k].contenu, out, (size_t)n) == 0) return false;   /* already published, not yet consumed */
         vu[k].publie = true;
         memcpy(vu[k].contenu, out, (size_t)n);
     }
     return true;
 }
 
-/* [2026-09-23] LA PAROLE MONTANTE EST AU FORMAT TI, LE PONT ATTEND DU FR STANDARD.
- * mobile_pont.cfg : io-tch-format ti. gapk convertit donc la voix du micro
- * au format du DSP TI (osmo-gapk fmt_ti.c, ti_fr_from_canon), le firmware la
- * copie telle quelle dans a_du, et le pont la passait a
- * gsm0503_tch_fr_encode(..., net_order=1), qui attend du FR TS 101 318 (le
- * format RTP « gsm », nibble 0xd en tete). L'ordre des 260 bits n'est pas le
- * meme : la BTS recevait une parole melangee, l'echo test la renvoyait et le
- * decodeur du mobile la rendait en bruit sature (descendant colle a +-12882).
- * Le descendant, lui, reste TI de bout en bout : il etait propre tant qu'il ne
- * portait pas la voix de l'operateur. Conversion reprise de fmt_ti.c
- * (ti_fr_to_canon) puis fmt_gsm.c (gsm_from_canon). MONTANT_PAROLE_TI=0 :
- * passage brut, comme avant. */
+/* UPLINK SPEECH IS IN TI FORMAT, THE BRIDGE EXPECTS STANDARD FR.
+ * mobile_pont.cfg: io-tch-format ti. gapk converts the microphone voice to
+ * the TI DSP format (osmo-gapk fmt_ti.c, ti_fr_from_canon), the firmware
+ * copies it as is into a_du, and the bridge passes it to
+ * gsm0503_tch_fr_encode(..., net_order=1), which expects TS 101 318 FR (the
+ * RTP "gsm" format, leading nibble 0xd). The 260-bit order differs, so the
+ * block is converted here as in fmt_ti.c (ti_fr_to_canon) then fmt_gsm.c
+ * (gsm_from_canon). The downlink stays TI end to end. MONTANT_PAROLE_TI=0:
+ * raw pass-through. */
 #include <osmocom/codec/codec.h>
 static int bit_msb(const uint8_t *b, int i) { return (b[i >> 3] >> (7 - (i & 7))) & 1; }
 static void mettre_bit_msb(uint8_t *b, int i, int v)
@@ -332,7 +307,7 @@ static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
         int si = i >= 182 ? i + 4 : i;
         mettre_bit_msb(canon, gsm610_bitorder[i], bit_msb(fr, si));
     }
-    fr[0] = (uint8_t)(0xd0 | (canon[0] >> 4));      /* gsm_from_canon : 0xd + 260 bits */
+    fr[0] = (uint8_t)(0xd0 | (canon[0] >> 4));      /* gsm_from_canon: 0xd + 260 bits */
     for (int i = 1; i < FR_BYTES; i++)
         fr[i] = (uint8_t)((canon[i - 1] << 4) | (canon[i] >> 4));
 }
@@ -340,11 +315,12 @@ static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
 static int fd_facch = -2;
 static uint32_t seq_facch;
 
-/* [2026-10-22 13:50] LA FACCH MONTANTE AU GO. L'ARM pose a_fu (B_BLUD) entre la phase A et le GO ; la ROM le
- * lit et efface B_BLUD des la phase B de la MEME trame, montant_scruter (fin de trame) le trouvait le plus
- * souvent deja retombe : appel de 13:34, firmware « DL: >N200 of SABM » (34 SABM poses), un seul bloc FACCH
- * publie (et pas le SABM) -> la BTS n'a jamais repondu UA. Appele par pont.c au GO, avant que la ROM tourne ;
- * l'anti-doublon de prendre_ul() empeche montant_scruter de republier le meme bloc. MONTANT_FU_AU_GO=0 coupe. */
+/* UPLINK FACCH AT THE GO. The ARM posts a_fu (B_BLUD) between phase A and the GO;
+ * the ROM reads it and clears B_BLUD during phase B of the SAME frame, so
+ * montant_scruter (end of frame) mostly finds the flag already dropped. Called
+ * by pont.c at the GO, before the ROM runs; the duplicate filter of
+ * prendre_ul() keeps montant_scruter from republishing the same block.
+ * MONTANT_FU_AU_GO=0 disables it. */
 void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
 {
     static int on = -1;
@@ -356,20 +332,21 @@ void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
         if (g.facch++ < (unsigned long)journal())
             printf("  [montant] FACCH UL fn=%u (au GO)\n", fn);
     }
-    /* [2026-10-22] LA PAROLE MONTANTE AU GO. a_du (NDB_A_DU_1) souffre du meme mal que a_fu : la ROM
-     * pose B_BLUD puis l'efface des la phase B de la trame ; capture_tch_ul (montant_scruter, fin de
-     * trame) arrivait trop tard, prendre_ul() rendait false -> publier_parole() jamais appelee, SHM parole
-     * absent, pont ul=0 (aucune voix montante). On la capte ici au GO, symetrique a la FACCH ci-dessus.
-     * L'anti-doublon de prendre_ul() (dedup par contenu, vu[]) empeche le double envoi quand
-     * capture_tch_ul la retente en fin de trame. MONTANT_DU_AU_GO=0 coupe. */
+    /* UPLINK SPEECH AT THE GO. a_du (NDB_A_DU_1) behaves like a_fu: B_BLUD is
+     * cleared by the ROM during phase B of the frame, so capture_tch_ul
+     * (montant_scruter, end of frame) comes too late. It is captured here at
+     * the GO, symmetric to the FACCH above. The duplicate filter of
+     * prendre_ul() (content dedup, vu[]) prevents a double send when
+     * capture_tch_ul retries at the end of the frame. MONTANT_DU_AU_GO=0
+     * disables it. */
     static int du = -1;
     if (du < 0) { const char *e = calypso_getenv("MONTANT_DU_AU_GO"); du = !(e && *e == '0'); }
     if (du) {
         uint8_t fr[FR_BYTES];
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
-            noter_ul(fn, 1, TCHT_DSP_TASK, fr, FR_BYTES);   /* brute, format TI (a_du) */
+            noter_ul(fn, 1, TCHT_DSP_TASK, fr, FR_BYTES);   /* raw, TI format (a_du) */
             parole_ti_vers_fr(fr);
-            noter_ul(fn, 0, TCHT_DSP_TASK, fr, FR_BYTES);   /* convertie FR, ce que recoit le pont */
+            noter_ul(fn, 0, TCHT_DSP_TASK, fr, FR_BYTES);   /* converted to FR, what the bridge gets */
             publier_parole(fr, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u (au GO)\n", fn);
@@ -391,9 +368,9 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
                 printf("  [montant] FACCH UL fn=%u task=0x%04x\n", fn, task_u);
         }
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
-            noter_ul(fn, 1, task_u, fr, FR_BYTES);      /* brute, format TI (a_du) */
+            noter_ul(fn, 1, task_u, fr, FR_BYTES);      /* raw, TI format (a_du) */
             parole_ti_vers_fr(fr);
-            noter_ul(fn, 0, task_u, fr, FR_BYTES);      /* convertie FR, ce que recoit le pont */
+            noter_ul(fn, 0, task_u, fr, FR_BYTES);      /* converted to FR, what the bridge gets */
             publier_parole(fr, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u\n", fn);
@@ -413,46 +390,32 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
     }
 }
 
-/* SDCCH / SACCH montant.
+/* Uplink SDCCH / SACCH.
  *
- * [2026-09-21] Le firmware ANNONCE son bloc, il n'y a rien a deviner :
- * prim_tx_nb.c:80-101 ecrit dans a_cu l'en-tete `(1 << B_BLUD)`, deux mots a
- * zero, puis les 23 octets L2 a partir du mot 3 -- la disposition exacte que
- * prendre_ul() sait lire. Le drapeau est a usage unique : on le consomme, et
- * un bloc = une publication.
+ * The firmware ANNOUNCES its block, nothing has to be guessed:
+ * prim_tx_nb.c:80-101 writes into a_cu the header `(1 << B_BLUD)`, two zero
+ * words, then the 23 L2 bytes from word 3 on -- exactly the layout that
+ * prendre_ul() reads. The flag is single-use: one block = one publication.
  *
- * Avant d'avoir lu ce code, cette fonction reprenait la fenetre heuristique de
- * la couche 1 gr-gsm (balayage d'en-tete LAPDm dans a_cu+6) avec un anti-
- * doublon sur le contenu. Trois echecs de suite en sont sortis : republication
- * du meme SABM toutes les 60 trames -> « SABM frame with information not
- * allowed in this state » et canal casse en pleine procedure ; puis
- * comparaison sur 23 octets dont la friture de fin bouge -> 32 blocs
- * « neufs » ; puis verrou « un seul SABM par connexion » -> plus aucun SABM
- * des que le verrou restait arme. Le drapeau du firmware rend tout ca inutile.
- *
- * MONTANT_SDCCH_FENETRE=1 force l'ancienne voie heuristique, et elle prend le
- * relais toute seule si B_BLUD ne se leve jamais alors que le firmware pose
- * des taches montantes (le cas ou la ROM consommerait le drapeau avant nous).
+ * MONTANT_SDCCH_FENETRE=1 forces the heuristic path (LAPDm header scan in
+ * a_cu+6 with a content-based duplicate filter, as in the gr-gsm layer 1), and
+ * that path takes over by itself if B_BLUD never rises while the firmware
+ * posts uplink tasks (the case where the ROM would consume the flag first).
  */
-/* PEREMPTION DE L'ANTI-DOUBLON (voie heuristique seulement).
+/* DUPLICATE FILTER EXPIRY (heuristic path only).
  *
- * [2026-09-21] La couche 1 gr-gsm republie un bloc identique passe 60 ticks
- * (calypso_l1_grgsm.c:673). Ce n'est PAS un moteur de renvoi : dans ce
- * montage-la, QEMU efface d_task_u a chaque tick (calypso_trx.c, branche non
- * pont), donc la couche 1 ne voit une tache montante que sur les trames ou le
- * firmware vient de la poser. Les 60 ticks ne font qu'empecher de publier
- * quatre fois le meme bloc (un par burst) tout en laissant passer une VRAIE
- * retransmission du mobile, quand son T200 le fait re-poster.
+ * The gr-gsm layer 1 republishes an identical block after 60 ticks
+ * (calypso_l1_grgsm.c:673). This is NOT a retransmission engine: in that
+ * setup QEMU clears d_task_u at every tick (calypso_trx.c, non-bridge branch),
+ * so layer 1 only sees an uplink task on the frames where the firmware has
+ * just posted it. The 60 ticks only prevent publishing the same block four
+ * times (once per burst) while letting a REAL retransmission by the mobile
+ * through, when its T200 makes it re-post.
  *
- * Sur la voie B_BLUD ce probleme n'existe pas : le drapeau est a usage unique,
- * une pose = une publication, et une retransmission du mobile repose le
- * drapeau. Rien a temporiser.
- *
- * Avoir lu ces 60 ticks comme un renvoi a coute un banc : le SABM repartait
- * apres l'etablissement du lien, et le BTS repondait « SABM frame with
- * information not allowed in this state » -- 4 ERROR INDICATION pour 4
- * ESTABLISHED. */
-#define SDCCH_TTL_DEFAUT      60   /* trames, comme SDCCH_UL_DEDUP_TICKS */
+ * On the B_BLUD path this problem does not exist: the flag is single-use, one
+ * posting = one publication, and a retransmission by the mobile raises the
+ * flag again. Nothing to delay. */
+#define SDCCH_TTL_DEFAUT      60   /* frames, like SDCCH_UL_DEDUP_TICKS */
 
 static int sabm_ttl(void)
 {
@@ -460,7 +423,7 @@ static int sabm_ttl(void)
     if (v < 0) {
         const char *e = calypso_getenv("MONTANT_SDCCH_TTL");
         if (!e || !*e) {
-            e = calypso_getenv("MONTANT_SDCCH_REPETE");   /* ancien nom */
+            e = calypso_getenv("MONTANT_SDCCH_REPETE");   /* alias */
         }
         v = (e && *e) ? atoi(e) : SDCCH_TTL_DEFAUT;
     }
@@ -471,7 +434,7 @@ static void publier_sdcch(uint16_t task_u, uint32_t fn, const uint8_t *l2)
 {
     static int fd = -2;
     static uint32_t seq;
-    if (l2[1] == 0x03) {      /* trame vide (UI sans donnee) */
+    if (l2[1] == 0x03) {      /* empty frame (UI without data) */
         return;
     }
     publier_l2(&fd, SHM_SDCCH_UL, &seq, l2, task_u, fn);
@@ -482,8 +445,8 @@ static void publier_sdcch(uint16_t task_u, uint32_t fn, const uint8_t *l2)
     }
 }
 
-/* L'ancienne voie : balayage de la fenetre, anti-doublon sur le contenu
- * utile, republication apres MONTANT_SDCCH_REPETE trames (0 = jamais). */
+/* Heuristic path: window scan, duplicate filter on the useful content,
+ * republication after MONTANT_SDCCH_REPETE frames (0 = never). */
 static void capture_sdcch_fenetre(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
 {
     uint8_t fen[30];
@@ -533,10 +496,10 @@ static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
             return;
         }
         if (g.blud_vu) {
-            return;               /* le drapeau fonctionne : rien a publier */
+            return;               /* the flag works: nothing to publish */
         }
-        /* Jamais vu B_BLUD alors que le firmware pose des taches montantes :
-         * la ROM le consomme peut-etre avant nous. On bascule sur la fenetre. */
+        /* B_BLUD never seen while the firmware posts uplink tasks: the ROM
+         * may consume it first. Switch to the window scan. */
         if (++g.sans_blud == 400) {
             printf("  [montant] a_cu : B_BLUD jamais vu en %u taches montantes, "
                    "bascule sur la fenetre heuristique\n", g.sans_blud);
@@ -548,21 +511,13 @@ static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
     capture_sdcch_fenetre(api_ram, task_u, fn);
 }
 
-/* Le canal dedie, lu directement dans le side-band que le tap L1CTL de QEMU
- * ecrit (calypso_dcch_tap.c) et que pont.py lit deja.
+/* The dedicated channel, read directly from the side-band written by the
+ * QEMU L1CTL tap (calypso_dcch_tap.c) and already read by pont.py.
  *
- * [2026-09-21, mesure] Le canal etait annonce au DSP par un message du pont,
- * PONT_DCCH. Trace du banc : QEMU imprime bien « [dcch] canal dedie arme :
- * chan_nr=0x51 SDCCH/8 SS=2 TN=1 », et cote DSP, RIEN -- ni « pont : canal
- * dedie », ni « [BSP] canal dedie arme », ni message inconnu. Le message se
- * perd dans le pas-a-pas en deux phases (la boucle d'attente du PONT_GO jette
- * tout ce qui n'est pas un GO). Resultat : le BSP continuait de livrer TS0
- * pendant que l'ARM ecoutait TS1, et TOUS les blocs de la descente dediee
- * echouaient au code de Fire.
- *
- * Le fichier, lui, ne depend d'aucun protocole : une lecture de 8 octets par
- * trame, et le meme numero de sequence que pont.py utilise pour savoir s'il a
- * change. */
+ * A PONT_DCCH message from the bridge would be lost in the two-phase lock
+ * step (the PONT_GO wait loop discards everything that is not a GO). The
+ * file depends on no protocol: one 8-byte read per frame, and the same
+ * sequence number pont.py uses to know whether it changed. */
 static void scruter_dcch(uint32_t fn)
 {
     static int fd = -2;
@@ -570,20 +525,15 @@ static void scruter_dcch(uint32_t fn)
     static uint32_t dernier_essai = UINT32_MAX;
 
     if (fd < 0) {
-        /* [2026-10-03] Un essai d'ouverture par trame au plus. L'ancienne garde `fn < prochain_essai`
-         * n'etait pas modulaire : apres le bouclage de l'hypertrame (~3 h 29) elle bloquait toute
-         * reouverture jusqu'a ce que fn rattrape l'ancienne valeur (revue de code 2026-10-03). */
+        /* At most one open attempt per frame, compared by equality so that
+         * the hyperframe wrap-around (~3 h 29) never blocks a reopen. */
         if (fn == dernier_essai) {
             return;
         }
-        /* [2026-09-23] A CHAQUE TRAME, plus toutes les 200. run.sh efface les
-         * side-bands au demarrage : le fichier n'apparait qu'a la premiere
-         * ecriture (tap QEMU ici, pont pour calypso_tch_cfg), et on le voyait
-         * jusqu'a 200 trames trop tard. Pour calypso_tch_cfg c'etait fatal au
-         * premier appel apres chaque relance : le firmware posait sa tache TCH
-         * 113 a 164 trames avant que l'annonce soit lue (« sans annonce du
-         * pont »), l'UA de l'assignation se perdait, ASSIGNMENT FAILURE. Un
-         * open() qui echoue coute une microseconde. */
+        /* Retried EVERY frame: run.sh clears the side-bands at startup and
+         * the file only appears at the first write (QEMU tap here, bridge for
+         * calypso_tch_cfg); any slower polling would see the announcement
+         * frames too late. A failing open() costs a microsecond. */
         dernier_essai = fn;
         fd = open("/dev/shm/calypso_dcch_cfg", O_RDONLY);
         if (fd < 0) {
@@ -602,26 +552,27 @@ static void scruter_dcch(uint32_t fn)
     seq = s2;
     int genre = b[4], ss = b[5], tn = b[6];
     if (genre == 4) {
-        /* [2026-10-15] PDCH (GPRS, firmware l1gprs_fw.c, tap calypso_dcch_tap.c) : le BSP
-         * joue tout le TN, comme un TCH ; pas de SDCCH memorise, pas de bascule TCH. */
+        /* PDCH (GPRS, firmware l1gprs_fw.c, tap calypso_dcch_tap.c): the BSP
+         * plays the whole TN, like a TCH; no SDCCH memorised, no TCH switch. */
         printf("  [montant] canal dedie (side-band seq=%u) : PDCH TS%d (GPRS), toutes les trames au BSP\n", seq, tn);
         fflush(stdout);
         calypso_bsp_set_dedie(tn, 4, 0);
         g.dedie_arme = true;
         return;
     }
-    /* [2026-09-23] Genre 2/3 : le tap QEMU (calypso_dcch_tap.c) annonce
-     * desormais le TCH (TCH/F, TCH/H) au lieu de laisser le SDCCH perime
-     * pendant tout l'appel. Simple constat ici : la bascule du BSP suit la
-     * tache du firmware (suivre_tache_tch), l'intervalle et le TSC viennent
-     * du pont (scruter_tch), et le SDCCH memorise ne doit PAS etre ecrase --
-     * c'est lui que l'ASSIGNMENT FAILURE retrouve (le tap le republie quand
-     * le firmware y revient). */
+    /* Kind 2/3: the QEMU tap (calypso_dcch_tap.c) announces the TCH (TCH/F,
+     * TCH/H). Only noted here: the BSP switch follows the firmware task
+     * (suivre_tache_tch), the timeslot and TSC come from the bridge
+     * (scruter_tch), and the memorised SDCCH must NOT be overwritten -- it is
+     * the one an ASSIGNMENT FAILURE returns to (the tap republishes it when
+     * the firmware goes back). */
     if (genre == 2 || genre == 3) {
-        g_tn_tch_sb = tn;   /* [2026-10-20] le TS du TCH, pour etiqueter les bursts montants publies (air) */
-        /* [2026-10-21] le SDCCH est chiffre (A5/1) : ni le pont ni l'air ne lisent plus l'ASSIGNMENT COMMAND,
-         * calypso_tch_cfg ne vient jamais. Le tap QEMU, lui, voit le TS que le firmware programme : on le prend
-         * comme intervalle du TCH quand personne ne l'a annonce ; suivre_tache_tch bascule le BSP a la tache suivante. */
+        g_tn_tch_sb = tn;   /* TCH TS, to label the published uplink bursts (air) */
+        /* With an A5/1-ciphered SDCCH neither the bridge nor the air reads the
+         * ASSIGNMENT COMMAND, so calypso_tch_cfg never comes. The QEMU tap sees
+         * the TS the firmware programs: it is taken as the TCH timeslot when
+         * nobody announced one; suivre_tache_tch switches the BSP at the next
+         * task. */
         if (!g.tch_tn && tn >= 1 && tn <= 7) {
             g.tch_tn = tn;
             printf("  [montant] TCH : intervalle TS%d pris sur le side-band (pas d'annonce calypso_tch_cfg)\n", tn);
@@ -636,7 +587,7 @@ static void scruter_dcch(uint32_t fn)
     printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d%s\n",
            seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
            (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
-    g_tn_tch_sb = 0;   /* SDCCH (TS0) arme ou canal libere : le mobile n'emet plus sur le TCH */
+    g_tn_tch_sb = 0;   /* SDCCH (TS0) armed or channel released: the mobile no longer sends on the TCH */
     if (genre == 0xFF) {
         calypso_bsp_set_dedie(0, 0xFF, 0);
         g.dedie_arme = false;
@@ -645,9 +596,9 @@ static void scruter_dcch(uint32_t fn)
         montant_canal_libere();
         return;
     }
-    /* [2026-09-23] Le SDCCH est MEMORISE : c'est lui que le BSP retrouve quand
-     * le firmware quitte le TCH (ASSIGNMENT FAILURE). Tant que le firmware est
-     * sur le TCH, on ne touche pas au BSP. */
+    /* The SDCCH is MEMORISED: the BSP returns to it when the firmware leaves
+     * the TCH (ASSIGNMENT FAILURE). While the firmware is on the TCH the BSP
+     * is left alone. */
     g.sd_tn = tn;
     g.sd_genre = genre;
     g.sd_ss = ss;
@@ -659,7 +610,7 @@ static void scruter_dcch(uint32_t fn)
     g.dedie_arme = true;
 }
 
-/* Rendre au BSP le SDCCH memorise (ou le liberer s'il n'y en a pas). */
+/* Hand the memorised SDCCH back to the BSP (or release it if there is none). */
 static void revenir_sdcch(const char *raison, uint32_t fn)
 {
     g.sur_tch = false;
@@ -677,8 +628,8 @@ static void revenir_sdcch(const char *raison, uint32_t fn)
     fflush(stdout);
 }
 
-/* [2026-09-23] 0 : armer le BSP des l'annonce du pont (comportement du
- * 2026-09-22). Voir scruter_tch. */
+/* MONTANT_TCH_TACHE=0: arm the BSP as soon as the bridge announces the TCH.
+ * See scruter_tch. */
 static bool tch_sur_tache(void)
 {
     static int v = -1;
@@ -689,44 +640,26 @@ static bool tch_sur_tache(void)
     return v != 0;
 }
 
-/* [2026-09-22] L'INTERVALLE DU TCH, CHAINON QUI MANQUAIT.
+/* THE TCH TIMESLOT.
  *
- * pont.py publie deja l'intervalle du canal de trafic dans
- * /dev/shm/calypso_tch_cfg (pont/state.py, Tch._write_cfg : seq, tn, tsc,
- * arfcn) des qu'il decode l'ASSIGNMENT COMMAND descendante. Mais PERSONNE ne
- * lisait ce fichier cote DSP : `calypso_bsp_set_dedie()` n'etait appelee que
- * depuis la bande laterale SDCCH ci-dessus. Le BSP continuait donc de servir
- * l'intervalle SDCCH pendant que le mobile ecoutait le TCH.
+ * pont.py publishes the traffic channel timeslot in /dev/shm/calypso_tch_cfg
+ * (pont/state.py, Tch._write_cfg: seq, tn, tsc, arfcn) as soon as it decodes
+ * the downlink ASSIGNMENT COMMAND. MONTANT_TCH=0 disables reading it.
  *
- * Mesure du 2026-09-22, appel vers 600 : le BSC assigne un TCH/F sur TS2, le
- * mobile y bascule (« MON: ... TS=2 »), n'y entend RIEN -- trois secondes de
- * « MON: no cell info » avec rxlev-full=-110, le plancher -- revient sur TS1
- * et repond « ASSIGNMENT FAILURE (cause #1) » (gsm48_rr.c:4750). Cote BSC :
- * « Assignment failed in state WAIT_RR_ASS_COMPLETE, cause EQUIPMENT FAILURE:
- * Timeout ». La trace DSP ne montrait que « arme TS1 SDCCH/8 », jamais TS2.
+ * THE ANNOUNCEMENT IS NOT THE SWITCH.
+ * The bridge writes this file when it DECODES the ASSIGNMENT COMMAND, i.e. at
+ * BTS time, while the BSP plays frames at DSP time -- 12 to ~200 frames
+ * behind. Arming the BSP here would replace with TS2 bursts ALL the frames
+ * not yet played (bsp_dedie_trame is true everywhere for a TCH), the
+ * ASSIGNMENT COMMAND included, and TS0 with them.
  *
- * Ce n'etait donc pas un defaut de qualite du lien mais un chainon manquant.
- * MONTANT_TCH=0 coupe cette lecture.
- *
- * [2026-09-23] L'ANNONCE N'EST PAS LA BASCULE.
- * Le pont ecrit ce fichier au DECODAGE de l'ASSIGNMENT COMMAND, donc a
- * l'heure de la BTS, alors que le BSP joue les trames a l'heure du DSP -- en
- * retard de 12 a ~200 trames (decalage tick/fn BTS de 681 au run de 12:22).
- * Armer le BSP ici remplacait par des bursts TS2 TOUTES les trames pas
- * encore jouees (bsp_dedie_trame est vrai partout pour un TCH), l'ASSIGNMENT
- * COMMAND comprise, et TS0 avec. Releve du run de 12:22, appels 2 et 3 :
- * « TCH (seq=2) : arme TS2 » puis un seul a_cd « FIRE KO » et plus aucun
- * bloc SDCCH ; cote mobile 80-100 bit errors, jamais d'ASSIGNMENT COMMAND,
- * LOS apres ~20 s. Et apres une ASSIGNMENT FAILURE (appel 1) rien ne rendait
- * TS1 au BSP : 90-110 bit errors sur le SDCCH jusqu'a la liberation.
- *
- * Desormais ce fichier n'est plus qu'une ANNONCE (intervalle, TSC). La
- * bascule vient du firmware lui-meme : suivre_tache_tch() arme le TCH a la
- * premiere tache TCHT/TCHA/TCHD qu'il pose, et rend le SDCCH des qu'il repose
- * une tache de lecture de bloc (ALLC). Un seq non nul avec tn=0 est l'abandon
- * du pont (pont/dsp/tch.py, TchDsp.abandon) : retour au SDCCH sans lacher le
- * Kc. seq=0 reste la liberation complete.
- * MONTANT_TCH_TACHE=0 retablit l'armement a l'annonce. */
+ * So this file is only an ANNOUNCEMENT (timeslot, TSC). The switch comes from
+ * the firmware itself: suivre_tache_tch() arms the TCH at the first
+ * TCHT/TCHA/TCHD task it posts, and hands the SDCCH back as soon as it posts
+ * a block read task (ALLC) again. A non-zero seq with tn=0 is the bridge
+ * giving up (pont/dsp/tch.py, TchDsp.abandon): back to the SDCCH without
+ * dropping the Kc. seq=0 remains the full release.
+ * MONTANT_TCH_TACHE=0 restores arming at the announcement. */
 static void scruter_tch(uint32_t fn)
 {
     static int fd = -1, coupe = -1;
@@ -740,7 +673,7 @@ static void scruter_tch(uint32_t fn)
         return;
     }
     if (fd < 0) {
-        if (fn == dernier_essai) {          /* voir scruter_dcch */
+        if (fn == dernier_essai) {          /* see scruter_dcch */
             return;
         }
         dernier_essai = fn;
@@ -761,7 +694,7 @@ static void scruter_tch(uint32_t fn)
     seq = s2;
     int tn = b[4], tsc = b[5];
     if (!s2) {
-        /* Liberation complete (Tch.close) : comme avant le 2026-09-23. */
+        /* Full release (Tch.close). */
         int etait = g.tch_tn;
         g.tch_tn = 0;
         if (g.sur_tch) {
@@ -776,8 +709,8 @@ static void scruter_tch(uint32_t fn)
         return;
     }
     if (tn <= 0 || tn > 7) {
-        /* Abandon par le pont (ASSIGNMENT FAILURE, retour du mobile sur le
-         * SDCCH) : le SDCCH vit encore, le Kc aussi. */
+        /* Given up by the bridge (ASSIGNMENT FAILURE, mobile back on the
+         * SDCCH): the SDCCH is still alive, and so is the Kc. */
         int etait = g.tch_tn;
         g.tch_tn = 0;
         printf("  [montant] TCH (seq=%u) : annonce TS%d abandonnee par le pont\n", seq, etait);
@@ -801,20 +734,20 @@ static void scruter_tch(uint32_t fn)
     fflush(stdout);
 }
 
-/* [2026-09-23] LA BASCULE SDCCH <-> TCH SUIT LE FIRMWARE.
+/* THE SDCCH <-> TCH SWITCH FOLLOWS THE FIRMWARE.
  *
- * d_task_d de la page W que l'ARM vient d'ecrire dit ce qu'il ecoute a la
- * trame suivante : TCHT (13, trafic et FACCH), TCHA (14, SACCH/T) ou TCHD
- * (28) sur un TCH (prim_tch.c:520-585, 791-802), ALLC (24) pour un bloc
- * SDCCH/SACCH (prim_rx_nb.c:200). Cette tache est posee au rythme du DSP :
- * le BSP change donc d'intervalle sur la trame que l'ARM lit vraiment, quel
- * que soit le retard du DSP sur la BTS. Les autres trames (PM des voisines,
- * trame libre) ne changent rien. */
-/* [2026-09-23] SONDE d_fn : la position que le firmware donne au DSP dans la
- * 104-multitrame (dsp.c:537, d_fn = fn_report | (fn%104) << 8), sur les taches
- * TCH. A comparer au fn BTS que le BSP joue au meme tick ([sacch_tf]) : un
- * ecart multiple de 26 laisse passer parole et FACCH mais desentrelace la
- * SACCH dans le desordre (a_cd FIRE KO a chaque bloc, LOS). 24 lignes. */
+ * d_task_d of the W page the ARM has just written says what it listens to on
+ * the next frame: TCHT (13, traffic and FACCH), TCHA (14, SACCH/T) or TCHD
+ * (28) on a TCH (prim_tch.c:520-585, 791-802), ALLC (24) for an SDCCH/SACCH
+ * block (prim_rx_nb.c:200). This task is posted at DSP pace, so the BSP
+ * changes timeslot on the frame the ARM really reads, whatever the DSP lag
+ * behind the BTS. The other frames (neighbour PM, idle frame) change
+ * nothing. */
+/* d_fn PROBE: the position the firmware gives the DSP in the 104-multiframe
+ * (dsp.c:537, d_fn = fn_report | (fn%104) << 8), on TCH tasks. To compare with
+ * the BTS fn the BSP plays at the same tick ([sacch_tf]): an offset that is a
+ * multiple of 26 lets speech and FACCH through but de-interleaves the SACCH
+ * out of order (a_cd FIRE KO on every block, LOS). 24 lines. */
 static void sonde_dfn(uint16_t *api_ram, unsigned pg, bool taches, uint32_t fn)
 {
     static unsigned n;
@@ -843,8 +776,9 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
 
     if (tache_tch && !g.sur_tch) {
         if (!g.tch_tn) {
-            /* [2026-10-21] pas d'annonce (SDCCH chiffre A5/1 : l'air ne lit plus l'ASSIGNMENT COMMAND) :
-             * l'intervalle est celui de la fenetre RX que le firmware a programmee au TPU. */
+            /* No announcement (A5/1-ciphered SDCCH: the air cannot read the
+             * ASSIGNMENT COMMAND): the timeslot is the one of the RX window the
+             * firmware programmed in the TPU. */
             int tn_tpu = calypso_bsp_fenetre_tn();
             if (tn_tpu >= 1 && tn_tpu <= 7) {
                 g.tch_tn = tn_tpu;
@@ -868,13 +802,14 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
         g.dedie_arme = true;
         return;
     }
-    /* [2026-10-22 21:50] FIRMWARE TI : ALLC APRES LE TCH N'EST PAS FORCEMENT LE SDCCH. La L1 TI lit aussi la BCCH et
-     * le paging en ALLC : apres le CHANNEL RELEASE d'un appel (run de 21:42), « revenu sur le SDCCH » rendait le BSP
-     * au SDCCH/8 TS1, qui remplace TS0 sur toutes les trames tant que le dedie TI dure (CALYPSO_BSP_SDCCH8_TOUT) :
-     * NP_I tous en erreur des la sortie du dedie, RECOVERY, DSP relance en 2,4 s, cellule perdue. Ici le BSP
-     * revient d'abord a TS0 ; on ne retourne au SDCCH que si une tache MONTANTE suit dans les 102 trames (echec
-     * d'assignation : la L1 renvoie sur son SDCCH) ; en veille il n'y en a pas. MONTANT_TI_ALLC_DIRECT=1 :
-     * ancien comportement. */
+    /* TI FIRMWARE: ALLC AFTER THE TCH IS NOT NECESSARILY THE SDCCH. The TI L1
+     * also reads the BCCH and the paging in ALLC: after the CHANNEL RELEASE of
+     * a call, handing the BSP back to SDCCH/8 TS1 (which replaces TS0 on every
+     * frame while the TI dedicated mode lasts, CALYPSO_BSP_SDCCH8_TOUT) would
+     * lose the cell. Here the BSP first returns to TS0; the SDCCH is only
+     * restored if an UPLINK task follows within 102 frames (assignment
+     * failure: the L1 goes back to its SDCCH); in idle there is none.
+     * MONTANT_TI_ALLC_DIRECT=1: return to the SDCCH directly. */
     static int ti = -1, direct = -1;
     static bool attente_ul; static uint32_t attente_fn;
     if (ti < 0) { ti = calypso_getenv("MS_MAGNETITE") != NULL;
@@ -906,22 +841,20 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
     }
 }
 
-/* [2026-09-23] SONDE a_fd : LA FACCH DESCENDANTE SUR TCH.
- * Le firmware ne remonte une FACCH que si ((fn%13)%4)==3 ET a_fd[0] porte
- * B_BLUD (prim_tch.c:235-246), puis remet a_fd[0] = B_FIRE1 : seul le DSP
- * pose B_BLUD. Sur l'appel 1 du run de 12:22 le pont decodait 6 FACCH de la
- * BTS (UA) et le mobile n'en recevait aucune (T200, MDL-ERROR cause 1). Cette
- * sonde tranche entre ROM (B_BLUD jamais pose) et plomberie (pose mais
- * FIRE). MONTANT_AFD=0 la coupe. */
-/* [2026-09-23] TRAMES DESCENDANTES LIVREES PAR LA ROM, POUR LA COMPARAISON.
- * Chaque parole (a_dd_0, convertie du format TI au FR standard comme le
- * montant) et chaque FACCH (a_fd) vue avec B_BLUD, avec le tick, le mot
- * d'etat et le nombre d'erreurs rapporte (mot 2). Enregistrements de 48
- * octets : fn LE32, type (0 parole, 1 FACCH), n, etat LE16, err LE16, 2 octets
- * de bourrage, 36 octets de donnees. Fichier remis a zero a chaque appel (plus
- * de 500 trames sans rien), 8000 enregistrements au plus.
- * tools/comparer_parole.py le met en regard de /dev/shm/calypso_tch_dl.bin
- * (bursts du BSP) et de /dev/shm/pont_tch_dl.bin (decodage du pont). */
+/* a_fd PROBE: DOWNLINK FACCH ON THE TCH.
+ * The firmware only passes a FACCH up if ((fn%13)%4)==3 AND a_fd[0] carries
+ * B_BLUD (prim_tch.c:235-246), then resets a_fd[0] = B_FIRE1: only the DSP
+ * sets B_BLUD. This probe tells a ROM problem (B_BLUD never set) from a
+ * plumbing one (set but FIRE). MONTANT_AFD=0 disables it. */
+/* DOWNLINK FRAMES DELIVERED BY THE ROM, FOR COMPARISON.
+ * Every speech frame (a_dd_0, converted from TI format to standard FR like
+ * the uplink) and every FACCH (a_fd) seen with B_BLUD, with the tick, the
+ * status word and the reported error count (word 2). 48-byte records: fn
+ * LE32, type (0 speech, 1 FACCH), n, status LE16, err LE16, 2 padding bytes,
+ * 36 data bytes. File reset at each call (more than 500 frames without a
+ * record), 8000 records at most. tools/comparer_parole.py compares it with
+ * /dev/shm/calypso_tch_dl.bin (BSP bursts) and /dev/shm/pont_tch_dl.bin
+ * (bridge decoding). */
 static void noter_dl(uint32_t fn, uint8_t type, uint16_t etat, uint16_t err,
                      const uint8_t *data, int n)
 {
@@ -974,21 +907,19 @@ static void sonde_afd(uint16_t *api_ram, uint32_t fn)
     prec = etat;
 }
 
-/* [2026-09-23] SONDE a_dd : LA PAROLE DESCENDANTE SUR TCH.
- * Le firmware ne remonte une trame de parole au mobile (L1CTL_TRAFFIC_IND) que
- * si a_dd_0[0] porte B_BLUD (prim_tch.c:322-327) ; GAPK ne code le montant
- * qu'en reponse. Appel de 15:02 : 19 trames « parole UL » puis plus rien, alors
- * que le pont decodait la parole de la BTS. Cette sonde dit si le DSP livre
- * encore la parole descendante. Une ligne pour les 20 premieres, puis toutes
- * les 100. MONTANT_ADD=0 la coupe.
+/* a_dd PROBE: DOWNLINK SPEECH ON THE TCH.
+ * The firmware only passes a speech frame up to the mobile
+ * (L1CTL_TRAFFIC_IND) if a_dd_0[0] carries B_BLUD (prim_tch.c:322-327); GAPK
+ * only encodes the uplink in response. This probe tells whether the DSP still
+ * delivers downlink speech. One line for the first 20, then every 100.
+ * MONTANT_ADD=0 disables it.
  *
- * [2026-09-23] ko ne voyait rien sur la parole : 0x0040 est B_FIRE1, et le code
- * de Fire ne protege que les canaux de controle. Run de 20:22 : 40 etats releves
- * (c214, c204, 8084), ko=0, mais tous avec le bit 2 = B_BFI (l1_environment.h:272).
- * Le firmware ne teste que B_BLUD (prim_tch.c:327) et ne remonte pas le BFI :
- * GAPK decode les 33 octets tels quels. La sonde compte donc aussi le BFI et
- * affiche a_dd_0[2], le nombre d'erreurs que la ROM rapporte (num_biterr cote
- * firmware). */
+ * 0x0040 is B_FIRE1 and the Fire code only protects control channels, so
+ * speech is judged by bit 2 = B_BFI (l1_environment.h:272). The firmware only
+ * tests B_BLUD (prim_tch.c:327) and does not pass the BFI up: GAPK decodes
+ * the 33 bytes as they are. The probe therefore counts the BFI too and shows
+ * a_dd_0[2], the error count the ROM reports (num_biterr on the firmware
+ * side). */
 static void sonde_add(uint16_t *api_ram, uint32_t fn)
 {
     static int sonde = -1;
@@ -1010,7 +941,7 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
         {
             const uint16_t *w = &api_ram[(API_NDB + NDB_A_DD_0) / 2];
             uint8_t fr[FR_BYTES];
-            for (int k = 0; k < FR_BYTES; k += 2) {       /* octet fort d'abord, comme prendre_ul */
+            for (int k = 0; k < FR_BYTES; k += 2) {       /* high byte first, like prendre_ul */
                 fr[k] = (uint8_t)(w[3 + k / 2] >> 8);
                 if (k + 1 < FR_BYTES) fr[k + 1] = (uint8_t)(w[3 + k / 2] & 0xff);
             }
@@ -1034,9 +965,10 @@ bool montant_sur_tch(void)
     return g.sur_tch;
 }
 
-/* [2026-10-20] L'intervalle sur lequel le firmware emet : le TS du TCH annonce par le side-band (genre 2/3)
- * tant qu'il n'est pas libere, 0 sinon (SDCCH/4 du TS0, RACH). Sert a etiqueter les bursts publies dans
- * calypso_tx_rom (bits 4-6 de l'octet src) pour que l'air les porte au bon intervalle du TRX. */
+/* Timeslot the firmware transmits on: the TCH TS announced by the side-band
+ * (kind 2/3) until it is released, 0 otherwise (SDCCH/4 on TS0, RACH). Used to
+ * label the bursts published in calypso_tx_rom (bits 4-6 of the src byte) so
+ * that the air carries them on the right TRX timeslot. */
 int montant_tn_dedie(void)
 {
     return g_tn_tch_sb;
@@ -1046,7 +978,7 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick);   /* pont.c */
 
 static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
 {
-    tx_rach_vers_air(ra, bsic, fn);   /* [2026-10-21] Magnetite : vers l'air (CALYPSO_RACH_VERS_AIR) */
+    tx_rach_vers_air(ra, bsic, fn);   /* Magnetite: to the air (CALYPSO_RACH_VERS_AIR) */
     static int fd = -2;
     static uint32_t seq;
     if (fd == -2) {
@@ -1060,52 +992,38 @@ static void publier_rach(uint8_t ra, uint8_t bsic, uint32_t fn)
     buf[5] = bsic;
     memcpy(buf + 8, &fn, 4);
     sb_ecrire(fd, buf, sizeof(buf), 0);
-    /* Une tentative d'acces, c'est une nouvelle connexion : la memoire de
-     * l'anti-doublon de la voie heuristique repart (sans effet sur la voie
-     * B_BLUD, qui n'en a pas besoin). */
+    /* An access attempt is a new connection: the duplicate filter memory of
+     * the heuristic path restarts (no effect on the B_BLUD path, which does
+     * not need it). */
     g.sdcch_a_dernier = false;
     if (g.rach++ < (unsigned long)journal())
         printf("  [montant] RACH ra=0x%02x bsic=%u fn=%u -> %s\n", ra, bsic, fn, SHM_RACH);
 }
 
-/* ── LE Kc : LE PONT NE PEUT NI CHIFFRER NI DECHIFFRER SANS LUI ────────────
+/* ── THE Kc: THE BRIDGE CAN NEITHER CIPHER NOR DECIPHER WITHOUT IT ─────────
  *
- * [2026-09-22] Meme cause que tout ce fichier : sous CALYPSO_DSP_EXTERN=1 la
- * couche 1 gr-gsm est desactivee, et c'etait ELLE qui publiait
- * /dev/shm/calypso_kc_l1 (calypso_l1_grgsm.c, publish_kc). En montage DSP le
- * fichier n'existait donc pas, `Cipher.current()` de pont.py rendait None, et
- * `cipher.apply()` rendait le burst INCHANGE dans les deux sens -- releve sur
- * le banc : « A5 dl=0 ul=0 » a chaque STATS.
+ * Under CALYPSO_DSP_EXTERN=1 the gr-gsm layer 1 is disabled, and it was the
+ * one publishing /dev/shm/calypso_kc_l1 (calypso_l1_grgsm.c, publish_kc).
+ * Without the file, `Cipher.current()` of pont.py returns None and
+ * `cipher.apply()` leaves the burst UNCHANGED in both directions. There is no
+ * A5 in the Calypso model either (`d_a5mode` only exists in l1-grgsm/, not in
+ * l1-dsp/): the bridge does it, as it already does the channel coding.
  *
- * Ce que ca coutait, mesure du 2026-09-22 avec ENCRYPTION="a5 1" : la
- * transaction allait jusqu'au bout de l'authentification en clair, puis
+ * Layout taken as is from publish_kc() so that pont/cipher.py (KC_RECLEN=32)
+ * reads it unchanged: seq(4) algo(1) length(1) Kc[8] 0xFF. The four words of
+ * a_kc come out big-endian AND reversed, as in the original -- a layout the
+ * reader expects is not "corrected".
  *
- *     11:26:51  CIPHERING MODE COMMAND (sc=1, algo=A5/1 cr=1)
- *     11:26:51  CIPHERING MODE COMPLETE (cr 1)
- *     11:26:53  Dropping frame with 96 bit errors   (et sans fin ensuite)
- *
- * -- la descente chiffree par la BTS que personne ne dechiffre, et la montee
- * que personne ne chiffre. En « a5 0 » la meme transaction va au bout. Il n'y
- * a pas non plus d'A5 dans le modele Calypso (`d_a5mode` n'existe que dans
- * l1-grgsm/, rien dans l1-dsp/) : c'est bien au pont de le faire, comme il
- * fait deja le codage de canal.
- *
- * Disposition reprise telle quelle de publish_kc() pour que pont/cipher.py
- * (KC_RECLEN=32) la lise sans changement : seq(4) algo(1) longueur(1)
- * Kc[8] 0xFF. Les quatre mots de a_kc sortent en gros-boutiste ET a l'envers,
- * comme dans l'original -- on ne "corrige" pas une disposition que le lecteur
- * attend.
- *
- * MONTANT_KC=0 coupe la publication. */
+ * MONTANT_KC=0 disables the publication. */
 #define KC_RECLEN        32
-#define KC_PUBLIER_TOUTES 22   /* trames entre deux scrutations, comme grgsm */
-#define KC_GRACE_CLAIR    5    /* cf. publish_kc : le firmware efface d_a5mode
-                                * a chaque DM_REL_REQ, y compris quand le Kc
-                                * revient juste apres (Assignment Command),
-                                * alors que la BTS, elle, chiffre toujours. */
+#define KC_PUBLIER_TOUTES 22   /* frames between two polls, like grgsm */
+#define KC_GRACE_CLAIR    5    /* cf. publish_kc: the firmware clears d_a5mode
+                                * at every DM_REL_REQ, including when the Kc
+                                * comes right back (Assignment Command),
+                                * while the BTS keeps ciphering. */
 
-/* Leve par montant_canal_libere() : la prochaine scrutation doit publier le
- * retour en clair SANS attendre la grace. Voir publier_kc(). */
+/* Raised by montant_canal_libere(): the next poll must publish the return to
+ * clear WITHOUT waiting for the grace period. See publier_kc(). */
 static bool g_kc_liberer;
 
 static void publier_kc(uint16_t *api_ram)
@@ -1122,20 +1040,13 @@ static void publier_kc(uint16_t *api_ram)
     if (!actif) {
         return;
     }
-    /* [2026-09-22] LE CHANGEMENT DE MODE NE PEUT PAS ATTENDRE LA SCRUTATION.
-     * Version precedente : on ne lisait d_a5mode qu'une trame sur 22 (~128 ms).
-     * Or le mobile bascule des qu'il traite le CIPHERING MODE COMMAND et emet
-     * son CIPHERING MODE COMPLETE dans la foulee ; un bloc SDCCH montant tombe
-     * toutes les 51 trames. Ce bloc-la -- le PREMIER message chiffre du montant
-     * -- pouvait donc partir en clair alors que la BTS le dechiffrait deja.
-     * Releve du 2026-09-22, run de 11:49 :
-     *     fn=2438  01 64 35  06 32 17 ...   CIPHERING MODE COMPLETE
-     *     fn=2591  01 74 35  06 32 17 ...   LE MEME, retransmis (bit P)
-     * la BTS ne l'acquittait pas, LAPDm (fenetre de 1) restait bloque dessus,
-     * le TMSI REALLOCATION COMPLETE n'etait jamais emis et le MSC repondait
-     * LOCATION UPDATING REJECT alors que le mobile se croyait a jour.
-     * On lit donc d_a5mode a CHAQUE trame -- deux acces memoire -- et la
-     * scrutation complete n'est differee que tant que le mode ne change pas. */
+    /* A MODE CHANGE CANNOT WAIT FOR THE PERIODIC POLL. The mobile switches as
+     * soon as it processes the CIPHERING MODE COMMAND and sends its CIPHERING
+     * MODE COMPLETE right away; an uplink SDCCH block falls every 51 frames,
+     * and that block -- the FIRST ciphered uplink message -- must not leave
+     * in clear while the BTS already deciphers it. d_a5mode is therefore read
+     * EVERY frame (two memory accesses) and the full poll is only deferred
+     * while the mode does not change. */
     uint16_t mode = api_ram[(API_NDB + NDB_D_A5MODE) / 2];
     uint8_t mode_algo = (mode >= 1 && mode <= 3) ? (uint8_t)mode : 0;
     bool bascule = (a_dernier && mode_algo != dernier[4]) || g_kc_liberer;
@@ -1165,32 +1076,26 @@ static void publier_kc(uint16_t *api_ram)
 
     if (a_dernier && !memcmp(dernier + 4, rec + 4, KC_RECLEN - 4)) {
         clair_en_attente = 0;
-        /* [2026-09-22] Ce retour anticipe doit CONSOMMER g_kc_liberer, sinon la
-         * liberation reste armee indefiniment : chaque scrutation suivante
-         * calcule bascule=vrai, republie le meme enregistrement et incremente
-         * `seq`. Cote pont.py, un `seq` qui bouge veut dire « nouvelle cle » :
-         * il rechargeait sans fin une cle inchangee. */
+        /* This early return must CONSUME g_kc_liberer, otherwise the release
+         * stays armed indefinitely: every following poll would compute
+         * bascule=true, republish the same record and bump `seq`, which
+         * pont.py reads as "new key". */
         g_kc_liberer = false;
         return;
     }
-    /* [2026-09-22] LA GRACE NE DOIT PAS SURVIVRE A LA LIBERATION DU CANAL.
-     * Elle vient de publish_kc() et sert au cas INTRA-connexion : le firmware
-     * efface d_a5mode a chaque DM_REL_REQ, y compris pendant un Assignment
-     * Command ou le Kc revient juste apres, alors que la BTS chiffre toujours.
-     * Mais entre DEUX connexions elle est nuisible : l'enregistrement algo=1
-     * restait lisible cinq scrutations de plus, et pont.py -- qui relache
-     * pourtant sa cle a chaque IMMEDIATE ASSIGNMENT (downlink.py) -- la
-     * relisait aussitot dans le fichier et la restaurait. Il chiffrait alors
-     * le montant de la connexion SUIVANTE des son premier bloc, pendant que le
-     * mobile emettait encore en clair.
-     * Mesure du 2026-09-22, run de 11:53 : « A5 dl=0 ul=200 » -- tout le
-     * montant chiffre, rien de descendant dechiffre -- et l'AUTHENTICATION
-     * RESPONSE (fn=2525, `05 14`) retransmise a fn=2729 faute d'acquittement.
-     * La liberation du canal est le bon signal, et il existe deja :
-     * montant_canal_libere(), appele sur PONT_DCCH genre 0xFF. */
+    /* THE GRACE PERIOD MUST NOT SURVIVE THE CHANNEL RELEASE. It comes from
+     * publish_kc() and serves the INTRA-connection case: the firmware clears
+     * d_a5mode at every DM_REL_REQ, including during an Assignment Command
+     * where the Kc comes right back, while the BTS keeps ciphering. Between
+     * TWO connections it is harmful: the algo=1 record would stay readable
+     * five polls longer, and pont.py -- which drops its key at every
+     * IMMEDIATE ASSIGNMENT (downlink.py) -- would read it back from the file
+     * and cipher the uplink of the NEXT connection from its first block while
+     * the mobile still sends in clear. The channel release is the right
+     * signal: montant_canal_libere(), called on PONT_DCCH kind 0xFF. */
     if (!algo && a_dernier && dernier[4] && !g_kc_liberer &&
         ++clair_en_attente < KC_GRACE_CLAIR) {
-        return;   /* chiffre -> clair : on attend, le Kc revient peut-etre */
+        return;   /* ciphered -> clear: wait, the Kc may come back */
     }
     clair_en_attente = 0;
     g_kc_liberer = false;
@@ -1217,40 +1122,42 @@ static void publier_kc(uint16_t *api_ram)
 }
 
 void calypso_bsp_set_dedie_ti(int actif);   /* calypso_bsp.c */
-static bool g_ti_dedie;                      /* firmware TI en dedie (taches ALLC), voir plus bas */
+static bool g_ti_dedie;                      /* TI firmware in dedicated mode (ALLC tasks), see below */
 
-/* [2026-10-22] PROTHESE FACCH DESCENDANTE (firmware TI). Sous la L1 TI de Magnetite la ROM decode la FACCH/F
- * avec les deux derniers bursts du bloc absents : l'UA qui repond au SABM de l'ASSIGNMENT sort « 01 8b 01 2b »
- * au lieu de « 01 73 01 2b » (reproduit hors ligne par libosmocoding en mettant les bursts 6 et 7 a zero),
- * Fire KO, RR Assignment Failure sur tous les appels du 22/10. Les bursts TS2 que le BSP livre, eux, portent
- * l'UA intact. On les decode ici a chaque fin de bloc FACCH/F (fn % 13 % 4 == 3) et, si c'est une FACCH au CRC
- * bon, on la pose dans a_fd : la L1 TI la lit a la trame suivante (l1_cmplx.c, fn_mod13 % 4 == 0), apres la
- * fin de ce tick. Le reste (parole) reste a la ROM. CALYPSO_PROTHESE_FACCH_DL=0 coupe (a chaud). */
-/* [2026-10-22 21:00] PROTHESE PAROLE DESCENDANTE (firmware TI), meme mal que la FACCH : appel au 600 de 20:58,
- * vocodeur ROM arme (VSP rint 36923, SPC 0x00c8) mais toute la parole decodee par la ROM en BFI (a_dd 1500/1500,
- * ~30 bits faux par trame), crete DL 0. Le bloc FR decode ici des bursts du BSP (CRC bon) est pose dans a_dd au
- * format TI (inverse de parole_ti_vers_fr : gsm_to_canon puis ti_fr_from_canon), BFI a 0, pour que le decodeur
- * de parole de la ROM le prenne a la place du sien. Ne remplace que les trames que la ROM a jugees mauvaises.
- * CALYPSO_PROTHESE_PAROLE_DL=0 coupe (a chaud), =2 remplace aussi les bonnes. */
+/* DOWNLINK FACCH PROSTHESIS (TI firmware). Under the Magnetite TI L1 the ROM
+ * decodes the FACCH/F with the last two bursts of the block missing (Fire KO,
+ * RR Assignment Failure), while the TS2 bursts the BSP delivers carry the
+ * block intact. They are decoded here at every end of a FACCH/F block
+ * (fn % 13 % 4 == 3) and, if it is a FACCH with a good CRC, posted into
+ * a_fd: the TI L1 reads it on the next frame (l1_cmplx.c, fn_mod13 % 4 == 0),
+ * after the end of this tick. The rest (speech) stays with the ROM.
+ * CALYPSO_PROTHESE_FACCH_DL=0 disables it (live setting). */
+/* DOWNLINK SPEECH PROSTHESIS (TI firmware), same mechanism as the FACCH: the
+ * FR block decoded here from the BSP bursts (good CRC) is posted into a_dd in
+ * TI format (inverse of parole_ti_vers_fr: gsm_to_canon then
+ * ti_fr_from_canon), BFI at 0, so that the ROM speech decoder takes it
+ * instead of its own. Only replaces the frames the ROM judged bad.
+ * CALYPSO_PROTHESE_PAROLE_DL=0 disables it (live setting), =2 also replaces
+ * the good ones. */
 static void prothese_parole_dl(uint16_t *api_ram, const uint8_t fr[FR_BYTES], int ne, uint32_t e)
 {
     static unsigned n_ok;
     int mode = calypso_reglage("CALYPSO_PROTHESE_PAROLE_DL", 1);
     if (!mode) return;
     uint16_t *dd = &api_ram[(API_NDB + NDB_A_DD_0) / 2];
-    if (mode == 1 && (dd[0] & B_BLUD) && !(dd[0] & 0x0004)) return;   /* la ROM l'a deja bonne */
+    if (mode == 1 && (dd[0] & B_BLUD) && !(dd[0] & 0x0004)) return;   /* the ROM already has it good */
     uint8_t canon[FR_BYTES], ti[FR_BYTES + 1];
     memset(canon, 0, sizeof canon);
-    for (int i = 0; i < 260; i++)                   /* gsm_to_canon : le quartet 0xd en tete saute */
+    for (int i = 0; i < 260; i++)                   /* gsm_to_canon: the leading 0xd nibble is skipped */
         mettre_bit_msb(canon, i, bit_msb(fr, i + 4));
     memset(ti, 0, sizeof ti);
     for (int i = 0; i < 260; i++) {                 /* ti_fr_from_canon */
         int si = i >= 182 ? i + 4 : i;
         mettre_bit_msb(ti, si, bit_msb(canon, gsm610_bitorder[i]));
     }
-    dd[0] = (uint16_t)((dd[0] & ~0x0044u) | B_BLUD);   /* bloc present, ni FIRE ni BFI */
+    dd[0] = (uint16_t)((dd[0] & ~0x0044u) | B_BLUD);   /* block present, neither FIRE nor BFI */
     dd[2] = (uint16_t)ne;
-    for (int k = 0; k < FR_BYTES; k += 2)              /* octet fort d'abord, comme sonde_add */
+    for (int k = 0; k < FR_BYTES; k += 2)              /* high byte first, like sonde_add */
         dd[3 + k / 2] = (uint16_t)((ti[k] << 8) | (k + 1 < FR_BYTES ? ti[k + 1] : 0));
     if (n_ok++ < 40 || n_ok % 500 == 0)
         printf("  [parole-dl] fn=%u : trame FR de la BTS posee dans a_dd (%d err) [%u]\n", e, ne, n_ok);
@@ -1284,7 +1191,7 @@ static void prothese_facch_dl(uint16_t *api_ram)
     if (rc == FR_BYTES) { prothese_parole_dl(api_ram, l2, ne, e); return; }
     if (rc != 23) return;
     uint16_t *fd = &api_ram[(API_NDB + NDB_A_FD) / 2];
-    fd[0] = B_BLUD;                 /* bloc present, B_FIRE1/B_FIRE0 a 0 : CRC bon */
+    fd[0] = B_BLUD;                 /* block present, B_FIRE1/B_FIRE0 at 0: CRC good */
     fd[2] = (uint16_t)ne;
     for (int k = 0; k < 12; k++)
         fd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < 23 ? l2[2 * k + 1] << 8 : 0));
@@ -1305,20 +1212,19 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         return;
     }
 
-    /* Quelle page W porte les taches ? dsp_end_scenario() (firmware,
-     * calypso/dsp.c:471) ecrit d_dsp_page = B_GSM_TASK | w_page AVANT de
-     * basculer w_page : le mot du NDB est donc la source fraiche, y compris
-     * quand l1_sync() a tourne entre le TICK et le GO. L'argument `page` (le
-     * d_dsp_page que QEMU avait echantillonne au TICK) ne sert que de repli. */
+    /* Which W page carries the tasks? dsp_end_scenario() (firmware,
+     * calypso/dsp.c:471) writes d_dsp_page = B_GSM_TASK | w_page BEFORE
+     * flipping w_page: the NDB word is the fresh source, including when
+     * l1_sync() ran between the TICK and the GO. The `page` argument (the
+     * d_dsp_page QEMU sampled at the TICK) is only a fallback. */
     uint16_t v_page = api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2];
     bool taches = (v_page & B_GSM_TASK) != 0;
     unsigned pg = taches ? ((v_page & B_GSM_PAGE) ? 1u : 0u) : (page & 1u);
 
-    {   /* [2026-09-23] SONDE CHIFFREMENT : chaque changement de d_a5mode ou de
-         * a_kc tel que l'ARM les laisse (NDB 0x1ce / 0x2ce), avec le tick. Le
-         * DSP chiffre et dechiffre lui-meme (calypso_a5.c) d'apres ces deux
-         * champs ; une remise a zero sur le TCH arrete le dechiffrement alors
-         * que la BTS chiffre toujours. */
+    {   /* CIPHERING PROBE: every change of d_a5mode or a_kc as the ARM leaves
+         * them (NDB 0x1ce / 0x2ce), with the tick. The DSP ciphers and
+         * deciphers by itself (calypso_a5.c) from these two fields; a reset
+         * on the TCH stops deciphering while the BTS keeps ciphering. */
         static uint16_t a5_prec = 0xffff, kc_prec[4];
         uint16_t a5 = api_ram[(API_NDB + 0x1ce) / 2];
         const uint16_t *kc = &api_ram[(API_NDB + 0x2ce) / 2];
@@ -1330,30 +1236,32 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         }
     }
     scruter_dcch(fn);
-    scruter_tch(fn);      /* l'annonce du TCH par le pont                  */
-    suivre_tache_tch(api_ram, pg, taches, fn);   /* la bascule, par le firmware */
+    scruter_tch(fn);      /* the TCH announcement by the bridge            */
+    suivre_tache_tch(api_ram, pg, taches, fn);   /* the switch, by the firmware */
     sonde_dfn(api_ram, pg, taches, fn);
     if (taches) calypso_bsp_dfn_observe(fn, api_ram[(API_W_PAGE(pg) + WP_D_FN) / 2], api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2]);
 
-    /* [2026-10-22] B_SYNC_TCH_DL POUR LA L1 TI. osmocom (calypso/dsp.c dsp_load_tch_param) pose au premier TCH
-     * B_SYNC_TCH_UL (bit 8 de d_ctrl_tch) ET B_SYNC_TCH_DL (bit 9) ; la L1 TI de Magnetite pose le bit 8 seul, son
-     * bit 9 s'appelle B_SYNC_AMR et reste a 0 (d_ctrl_tch 0x01d1 puis 0x0091). Sans synchro descendante la ROM
-     * garde une phase de bloc TCH arbitraire : chaque FACCH (l'UA du SABM d'ASSIGNMENT) decodee avec ses deux
-     * derniers bursts absents (« 01 8b 01 2b » au lieu de « 01 73 01 2b », reproduit hors ligne), Fire KO,
-     * RR Assignment Failure (appels au 600 du 22/10). Pose ici, en fin de tick, sur la page W que la ROM lira au
-     * tick suivant. CALYPSO_TI_SYNC_DL=0 coupe. */
+    /* B_SYNC_TCH_DL FOR THE TI L1. osmocom (calypso/dsp.c dsp_load_tch_param)
+     * sets at the first TCH both B_SYNC_TCH_UL (bit 8 of d_ctrl_tch) AND
+     * B_SYNC_TCH_DL (bit 9); the Magnetite TI L1 sets bit 8 alone, its bit 9
+     * is named B_SYNC_AMR and stays 0 (d_ctrl_tch 0x01d1 then 0x0091). Without
+     * downlink sync the ROM keeps an arbitrary TCH block phase and decodes
+     * every FACCH with its last two bursts missing (Fire KO, RR Assignment
+     * Failure). Set here, at the end of the tick, on the W page the ROM reads
+     * at the next tick. CALYPSO_TI_SYNC_DL=0 disables it. */
     {
-        /* n = 1 : sur la page du bit 8 ; n > 1 : sur la (n-1)-ieme page a tache suivante (decaler la phase). */
-        int sync_dl = calypso_reglage("CALYPSO_TI_SYNC_DL", 1);   /* a chaud, /dev/shm/calypso_reglages */
+        /* n = 1: on the page carrying bit 8; n > 1: on the (n-1)-th following
+         * task page (shifts the phase). */
+        int sync_dl = calypso_reglage("CALYPSO_TI_SYNC_DL", 1);   /* live, /dev/shm/calypso_reglages */
         static int attente = -1;
-        static bool fait_tch;   /* [2026-10-22 21:00] une fois par TCH */
-        uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, mot 9 de la page W */
+        static bool fait_tch;   /* once per TCH */
+        uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, word 9 of the W page */
         uint16_t td = api_ram[(API_W_PAGE(pg) + WP_D_TASK_D) / 2] & 0x7fffu;
         if (!g.sur_tch) fait_tch = false;
         if (sync_dl > 0 && taches) {
-            /* [2026-10-22 21:00] AUSSI SUR LA PREMIERE TACHE TCH. Appels de 20:52 et 20:58 : la L1 TI pose
-             * d_ctrl_tch=0x0091 (sans le bit 8) des la premiere page TCH, le declencheur ne partait jamais
-             * (0 [sync-dl]) et toute la parole descendante sortait en BFI (1500/1500, ~30 bits faux). */
+            /* ALSO ON THE FIRST TCH TASK: the TI L1 may set d_ctrl_tch=0x0091
+             * (without bit 8) from the first TCH page on, so bit 8 alone is
+             * not a reliable trigger. */
             if ((*ctrl & 0x0100) && !(*ctrl & 0x0200)) attente = sync_dl - 1;
             else if (td == TCHT_DSP_TASK && !fait_tch && !(*ctrl & 0x0200)) { attente = sync_dl - 1; fait_tch = true; }
             else if (attente > 0) attente--;
@@ -1365,16 +1273,18 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             }
         }
     }
-    /* [2026-10-22 22:40] VOIX PAR L'HOTE : PAS DE CODEC ROM. Avec PONT_VOIX_HOTE=1 (pont/voix_hote.py, libgsm) la
-     * parole ne passe plus par la ROM, mais la L1 TI pose B_VOCODER_ON (bit 7 de d_ctrl_tch, 0x0091) : la ROM
-     * codait et decodait quand meme chaque trame (profil PDROM eb00/eec0/e8c0, PROM0 c6xx/cf00/d9c0), 8,4 ms par
-     * trame pour 4,62, horloge du pont asservie au DSP -> tout le reseau a 55 % (DL 27 trames/s). Bit efface sur
-     * la page W a tache. CALYPSO_TI_VOCODEUR_OFF (a chaud) : defaut 1 si PONT_VOIX_HOTE=1, sinon 0. */
+    /* VOICE BY THE HOST: NO ROM CODEC. With PONT_VOIX_HOTE=1 (pont/voix_hote.py,
+     * libgsm) speech no longer goes through the ROM, but the TI L1 sets
+     * B_VOCODER_ON (bit 7 of d_ctrl_tch, 0x0091) and the ROM would still
+     * encode and decode every frame (8.4 ms per frame for 4.62 available,
+     * with the bridge clock slaved to the DSP: the whole network slows down).
+     * The bit is cleared on the task W page. CALYPSO_TI_VOCODEUR_OFF (live
+     * setting): default 1 if PONT_VOIX_HOTE=1, else 0. */
     {
         static int defaut = -1;
         if (defaut < 0) { const char *e = calypso_getenv("PONT_VOIX_HOTE"); defaut = (e && *e == '1'); }
         if (taches && calypso_reglage("CALYPSO_TI_VOCODEUR_OFF", defaut)) {
-            uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, mot 9 de la page W */
+            uint16_t *ctrl = &api_ram[(API_W_PAGE(pg) + 0x12u) / 2];   /* d_ctrl_tch, word 9 of the W page */
             if (*ctrl & 0x0080) {
                 static unsigned n_voc;
                 *ctrl &= (uint16_t)~0x0080u;
@@ -1385,19 +1295,17 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             }
         }
     }
-    prothese_facch_dl(api_ram);   /* [2026-10-22] voir plus haut */
+    prothese_facch_dl(api_ram);   /* see above */
 
-    /* [2026-09-21] LE CANAL DEDIE SE LIBERE AUSSI QUAND L'ARM RECHERCHE LA
-     * SYNCHRO. Le tap L1CTL de QEMU n'annonce pas toujours la liberation ;
-     * mesure : /dev/shm/calypso_bsp_dedie a garde « tn=1 ss=0 » bien apres la
-     * fin de la communication. Le BSP continuait donc de remplacer TS0 sur les
-     * trames du canal -- et pour SS=0 ce sont fn%%51 = 0..3, or fn%%51=0 porte
-     * la FCCH et fn%%51=1 la SCH. Le mobile perdait sa synchro pour de bon :
-     * « FBSB RESP: result=255 » en boucle, d_fb_det=0, DSP parque.
+    /* THE DEDICATED CHANNEL IS ALSO RELEASED WHEN THE ARM SEARCHES FOR SYNC.
+     * The QEMU L1CTL tap does not always announce the release; the BSP would
+     * then keep replacing TS0 on the channel frames -- for SS=0 those are
+     * fn%%51 = 0..3, and fn%%51=0 carries the FCCH, fn%%51=1 the SCH -- and
+     * the mobile would lose its sync for good.
      *
-     * Une tache FB (5) ou SB (6) postee par l'ARM veut dire qu'il cherche la
-     * synchro sur TS0 : il n'est plus en mode dedie, quoi qu'en dise le tap.
-     * Ce signal-la vient du firmware lui-meme. */
+     * An FB (5) or SB (6) task posted by the ARM means it searches for sync on
+     * TS0: it is no longer in dedicated mode, whatever the tap says. That
+     * signal comes from the firmware itself. */
     {
         uint16_t md0 = api_ram[(API_W_PAGE(0) + WP_D_TASK_MD) / 2] & 0xff;
         uint16_t md1 = api_ram[(API_W_PAGE(1) + WP_D_TASK_MD) / 2] & 0xff;
@@ -1417,15 +1325,11 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     sonde_afd(api_ram, fn);
     sonde_add(api_ram, fn);
 
-    /* [2026-09-21] QUI RATE, ET QUAND. La descente dediee perd environ un bloc
-     * sur deux (« Dropping frame with 110 bit errors », fire_crc >= 2 cote
-     * layer23) alors que pont decode les MEMES blocs sans une seule erreur
-     * (TS1/0:38/0 TS1/32:14/0) et que le BSP livre tous les bursts
-     * (manques=0). C'est donc la demodulation dans la ROM qui flanche, pas la
-     * plomberie. Cette sonde donne le verdict bloc par bloc : le mot d'etat de
-     * a_cd (bit 15 = bloc present, bit 6 = erreur de Fire) avec la trame et sa
-     * position dans la multitrame, de quoi voir si l'echec suit le SDCCH, la
-     * SACCH, ou une position particuliere. MONTANT_ACD=0 la coupe. */
+    /* a_cd PROBE: block by block verdict of the dedicated downlink, the a_cd
+     * status word (bit 15 = block present, bit 6 = Fire error) with the frame
+     * and its position in the multiframe, to see whether failures follow the
+     * SDCCH, the SACCH, or a particular position. MONTANT_ACD=0 disables
+     * it. */
     {
         static int sonde = -1;
         if (sonde < 0) { const char *e = calypso_getenv("MONTANT_ACD"); sonde = (e && *e == '0') ? 0 : 1; }
@@ -1433,7 +1337,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             static uint16_t prec;
             static unsigned long ok, ko;
             uint16_t etat = api_ram[(API_NDB + NDB_A_CD) / 2];
-            /* [22:15] en dedie TI : chaque bloc (le filtre etat != prec cachait les FIRE KO consecutifs) */
+            /* TI dedicated mode: every block (etat != prec alone would hide consecutive FIRE KO) */
             static uint8_t d_prec[4];
             const uint8_t *d = (const uint8_t *)api_ram + API_NDB + NDB_A_CD + 6;
             bool nouveau = (etat != prec) || (g_ti_dedie && memcmp(d, d_prec, 4) != 0);
@@ -1457,11 +1361,11 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     uint16_t task_ra = wp[WP_D_TASK_RA / 2];
     uint16_t d_rach  = api_ram[(API_NDB + NDB_D_RACH) / 2];
 
-    /* [2026-10-21 21:50] SONDE DU MONTANT DEDIE (Magnetite, BTS classique). Apres l'IMM ASS la L1 TI passe sur
-     * le SDCCH (DBA_I) mais aucun bloc montant n'a ete publie : capture_sdcch_ul n'etait meme jamais appelee
-     * (task_u toujours 0 ici). A la premiere tache ALLC vue dans une page W, 300 lignes : taches des deux pages,
-     * d_dsp_page, page choisie, en-tete de a_cu. Et si a_cu porte B_BLUD sans tache montante vue, on le prend
-     * quand meme (la L1 TI le pose avec le bloc a emettre, l1ddsp_load_info). */
+    /* DEDICATED UPLINK PROBE (Magnetite, classic BTS). At the first ALLC task
+     * seen in a W page, 300 lines: tasks of both pages, d_dsp_page, chosen
+     * page, a_cu header. And if a_cu carries B_BLUD without an uplink task
+     * seen, it is taken anyway (the TI L1 posts it with the block to send,
+     * l1ddsp_load_info). */
     {
         static unsigned reste;
         static bool arme;
@@ -1481,10 +1385,12 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         }
         if (arme && task_u == 0 && (cu0 & B_BLUD))
             capture_sdcch_ul(api_ram, 0, fn);
-        /* [2026-10-21 22:05] etat dedie du firmware TI : actif tant qu'une tache ALLC a ete vue dans les 102
-         * dernieres trames. Arme la sonde a_cd et le decalage BSP en dedie (CALYPSO_BSP_DEDIE_DECAL). */
-        /* [22:15] sur les TACHES MONTANTES (d_task_u, 11/12 vus a la sonde) : ALLC (24) sert aussi au BCCH et
-         * au CCCH en veille (a_cd : SI3, paging lus « en dedie »), le decalage aurait frappe la veille. */
+        /* Dedicated state of the TI firmware: active while an uplink task has
+         * been seen in the last 102 frames. Arms the a_cd probe and the BSP
+         * offset in dedicated mode (CALYPSO_BSP_DEDIE_DECAL). */
+        /* Based on the UPLINK TASKS (d_task_u, 11/12): ALLC (24) also serves
+         * the BCCH and the CCCH in idle, so it would trigger the offset in
+         * idle too. */
         static uint32_t derniere_allc;
         static bool vu_allc;
         uint16_t tu0 = api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2] & 0x7fffu;
@@ -1497,30 +1403,22 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         }
     }
 
-    /* RACH : la tache, pas la valeur.
+    /* RACH: the task, not the value.
      *
-     * [2026-09-21, mesure sur le banc reel] Le mot NDB d_rach (octet 0x474
-     * cote ARM) est AUSSI de la memoire du C54x (data[0x0A3A]) : la ROM y
-     * laisse du residu. Echantillonnage a 4 ms pendant 90 s, une ligne par
-     * changement :
+     * The NDB word d_rach (byte 0x474 on the ARM side) is ALSO C54x memory
+     * (data[0x0A3A]): the ROM leaves residue there (typically 0xfe00), so
+     * triggering on the d_rach value would publish a bogus access burst
+     * (ra=0xfe, bsic=0) at every start. The right signal is d_task_ra:
+     * prim_rach.c:77 writes dsp_task_iq_swap(RACH_DSP_TASK=10, arfcn, 1)
+     * there when it posts the RA, and nothing else is worth 10. Optionally
+     * the word is cleared after publication (like
+     * qosmo-dsp/calypso_trx.c:1955): the firmware never reads it back (only
+     * prim_rach.c:77 and sync.c:307 write it), which gives a clean edge for
+     * the next attempt.
      *
-     *     d_rach   W0.task_ra W1.task_ra   occurrences
-     *     0xfe00   0x0000     0x0000       3219   <- residu de la ROM
-     *     0x0d54   0x000a     0x0000          1   <- vraie tentative
-     *     0x0954   0x0000     0x000a          1   <- vraie tentative
-     *     0x0c54   0x0000     0x000a          1   <- vraie tentative
-     *
-     * Declencher sur la valeur de d_rach publiait donc un access-burst bidon
-     * (ra=0xfe, bsic=0) a chaque demarrage. Le signal juste est d_task_ra :
-     * prim_rach.c:77 y ecrit dsp_task_iq_swap(RACH_DSP_TASK=10, arfcn, 1) au
-     * moment ou il pose la RA, et rien d'autre ne vaut 10. On efface le mot
-     * apres publication (comme qosmo-dsp/calypso_trx.c:1955) : le firmware ne
-     * le relit jamais (seuls prim_rach.c:77 et sync.c:307 l'ecrivent) et c'est
-     * ce qui donne un front propre a la tentative suivante.
-     *
-     * MONTANT_RACH_SUR_DRACH=1 retablit l'ancien declencheur (transition de
-     * d_rach, premiere valeur prise comme reference) pour le cas ou quelque
-     * chose consommerait d_task_ra avant cette scrutation. */
+     * MONTANT_RACH_SUR_DRACH=1 selects the value trigger (d_rach transition,
+     * first value taken as reference) for the case where something would
+     * consume d_task_ra before this poll. */
     static int sur_drach = -1;
     if (sur_drach < 0) {
         const char *e = calypso_getenv("MONTANT_RACH_SUR_DRACH");
@@ -1535,12 +1433,11 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         front_valeur = (d_rach != 0);
         g.prev_rach = d_rach;
     }
-    /* [2026-10-15] FRONT DE LA TACHE quand la ROM la garde (MONTANT_EFFACE_TASK_RA=0) :
-     * personne n'efface alors d_task_ra, qui reste a RACH_DSP_TASK dans la page W, et la
-     * garde de RACH_GARDE_TRAMES republiait le meme RACH toutes les 4 trames (7
-     * publications pour 1 burst de la ROM, dsp.log du 15/10). On ne publie plus que sur
-     * le front (tache absente -> presente) ou un nouveau d_rach. MONTANT_RACH_DEDUP=0 :
-     * ancien comportement. */
+    /* TASK EDGE when the ROM keeps the task (MONTANT_EFFACE_TASK_RA=0): nobody
+     * clears d_task_ra then, it stays at RACH_DSP_TASK in the W page, and the
+     * RACH_GARDE_TRAMES guard alone would republish the same RACH every 4
+     * frames. Publication only happens on the edge (task absent -> present)
+     * or on a new d_rach. MONTANT_RACH_DEDUP=0: publish on the guard alone. */
     static int front_seul = -1;
     static bool tache_avant;
     if (front_seul < 0) {
@@ -1553,11 +1450,10 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     }
     bool nouveau_rach = !front_seul || !tache_avant || front_valeur;
     tache_avant = tache_rach;
-    /* [2026-10-21 21:25] RACH DIFFERE (MONTANT_RACH_DIFFERE=N trames, Magnetite : 1 par run.sh). La L1 TI pose
-     * d_task_ra AVANT d'ecrire le d_rach de la tentative : lu au front, d_rach etait celui de la tentative
-     * PRECEDENTE (capture CCCH du 21/10 21:17 : RA_R 9868 ra 4 publie ra 8, 10114 ra 8 publie ra 4...), l'IMM ASS
-     * portait le bon fn mais le RA d'avant et Magnetite l'ignorait. On garde le tick du front et on lit d_rach
-     * N trames plus tard. */
+    /* DEFERRED RACH (MONTANT_RACH_DIFFERE=N frames, Magnetite: 1 via run.sh).
+     * The TI L1 posts d_task_ra BEFORE writing the d_rach of the attempt: read
+     * at the edge, d_rach would be the one of the PREVIOUS attempt. The tick of
+     * the edge is kept and d_rach is read N frames later. */
     static int differe = -1;
     static bool rach_attente;
     static uint32_t fn_attente;
@@ -1592,13 +1488,13 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             api_ram[(API_NDB + NDB_D_RACH) / 2] = 0;
             g.prev_rach = 0;
         }
-        /* [2026-10-03] Effacement de d_task_ra dans la page W : la ROM ne voit donc jamais la tache RACH
-         * (elle la lirait a la trame suivante) et n'execute pas le RACH ; c'est le pont qui emet
-         * l'access-burst (side-band calypso_rach). Ecart assume, desormais reglable :
-         * MONTANT_EFFACE_TASK_RA=0 laisse la tache a la ROM (comportement d'un vrai Calypso, a valider). */
-        /* [2026-10-04] Par defaut la ROM GARDE la tache : elle code l'access-burst (0x3f8a, 36 bits =
-         * gsm0503_rach_ext_encode) et son emetteur le serialise dans le script TSP (dsp_tester rach,
-         * 5/5), publie par pont.c (calypso_tx_rom). MONTANT_EFFACE_TASK_RA=1 : ancien comportement. */
+        /* MONTANT_EFFACE_TASK_RA=1 clears d_task_ra in the W page: the ROM
+         * never sees the RACH task (it would read it on the next frame) and
+         * the bridge sends the access burst (side-band calypso_rach). */
+        /* By default the ROM KEEPS the task: it encodes the access burst
+         * (0x3f8a, 36 bits = gsm0503_rach_ext_encode) and its transmitter
+         * serialises it in the TSP script, published by pont.c
+         * (calypso_tx_rom). */
         static int efface_ra = -1;
         if (efface_ra < 0) {
             const char *e = calypso_getenv("MONTANT_EFFACE_TASK_RA");
@@ -1607,11 +1503,11 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
                                                            : "laisse a la ROM : elle code l'access-burst (MONTANT_EFFACE_TASK_RA=1 pour l'ancien comportement)");
         }
         if (task_ra && efface_ra) {
-            wp[WP_D_TASK_RA / 2] = 0;   /* comme qosmo-dsp/calypso_trx.c:1955 */
+            wp[WP_D_TASK_RA / 2] = 0;   /* like qosmo-dsp/calypso_trx.c:1955 */
         }
     }
 
-    /* SDCCH / SACCH / FACCH / parole : meme aiguillage que la couche 1 gr-gsm. */
+    /* SDCCH / SACCH / FACCH / speech: same dispatch as the gr-gsm layer 1. */
     if (task_u != 0 && !capture_tch_ul(api_ram, task_u, fn)) {
         capture_sdcch_ul(api_ram, task_u, fn);
     }
@@ -1619,14 +1515,14 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     publier_kc(api_ram);
 }
 
-/* Le canal dedie vient d'etre libere (PONT_DCCH, genre 0xFF) : la memoire de
- * l'anti-doublon doit repartir a zero, sinon le SABM de la connexion SUIVANTE,
- * octet pour octet identique au precedent, serait pris pour un doublon et ne
- * partirait jamais. */
+/* The dedicated channel has just been released (PONT_DCCH, kind 0xFF): the
+ * duplicate filter memory must restart, otherwise the SABM of the NEXT
+ * connection, byte for byte identical to the previous one, would be taken
+ * for a duplicate and never leave. */
 void montant_canal_libere(void)
 {
     g.sdcch_a_dernier = false;
-    g_kc_liberer = true;   /* le Kc de CETTE connexion ne vaut plus rien */
+    g_kc_liberer = true;   /* the Kc of THIS connection is worthless now */
 }
 
 void montant_bilan(void)

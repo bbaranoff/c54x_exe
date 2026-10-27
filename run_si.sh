@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# run_si.sh — amener le mobile (pile DSP c54x_exe) jusqu'à décoder la BCCH du
-# VRAI réseau et lire un System Information, PUIS vérifier que le LAI décodé
-# correspond à la config du réseau. Sinon = FAUX POSITIF, dit tel quel.
+# run_si.sh - bring the mobile (c54x_exe DSP stack) up to decoding the BCCH of
+# the REAL network and reading a System Information, THEN check that the
+# decoded LAI matches the network config. Otherwise = FALSE POSITIVE, said so.
 #
-# C'est un banc SOUS ÉCHAFAUDAGE (« canning »), PAS un fonctionnement natif :
-#   - PONT_CAN_TOA=23      TOA FB figée (le corrélateur natif ne verrouille pas)
-#   - PONT_CAN_SB=<bsic>   résultat SB fabriqué (BSIC + FN du BTS), comme qemu-src
-#   - CALYPSO_TWL3025_AFC_HZ  rotation AFC forcée (annule l'offset de fréquence)
-#   - CALYPSO_PONT_LOCKSTEP=1  trame QEMU cadencée sur le DSP
-# Chaque hack actif est imprimé. Un SI lu avec des hacks n'est pas une preuve du
-# DSP natif ; c'est un test d'intégration de l'aval (sync -> BCCH -> L2/L3).
+# The chain runs NATIVE: no result scaffolding (no CAN_TOA / CAN_SB / forced
+# AFC / RHEA_DMA); the ROM's FB correlator, AFC and DMA do the work. Only the
+# pacing and burst feeding are set, and they fabricate no result:
+#   - CALYPSO_BSP_DIRECT_FEED=1  bursts delivered straight to the DSP buffers
+#   - CALYPSO_PONT_LOCKSTEP=1    QEMU frame paced on the DSP
+# A SI read here is an integration test of the whole chain
+# (sync -> BCCH -> L2/L3) against the network's own identity.
 #
-#   ./run_si.sh              # chaîne réelle (BTS + pont), échafaudage complet
-#   ./run_si.sh --secondes N # durée d'observation (défaut 90)
-#   ./run_si.sh --stop       # tout arrêter
+#   ./run_si.sh              # real chain (BTS + bridge)
+#   ./run_si.sh --secondes N # observation time (default 90)
+#   ./run_si.sh --stop       # stop everything
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUNDIR=/tmp/c54x-pont
 SECS=90
 BSIC="$(grep -m1 -oE 'base_station_id_code [0-9]+' /etc/osmocom/osmo-bsc.cfg 2>/dev/null | grep -oE '[0-9]+$')"; BSIC="${BSIC:-7}"
-# LAI attendu, lu depuis la config (MCC/MNC/LAC)
+# expected LAI, read from the config (MCC/MNC/LAC)
 E_MCC="$(grep -m1 -oE 'network country code [0-9]+' /etc/osmocom/osmo-msc.cfg | grep -oE '[0-9]+$')"
 E_MNC="$(grep -m1 -oE 'mobile network code [0-9]+'  /etc/osmocom/osmo-msc.cfg | grep -oE '[0-9]+$')"
 E_LAC="$(grep -m1 -oE 'location_area_code 0x[0-9a-fA-F]+' /etc/osmocom/osmo-bsc.cfg | grep -oE '0x[0-9a-fA-F]+')"
@@ -36,11 +36,11 @@ echo "== run_si : cible LAI attendu MCC=$E_MCC MNC=$E_MNC LAC=$E_LAC (BSIC=$BSIC
 systemctl start osmo-bts-trx 2>/dev/null; sleep 3
 : > "$RUNDIR/mobile.log" 2>/dev/null; : > "$RUNDIR/osmocon.log" 2>/dev/null
 
-# chaîne réelle, NATIF. [2026-10-06] L'echafaudage de resultat (CAN_TOA/CAN_SB/AFC_HZ/RHEA_DMA) a ete
-# RETIRE : le corrélateur FB, l'AFC et la DMA de la ROM font le travail. On ne garde que le cadencement
-# et l'alimentation des bursts, qui ne fabriquent aucun resultat. (Historique des hacks : git.)
+# real chain, NATIVE: no result scaffolding (CAN_TOA/CAN_SB/AFC_HZ/RHEA_DMA);
+# the ROM's FB correlator, AFC and DMA do the work. Only the pacing and the
+# burst feeding are set, and they fabricate no result.
 export MODE=dsp PONT=1 IQ=none
-export CALYPSO_BSP_DIRECT_FEED=1 CALYPSO_PONT_LOCKSTEP=1   # cadencement / alimentation (pas des triches)
+export CALYPSO_BSP_DIRECT_FEED=1 CALYPSO_PONT_LOCKSTEP=1   # pacing / feeding (not cheats)
 echo "== NATIF : aucun echafaudage (CAN_TOA/CAN_SB/AFC_HZ/RHEA_DMA retires) ; LOCKSTEP + DIRECT_FEED"
 "$HERE/run.sh" >/dev/null 2>&1 &
 sleep 12

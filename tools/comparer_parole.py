@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-# comparer_parole.py - la parole et la FACCH descendantes : ROM contre reference.
+# comparer_parole.py - downlink speech and FACCH: ROM against reference.
 #
-# [2026-09-23] Toutes les trames de parole que la ROM livre dans a_dd portent
-# B_BFI, avec 15 a 90 erreurs rapportees par trame ; et au raccroche de 21:29
-# elle a rate toutes les FACCH que le pont, lui, decodait. Ce script tranche
-# entre « les bursts livres au DSP sont mauvais » et « le DSP decode mal » :
+# Decides between "the bursts delivered to the DSP are bad" and "the DSP
+# decodes badly" by decoding the same bursts with libosmocoding and comparing
+# with what the ROM returned:
 #
-#   /dev/shm/calypso_tch_dl.bin   bursts TCH que le BSP a livres au DSP
-#                                 (tick BE32, fn BTS BE32, 148 bits 0/1)
-#   /dev/shm/calypso_add_dl.bin   trames que la ROM a rendues (montant.c,
-#                                 noter_dl : parole convertie TI -> FR, FACCH)
+#   /dev/shm/calypso_tch_dl.bin   TCH bursts the BSP delivered to the DSP
+#                                 (tick BE32, BTS fn BE32, 148 bits 0/1)
+#   /dev/shm/calypso_add_dl.bin   frames the ROM returned (montant.c,
+#                                 noter_dl: speech converted TI -> FR, FACCH)
 #
-# Les bursts sont dechiffres avec le Kc de la session (lignes [a5] de dsp.log)
-# et le COUNT de leur propre fn, puis decodes par gsm0503_tch_fr_decode, comme
-# le fait le pont. Chaque bloc est apparie a la trame que la ROM a livree juste
-# apres ; pour la parole on compte les bits faux par classe (Ia 50, Ib 132,
-# II 78), pour la FACCH on compare les 23 octets.
+# The bursts are deciphered with the session Kc ([a5] lines of dsp.log) and
+# the COUNT of their own fn, then decoded by gsm0503_tch_fr_decode, as the
+# bridge does. Each block is paired with the frame the ROM delivered right
+# after it; for speech the wrong bits are counted per class (Ia 50, Ib 132,
+# II 78), for the FACCH the 23 bytes are compared.
 #
-# Usage : tools/comparer_parole.py [--dsp-log /tmp/c54x-pont/dsp.log] [--kc HEX]
+# Usage: tools/comparer_parole.py [--dsp-log /tmp/c54x-pont/dsp.log] [--kc HEX]
 import argparse
 import collections
 import ctypes
@@ -51,7 +50,7 @@ def lire_rom(path):
 
 
 def lire_kc(dsp_log):
-    """(fn, Kc) de chaque nouveau Kc vu par le coprocesseur A5."""
+    """(fn, Kc) of each new Kc seen by the A5 coprocessor."""
     kcs = []
     for line in open(dsp_log, errors="replace"):
         m = re.search(r"\[a5\] #\d+ A5/\d fn=(\d+) .*Kc=([0-9a-f]{16})", line)
@@ -71,8 +70,8 @@ def kc_pour(kcs, fn):
 
 
 def classes_fr():
-    """classe (0 Ia, 1 Ib, 2 II) de chaque bit du format FR standard (260 bits
-    apres l'entete 0xd), d'apres gsm610_bitorder : d[k] = s[bitorder[k]]."""
+    """class (0 Ia, 1 Ib, 2 II) of each bit of the standard FR format (260 bits
+    after the 0xd header), from gsm610_bitorder: d[k] = s[bitorder[k]]."""
     lib = ctypes.CDLL("libosmocodec.so")
     order = (ctypes.c_uint16 * 260).in_dll(lib, "gsm610_bitorder")
     cl = [0] * 260
@@ -109,9 +108,9 @@ def main():
         len(rom), sum(1 for r in rom if r[1] == 0), sum(1 for r in rom if r[1] == 1),
         [k.hex() for _, k in kcs]))
 
-    # Decodage de reference : un bloc se termine sur le 4e burst d'un demi-bloc.
+    # Reference decoding: a block ends on the 4th burst of a half-block.
     par_fn = {fn: b for _, fn, b in bursts}
-    blocs = {}   # fn de fin -> (rc, donnees, erreurs)
+    blocs = {}   # end fn -> (rc, data, errors)
     for fn in sorted(par_fn):
         if not gsm.is_tch_carrier(fn) or gsm.tch_burst_index(fn) % 4 != 3:
             continue

@@ -1,44 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""layer1_tester.py - l'interface layer1 (ARM) <-> ROM du DSP Calypso, champ par champ.
+"""layer1_tester.py - the layer1 (ARM) <-> Calypso DSP ROM interface, field by field.
 
-Ce que l'outil fait (sorties PASS / FAIL / ECART / NON-EXERCE / INFO) :
+What the tool does (outputs PASS / FAIL / ECART / NON-EXERCE / INFO):
 
- 1. EXTRAIRE. Les structures de l'API RAM telles que COMPILEES pour le firmware :
-    - DWARF de layer1.highram.elf (gdb-multiarch « ptype /o ») : offset et taille de
-      chaque champ de T_DB_MCU_TO_DSP, T_DB_DSP_TO_MCU, T_NDB_MCU_DSP, T_PARAM_MCU_DSP ;
-    - offsetof() sur dsp_api.h + l1_environment.h (memes #define : DSP=36, CHIPSET=12,
-      ANLG_FAM=2) compile sur l'hote : les deux doivent coincider champ par champ ;
-    - BASE_API_* (en-tete) contre l'initialiseur dsp_api de l'ELF, dsp_params (PARAM),
-      macros B_*, *_DSP_TASK, BL_* (calypso/dsp.c).
-    Chaque champ -> adresse ARM, offset octets dans l'API RAM, adresse mot DSP
-    (0x0800 + octets/2).
- 2. RECOUPER avec les constantes de qosmo (calypso_api.h, calypso_fbsb.h,
-    calypso_arm2dsp.c, calypso_c54x.h, calypso_bsp.c...) et de c54x_exe (pont.c,
-    montant.c, rejouer.c, tools/rejeu_banc.c...) : macros nommees (table d'unites
-    ci-dessous, valeurs jamais recopiees) + balayage des lignes qui citent un champ
-    a cote d'une adresse en dur (SUSPECT si l'adresse tombe sur un autre champ).
- 3. FONCTIONS. Balayage statique des fonctions de la layer1 (layer1/*.c,
-    calypso/dsp.c) : quels champs chacune ecrit / lit. Avec un rejeu (--rejeu ou
-    --mesure), pour chaque champ et chaque fonction : l'ARM y ecrit-il (enregistrements
-    'A'), des valeurs coherentes (codes de tache, burst_d/u, d_ctrl_system, d_ctrl_tch,
-    d_fn, a_a5fn, d_dsp_page, B_BLUD...), la ROM le lit-elle (crochet de
-    tools/layer1_tester.c), la ROM produit-elle ce que la layer1 lit ; page W
-    ecrite = page annoncee par d_dsp_page ; echo page W -> page R ; PARAM et
-    initialisations NDB de l'etat 'S' = valeurs du firmware.
- 4. CARTE (--md, alias « api_carte ») : docs/carte-memoire.md, tables generees +
-    significations de tools/layer1_tester.notes.tsv et adresses internes de
-    tools/layer1_tester.internes.tsv (editables a la main, une source par ligne).
+ 1. EXTRACT. The API RAM structures as COMPILED for the firmware:
+    - DWARF of layer1.highram.elf (gdb-multiarch "ptype /o"): offset and size of
+      each field of T_DB_MCU_TO_DSP, T_DB_DSP_TO_MCU, T_NDB_MCU_DSP, T_PARAM_MCU_DSP;
+    - offsetof() on dsp_api.h + l1_environment.h (same #define: DSP=36, CHIPSET=12,
+      ANLG_FAM=2) compiled on the host: both must agree field by field;
+    - BASE_API_* (header) against the dsp_api initialiser of the ELF, dsp_params (PARAM),
+      B_*, *_DSP_TASK, BL_* macros (calypso/dsp.c).
+    Each field -> ARM address, byte offset in the API RAM, DSP word address
+    (0x0800 + bytes/2).
+ 2. CROSS-CHECK with the constants of qosmo (calypso_api.h, calypso_fbsb.h,
+    calypso_arm2dsp.c, calypso_c54x.h, calypso_bsp.c...) and of c54x_exe (pont.c,
+    montant.c, rejouer.c, tools/rejeu_banc.c...): named macros (unit table below,
+    values never copied) + scan of the lines that cite a field next to a hard-coded
+    address (SUSPECT if the address lands on another field).
+ 3. FUNCTIONS. Static scan of the layer1 functions (layer1/*.c, calypso/dsp.c):
+    which fields each one writes / reads. With a replay (--rejeu or --mesure), for
+    each field and each function: does the ARM write it ('A' records), with coherent
+    values (task codes, burst_d/u, d_ctrl_system, d_ctrl_tch, d_fn, a_a5fn,
+    d_dsp_page, B_BLUD...), does the ROM read it (hook of tools/layer1_tester.c),
+    does the ROM produce what the layer1 reads; W page written = page announced by
+    d_dsp_page; echo W page -> R page; PARAM and NDB initialisations of the 'S'
+    state = firmware values.
+ 4. MAP (--md, alias "api_carte"): docs/carte-memoire.md, generated tables +
+    meanings from tools/layer1_tester.notes.tsv and internal addresses from
+    tools/layer1_tester.internes.tsv (hand-editable, one source per line).
 
     make layer1_tester
-    python3 tools/layer1_tester.py                          # 1-3 (statique)
-    python3 tools/layer1_tester.py --rejeu FICHIER          # + mesure (≈ 1 min)
+    python3 tools/layer1_tester.py                          # 1-3 (static)
+    python3 tools/layer1_tester.py --rejeu FICHIER          # + measurement (≈ 1 min)
     python3 tools/layer1_tester.py --rejeu FICHIER --md docs/carte-memoire.md
     python3 tools/layer1_tester.py --mesure m.tsv --journal j.tsv --enreg FICHIER --md ...
     python3 tools/layer1_tester.py api_carte --rejeu FICHIER   # = --md docs/carte-memoire.md
 
-Code de sortie 1 s'il y a au moins un FAIL. Lecture seule partout (firmware, qosmo,
-enregistrement) ; n'ecrit que --md, --cache et les fichiers temporaires.
+Exit code 1 if there is at least one FAIL. Read-only everywhere (firmware, qosmo,
+recording); only writes --md, --cache and the temporary files.
 """
 import argparse
 import collections
@@ -58,7 +58,7 @@ API_ARM = 0xFFD00000
 API_DSP = 0x0800
 API_MOTS = 0x2000
 
-# ------------------------------------------------------------------ resultats
+# -------------------------------------------------------------------- results
 class Resultats:
     ORDRE = ['FAIL', 'SUSPECT', 'ECART', 'NON-EXERCE', 'PASS', 'INFO']
 
@@ -80,7 +80,7 @@ class Resultats:
 
 
 def rel(p):
-    """Chemin relatif a /opt/GSM pour les sources citees."""
+    """Path relative to /opt/GSM for the cited sources."""
     p = os.path.abspath(p)
     return os.path.relpath(p, GSM) if p.startswith(GSM + os.sep) else p
 
@@ -92,7 +92,7 @@ def lancer(cmd, **kw):
     return r.stdout
 
 
-# ------------------------------------------------------- evaluation C minimale
+# ------------------------------------------------------- minimal C evaluation
 _SUFFIXE = re.compile(r'\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b')
 _CAST = re.compile(r'\(\s*(?:const\s+)?(?:volatile\s+)?(?:unsigned\s+|signed\s+)?'
                    r'(?:u?int(?:8|16|32|64)_t|int|long|short|char|API|API_SIGNED)\s*\*?\s*\)')
@@ -102,7 +102,7 @@ def c_vers_py(expr):
     e = _CAST.sub('', expr)
     e = _SUFFIXE.sub(r'\1', e)
     e = e.replace('&&', ' and ').replace('||', ' or ').replace('!', ' not ').replace(' not =', '!=')
-    # ternaire a ? b : c (un seul niveau)
+    # ternary a ? b : c (a single level)
     m = re.match(r'^\s*\(?\s*(.+?)\s*\?\s*(.+?)\s*:\s*(.+?)\s*\)?\s*$', e)
     if m and '?' in e:
         e = '((%s) if (%s) else (%s))' % (m.group(2), m.group(1), m.group(3))
@@ -111,7 +111,7 @@ def c_vers_py(expr):
 
 
 def evaluer(expr, env, prof=0):
-    """Evalue une expression constante C ; env : nom -> (texte, params) ou entier."""
+    """Evaluates a C constant expression; env: name -> (text, params) or integer."""
     if prof > 20:
         raise ValueError('recursion')
     expr = re.sub(r'/\*.*?\*/', '', expr)
@@ -150,7 +150,7 @@ _DEFINE = re.compile(r'^\s*#\s*define\s+([A-Za-z_]\w*)(\(([^)]*)\))?(?:[ \t]+(.*
 
 
 def lire_defines(chemin):
-    """nom -> (texte, params|None, ligne) ; joint les lignes continuees par \\."""
+    """name -> (text, params|None, line); joins the lines continued by \\."""
     res = {}
     try:
         lignes = open(chemin, errors='replace').read().split('\n')
@@ -185,7 +185,7 @@ def valeur_macro(defs, nom, args=None):
 
 # ------------------------------------------------------------------ extraction
 class Interface:
-    """Les structures API de la layer1, telles que compilees."""
+    """The layer1 API structures, as compiled."""
     TYPES = ['T_DB_MCU_TO_DSP', 'T_DB_DSP_TO_MCU', 'T_NDB_MCU_DSP', 'T_PARAM_MCU_DSP']
     ZONES = [('W0', 'T_DB_MCU_TO_DSP', 'BASE_API_W_PAGE_0'), ('W1', 'T_DB_MCU_TO_DSP', 'BASE_API_W_PAGE_1'),
              ('R0', 'T_DB_DSP_TO_MCU', 'BASE_API_R_PAGE_0'), ('R1', 'T_DB_DSP_TO_MCU', 'BASE_API_R_PAGE_1'),
@@ -197,15 +197,15 @@ class Interface:
         self.hdr = os.path.join(self.inc, 'calypso', 'dsp_api.h')
         self.env_h = os.path.join(self.inc, 'calypso', 'l1_environment.h')
         self.dsp_c = os.path.join(fw, 'calypso', 'dsp.c')
-        self.disp = {}          # type -> [(nom, off, taille, n, signe)]
+        self.disp = {}          # type -> [(name, off, size, n, sign)]
         self.taille_elf = {}
         self.taille_hote = {}
-        self.l1 = {}            # macro layer1 -> valeur (compilee)
-        self.l1_src = {}        # macro -> fichier:ligne
-        self.dspc = {}          # macros de calypso/dsp.c
+        self.l1 = {}            # layer1 macro -> value (compiled)
+        self.l1_src = {}        # macro -> file:line
+        self.dspc = {}          # macros of calypso/dsp.c
         self.params = {}        # dsp_params (ELF)
         self.dsp_api_init = {}
-        self.commentaires = {}  # (type, champ) -> texte
+        self.commentaires = {}  # (type, field) -> text
         self.champs = []        # dicts
         self.par_mot = collections.defaultdict(list)
 
@@ -250,7 +250,7 @@ class Interface:
                 res[m.group(1)] = [int(v, 0)]
         return res
 
-    # -- offsetof hote + macros
+    # -- host offsetof + macros
     def _hote(self):
         defs = {}
         for f in (self.env_h, self.hdr):
@@ -271,7 +271,7 @@ class Interface:
         r = subprocess.run(['gcc', '-w', '-I', os.path.join(self.inc, 'calypso'), '-I', self.inc, '-o', exe, c],
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if r.returncode != 0:
-            # une macro non entiere casse la compilation : on retire les M fautives
+            # a non-integer macro breaks the compilation: drop the offending M lines
             mauvaises = set(re.findall(r"error: [^\n]*?'(\w+)'", r.stderr))
             src = [s for s in src if not any(('M %s ' % m) in s for m in mauvaises)]
             open(c, 'w').write('\n'.join(src) + '\n')
@@ -291,7 +291,7 @@ class Interface:
         return hote
 
     def _commentaires(self):
-        """Commentaires de chaque champ, depuis l'en-tete PREPROCESSE (branche active)."""
+        """Comment of each field, from the PREPROCESSED header (active branch)."""
         c = os.path.join(self.tmp, 'pp.c')
         open(c, 'w').write('#include "dsp_api.h"\n')
         pp = lancer(['gcc', '-E', '-C', '-P', '-I', os.path.join(self.inc, 'calypso'), '-I', self.inc, c])
@@ -327,7 +327,7 @@ class Interface:
         hote = self._hote()
         self._commentaires()
         self._dsp_c()
-        # 1. offsets ELF == offsetof hote
+        # 1. ELF offsets == host offsetof
         nb = collections.Counter()
         for t in self.TYPES:
             for (nom, off, taille, n, sg) in self.disp[t]:
@@ -346,7 +346,7 @@ class Interface:
                 r('ECART', 'extraction', 'sizeof(%s)' % t,
                   'ELF %s octets, hote %s : bourrage de fin (dernier champ %s finit a %d) ; offsets inchanges' %
                   (te, th, dernier[0], dernier[1] + dernier[2]), rel(self.elf))
-        # 2. bases : en-tete == initialiseur dsp_api de l'ELF
+        # 2. bases: header == dsp_api initialiser of the ELF
         for z, t, b in self.ZONES:
             if b not in self.l1:
                 r('FAIL', 'extraction', b, 'absent de dsp_api.h')
@@ -355,7 +355,7 @@ class Interface:
             st = 'PASS' if v == self.l1.get(base) else 'FAIL'
             r(st, 'extraction', 'dsp_api.%s' % cle, 'ELF %s, %s = 0x%08x' % (hex(v) if v is not None else None, base, self.l1.get(base, 0)),
               '%s ; %s' % (rel(self.dsp_c), self.l1_src.get(base, '')))
-        # 3. table des champs
+        # 3. field table
         for z, t, b in self.ZONES:
             base = self.l1[b]
             for (nom, off, taille, n, sg) in self.disp[t]:
@@ -368,7 +368,7 @@ class Interface:
                 self.champs.append(c)
                 for i, w in enumerate(c['mots']):
                     self.par_mot[w].append((c, i))
-        # 4. geometrie : pages disjointes, PARAM dans un trou du NDB, tout dans la fenetre DSP
+        # 4. geometry: disjoint pages, PARAM in a hole of the NDB, everything in the DSP window
         zones = {z: (self.l1[b] - API_ARM, self.l1[b] - API_ARM + self.taille_hote[t]) for z, t, b in self.ZONES}
         for a, b in (('W0', 'W1'), ('W1', 'R0'), ('R0', 'R1'), ('R1', 'NDB')):
             ok = zones[a][1] <= zones[b][0]
@@ -390,7 +390,7 @@ class Interface:
         r('PASS' if fin <= API_MOTS * 2 else 'FAIL', 'extraction', 'fenetre DSP',
           'structures 0x000..0x%03x octets = mots DSP 0x0800..0x%04x (fenetre 0x0800..0x%04x)' %
           (fin - 1, API_DSP + (fin - 1) // 2, API_DSP + API_MOTS - 1))
-        # 5. chargeur (calypso/dsp.c)
+        # 5. loader (calypso/dsp.c)
         base_ram = self.dspc.get('BASE_API_RAM')
         r('PASS' if base_ram == API_ARM else 'FAIL', 'extraction', 'BASE_API_RAM', '0x%08x' % (base_ram or 0), self.dspc_src.get('BASE_API_RAM', ''))
         api_size = self.dspc.get('API_SIZE')
@@ -403,7 +403,7 @@ class Interface:
                 dessous = [c['nom'] for c, i in self.par_mot.get(self.bl[n], [])]
                 r('INFO', 'extraction', n, 'ARM 0x%08x = mot DSP 0x%04x (recouvre NDB %s)' % (a, self.bl[n], ','.join(dessous) or '-'),
                   self.dspc_src[n])
-        # 6. adresse en dur de la layer1 elle-meme (dsp.c SC_CHKSUM_VER)
+        # 6. hard-coded address of the layer1 itself (dsp.c SC_CHKSUM_VER)
         m = re.search(r'#define\s+SC_CHKSUM_VER\s+\(BASE_API_W_PAGE_0\s*\+\s*\(2\s*\*\s*\((0x[0-9A-Fa-f]+)\s*-\s*0x800\)\)\)',
                       open(self.dsp_c).read())
         if m:
@@ -413,7 +413,7 @@ class Interface:
               'mot DSP 0x%04x = NDB.%s (« dsp patch version »)' % (w, ','.join(noms)), rel(self.dsp_c))
         return self
 
-    # -- recherche
+    # -- lookup
     def champ(self, zone, nom):
         for c in self.champs:
             if c['nom'] == nom and (c['zone'] == zone or (zone in ('W', 'R') and c['zone'].startswith(zone))):
@@ -430,6 +430,6 @@ class Interface:
         return set(c['nom'] for c in self.champs)
 
     def au_mot(self, w):
-        """Champ(s) au mot DSP w, PARAM avant les trous du NDB."""
+        """Field(s) at DSP word w, PARAM before the NDB holes."""
         l = self.par_mot.get(w, [])
         return sorted(l, key=lambda ci: (ci[0]['trou'], ci[0]['zone'] == 'NDB'))

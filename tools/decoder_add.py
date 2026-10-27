@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# decoder_add.py - decode avec libgsm les trames FR notees par montant.c et cherche un ton.
+# decoder_add.py - decode with libgsm the FR frames recorded by montant.c and look for a tone.
 #
-#   /dev/shm/calypso_add_dl.bin   parole descendante rendue par la ROM (a_dd), convertie TI -> FR
-#   /dev/shm/calypso_add_ul.bin   parole montante (a_du) : type 1 = brute TI, type 0 = convertie FR
+#   /dev/shm/calypso_add_dl.bin   downlink speech returned by the ROM (a_dd), converted TI -> FR
+#   /dev/shm/calypso_add_ul.bin   uplink speech (a_du): type 1 = raw TI, type 0 = converted FR
 #
-# Enregistrements de 48 octets : fn u32, type u8, n u8, etat u16, err u16, [12..12+n] donnees.
-# Le descendant a_dd est bit-exact avec ce que la BTS emet (comparer_parole.py) : s'il ne
-# porte pas le ton injecte au micro, c'est le montant (ou l'echo) qui l'a perdu.
+# 48-byte records: fn u32, type u8, n u8, state u16, err u16, [12..12+n] data.
+# The downlink a_dd is bit-exact with what the BTS transmits (comparer_parole.py): if it
+# does not carry the tone injected at the microphone, the uplink (or the echo) lost it.
 #
-# Usage : tools/decoder_add.py [dl|ul] [--ton 1000] [--out fichier.raw]
+# Usage: tools/decoder_add.py [dl|ul] [--ton 1000] [--out file.raw]
 import argparse, ctypes, math, struct, sys
 import numpy as np
 ap = argparse.ArgumentParser()

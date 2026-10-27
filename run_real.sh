@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# run_real.sh - le banc REEL : BTS virtuelle (osmo-bts-trx + coeur osmocom) ->
-# pont.py (TRX) -> DSP c54x_exe (--iq none, bursts UDP 6702) -> QEMU/ARM ->
-# osmocon -> mobile. Memes executables que run.sh, sans aucune bequille
-# (pas de CAN_TOA / CAN_SB / AFC forcee) : FB, SB et BCCH natifs.
+# run_real.sh - the REAL bench: virtual BTS (osmo-bts-trx + osmocom core) ->
+# pont.py (TRX) -> DSP c54x_exe (--iq none, UDP 6702 bursts) -> QEMU/ARM ->
+# osmocon -> mobile. Same executables as run.sh, without any crutch
+# (no CAN_TOA / CAN_SB / forced AFC): native FB, SB and BCCH.
 #
-#   ./run_real.sh              lance tout, observe 120 s, verdict SI / LAI
-#   ./run_real.sh --secondes N duree d'observation
-#   ./run_real.sh --logs       suivre les journaux      ./run_real.sh --stop  tout arreter
+#   ./run_real.sh              start everything, observe 120 s, SI / LAI verdict
+#   ./run_real.sh --secondes N observation time
+#   ./run_real.sh --logs       follow the logs         ./run_real.sh --stop  stop everything
 #
-# Reglages (mesures 2026-09-21) : INSNS=60000 (cadence DSP proche du temps reel
-# du BTS), CALYPSO_BSP_STREAM=1 (un burst TS0 par trame, ordre FN),
-# CALYPSO_RHEA_DMA_XFER=1 CALYPSO_BSP_DIRECT_FEED=1 (livraison DMA/RIF),
-# CALYPSO_BSP_NB_SYM=0.3 (elargissement des bursts normaux, calypso_bsp.c).
+# Settings: INSNS=60000 (DSP pace close to the BTS real time),
+# CALYPSO_BSP_STREAM=1 (one TS0 burst per frame, FN order),
+# CALYPSO_RHEA_DMA_XFER=1 CALYPSO_BSP_DIRECT_FEED=1 (DMA/RIF delivery),
+# CALYPSO_BSP_NB_SYM=0.3 (normal burst widening, calypso_bsp.c).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUNDIR=/tmp/c54x-pont

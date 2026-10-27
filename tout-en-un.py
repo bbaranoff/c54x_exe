@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""tout-en-un.py — rassemble tous les fichiers texte (sources, scripts, configs,
-docs, logs) d'un ou plusieurs dossiers dans UN fichier Markdown, raccourci SANS PERTE :
+"""tout-en-un.py - gathers every text file (sources, scripts, configs, docs,
+logs) of one or more directories into ONE Markdown file, shortened WITHOUT LOSS:
 
-  * fichiers identiques (meme contenu) : une seule copie, les autres renvoient
-    a la premiere ;
-  * lignes consecutives identiques : « ligne  ×N » ;
-  * lignes consecutives qui ne different que par des nombres (horodatage,
-    compteur, fn...) : un gabarit ou les nombres constants restent en place et
-    les nombres variables deviennent ⟨1⟩ ⟨2⟩..., suivi de la liste ordonnee des
-    valeurs. On reconstruit chaque ligne en remettant les valeurs dans l'ordre.
-  * codes couleur ANSI et retours chariot retires (seule perte, volontaire).
+  * identical files (same content): a single copy, the others refer to the
+    first one;
+  * identical consecutive lines: "line  ×N";
+  * consecutive lines that differ only by numbers (timestamp, counter, fn...):
+    a template where the constant numbers stay in place and the variable ones
+    become ⟨1⟩ ⟨2⟩..., followed by the ordered list of values. Each line is
+    rebuilt by putting the values back in order.
+  * ANSI colour codes and carriage returns removed (the only, deliberate, loss).
 
-    ./tout-en-un.py [dossier...]      defaut : /opt/GSM/c54x_exe et le dernier /root/c54x_exe-*
-    SORTIE=/chemin.md  EXT="sh py c"  (restreint aux extensions ; defaut : tout fichier texte)
-    SEUIL=3 (taille mini d'un groupe)
+    ./tout-en-un.py [dir...]          default: /opt/GSM/c54x_exe and the latest /root/c54x_exe-*
+    SORTIE=/path.md  EXT="sh py c"    (restrict to extensions; default: every text file)
+    SEUIL=3 (minimum group size)
 
-  Sont ecartes : .git, dossiers caches et caches, binaires (ELF, images, .pyc, archives),
-  sauvegardes (.bak*, ~, .orig, .avant-*), build-tic54x et binutils-*, desassemblage (.dis)
-  et dumps (-dump.txt) de la ROM, signatures (.asc, .sha256), LICENSE/COPYING et les
-  sorties precedentes de ce script.
+  Skipped: .git, hidden and cache directories, binaries (ELF, images, .pyc, archives),
+  backups (.bak*, ~, .orig, .avant-*), build-tic54x and binutils-*, ROM disassembly (.dis)
+  and dumps (-dump.txt), signatures (.asc, .sha256), LICENSE/COPYING and previous
+  outputs of this script.
 """
 import glob
 import hashlib
@@ -27,29 +27,29 @@ import re
 import sys
 import time
 
-EXT = os.environ.get("EXT", "").split()             # vide : tout fichier texte
+EXT = os.environ.get("EXT", "").split()             # empty: every text file
 SEUIL = int(os.environ.get("SEUIL", "3"))
-FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) ou md
+FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) or md
 SORTIE = os.environ.get("SORTIE") or "/root/c54x_exe-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
 AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv", "venv",
-           "rom", "roms",                              # dumps de ROM (DSP Calypso) : pas a nous, pas dans le dossier
-           "osmo-operator-qmd",                        # compilation du depot par un autre outil : tout en double
-           "build-tic54x"}                             # arbre de construction binutils (config.log, Makefile...)
-IGNORES_PREFIXES = (".", "binutils-")                  # dossiers caches (.avant-isa-*...), sources binutils
-# Fichiers texte inutiles : desassemblage et dumps de la ROM DSP, signatures/empreintes, sauvegardes .avant-*
+           "rom", "roms",                              # ROM dumps (Calypso DSP): not ours, not in the bundle
+           "osmo-operator-qmd",                        # the repository compiled by another tool: all duplicated
+           "build-tic54x"}                             # binutils build tree (config.log, Makefile...)
+IGNORES_PREFIXES = (".", "binutils-")                  # hidden directories (.avant-isa-*...), binutils sources
+# Useless text files: DSP ROM disassembly and dumps, signatures/digests, .avant-* backups
 INUTILES = re.compile(r"(\.dis|-dump\.txt|\.asc|\.sha256|\.avant-[\w-]+)$")
 BINAIRES = set("png jpg jpeg gif bmp ico webp pdf zip gz tgz bz2 xz 7z tar bin elf o a so pyc pyo pyd "
                "wav mp3 ogg mp4 sqlite db img iso woff woff2 ttf otf".split())
 SAUVEGARDES = re.compile(r"(~|\.orig|\.rej|\.swp|\.bak(-\w+)?)$")
-TITRE_SORTIE = "title: \"Banc GSM émulé — dossier de run\"".encode()   # une sortie precedente de ce script
+TITRE_SORTIE = "title: \"Banc GSM émulé — dossier de run\"".encode()   # a previous output of this script
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # negociation telnet (IAC) des captures VTY
-CONTROLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]")  # caracteres de commande, octets indecodables
+TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # telnet negotiation (IAC) of VTY captures
+CONTROLE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffd]")  # control characters, undecodable bytes
 NUM = re.compile(r"\d+")
-# Preambule LaTeX du format pdf (xelatex). Sans lui : « Dimension too large » (framed
-# mesure tout le bloc de code avant de le couper), lignes de code non repliees,
-# diagrammes Mermaid plus larges que la page, glyphes manquants.
+# LaTeX preamble of the pdf format (xelatex). Without it: "Dimension too large" (framed
+# measures the whole code block before splitting it), unwrapped code lines,
+# Mermaid diagrams wider than the page, missing glyphs.
 PDF_PREAMBULE = "".join("        %s\n" % l for l in r"""
 % Code : police reduite, retour a la ligne (y compris dans les mots longs)
 \usepackage{fvextra}
@@ -91,7 +91,7 @@ def extension(nom):
 
 
 def langage(chemin):
-    """Langage de coloration : extension, puis nom du fichier, puis shebang."""
+    """Highlighting language: extension, then file name, then shebang."""
     nom = os.path.basename(chemin)
     e = extension(nom)
     if e in LANG:
@@ -111,7 +111,7 @@ def langage(chemin):
 
 
 def texte_legitime(chemin, nom):
-    """Fichier texte a nous : ni binaire, ni sauvegarde, ni licence, ni sortie de ce script."""
+    """Text file of ours: not a binary, a backup, a licence nor an output of this script."""
     if extension(nom) in BINAIRES or SAUVEGARDES.search(nom) or INUTILES.search(nom) or nom in ("LICENSE", "COPYING"):
         return False
     if nom.startswith("tout-en-un-"):
@@ -155,7 +155,7 @@ def couper(l):
 
 
 def compacter(lignes):
-    """Rend (lignes de sortie, nb de groupes compactes)."""
+    """Returns (output lines, number of compacted groups)."""
     out, groupes, i, n = [], 0, 0, len(lignes)
     while i < n:
         cle = NUM.sub("\0", lignes[i])
@@ -168,14 +168,14 @@ def compacter(lignes):
             i = j
             continue
         groupes += 1
-        if "\0" not in cle:                      # repetition exacte
+        if "\0" not in cle:                      # exact repetition
             out.append("%s  ×%d" % (lignes[i], taille))
             i = j
             continue
         valeurs = [NUM.findall(l) for l in lignes[i:j]]
         nb = len(valeurs[0])
         varie = [len({v[k] for v in valeurs}) > 1 for k in range(nb)]
-        # gabarit : nombres constants remis en place, variables numerotes ⟨k⟩
+        # template: constant numbers put back in place, variable ones numbered ⟨k⟩
         morceaux, k, idx = cle.split("\0"), 0, 0
         gab = morceaux[0]
         for m in morceaux[1:]:
@@ -189,7 +189,7 @@ def compacter(lignes):
         out.append("%s  ×%d" % (gab, taille))
         if idx:
             tuples = [",".join(v[k] for k in range(nb) if varie[k]) for v in valeurs]
-            # lignes de valeurs de ~100 colonnes
+            # value lines of ~100 columns
             ligne, courant = [], "    ⟨⟩ ="
             for t in tuples:
                 if len(courant) + len(t) + 3 > 110:
@@ -203,14 +203,14 @@ def compacter(lignes):
 
 
 def synthese(tous):
-    """Run, echelle, echecs, bilan de couverture : lus dans verdict.txt / couverture.txt."""
+    """Run, scale, failures, coverage summary: read from verdict.txt / couverture.txt."""
     lignes, vus = [], set()
     for f in tous:
         nom = os.path.basename(f)
         if nom not in ("verdict.txt", "couverture.txt"):
             continue
         run = os.path.basename(os.path.dirname(f))
-        if (run, nom) in vus:                 # meme run copie a deux endroits
+        if (run, nom) in vus:                 # same run copied in two places
             continue
         vus.add((run, nom))
         try:
@@ -242,7 +242,7 @@ def rendre_mmd(lignes):
 def rendre_md(lignes):
     out, dans_bloc, cloture = [], False, ""
     i = 0
-    if lignes and lignes[0].strip() == "---":           # front matter YAML : montre en bloc, pas interprete
+    if lignes and lignes[0].strip() == "---":           # YAML front matter: shown as a block, not interpreted
         j = next((k for k in range(1, len(lignes)) if lignes[k].strip() in ("---", "...")), None)
         if j:
             out.append("```yaml"); out.extend(lignes[1:j]); out.append("```")
@@ -255,8 +255,8 @@ def rendre_md(lignes):
             info = m.group(3).strip()
             if info.startswith("{mermaid}") or info.startswith("mermaid"):
                 l = m.group(1) + MERMAID_OUVRE
-            elif info.startswith("{"):                     # ```{r ...} ou {.bash filename=...} : langage seul,
-                l = m.group(1) + m.group(2) + info.strip("{}").split()[0].split(",")[0].lstrip(".")  # ni execution ni flottant
+            elif info.startswith("{"):                     # ```{r ...} or {.bash filename=...}: language only,
+                l = m.group(1) + m.group(2) + info.strip("{}").split()[0].split(",")[0].lstrip(".")  # no execution nor float
             out.append(l); continue
         if m and dans_bloc and m.group(2)[0] == cloture[0] and len(m.group(2)) >= len(cloture) and not m.group(3).strip():
             dans_bloc = False; out.append(l); continue
@@ -264,7 +264,7 @@ def rendre_md(lignes):
             h = re.match(r"^(#{1,6})\s", l)
             if h:
                 l = "#" * min(6, len(h.group(1)) + 3) + l[len(h.group(1)):]
-            elif l.strip() in ("---", "..."):             # pas de bloc YAML ni de regle au milieu du dossier
+            elif l.strip() in ("---", "..."):             # no YAML block nor rule in the middle of the bundle
                 l = "* * *"
         out.append(l)
     if dans_bloc:
@@ -276,11 +276,11 @@ def main():
     dossiers = sys.argv[1:] or dossiers_par_defaut()
     vus, sections, table = {}, [], []
     total_in = total_out = 0
-    # Ordre : les resultats des tests (.txt .md .mmd : verdicts, couverture, rapports, grafcets)
-    # d'abord, les fichiers du banc (sources, scripts, configs...) ensuite, les .log en dernier
+    # Order: test results (.txt .md .mmd: verdicts, coverage, reports, grafcets) first,
+    # the bench files (sources, scripts, configs...) next, the .log files last
     CATEGORIES = (("Verdict et couverture", ()), ("Resultats des tests", ("txt", "md", "mmd", "tsv", "csv")),
-                  ("Fichiers", None), ("Logs", ("log",)))          # Fichiers : tout le reste
-    EN_TETE = ("verdict.txt", "couverture.txt")     # tout en haut, dans cet ordre
+                  ("Fichiers", None), ("Logs", ("log",)))          # Fichiers: everything else
+    EN_TETE = ("verdict.txt", "couverture.txt")     # at the very top, in this order
     tous = []
     for d in dossiers:
         if not os.path.isdir(d):
@@ -315,8 +315,8 @@ def main():
             lignes = texte.split("\n")
             if lignes and lignes[-1] == "":
                 lignes.pop()
-            # lignes demesurees (blob base64, minifie...) : coupees en morceaux de LIGNE_MAX
-            # termines par ↩ ; sinon xelatex mesure la ligne entiere et plante (Dimension too large)
+            # oversized lines (base64 blob, minified...): cut into LIGNE_MAX pieces ended
+            # by ↩; otherwise xelatex measures the whole line and fails (Dimension too large)
             lignes = [m for l in lignes for m in couper(l)]
             h = hashlib.sha1(texte.encode()).hexdigest()
             total_in += len(brut)
@@ -326,9 +326,9 @@ def main():
             vus[h] = f
             ext = extension(os.path.basename(f))
             if ext in ("md", "qmd", "mmd"):
-                # Rendu, pas cite : les .mmd deviennent des diagrammes Mermaid, les .md
-                # sont inclus tels quels (titres retrogrades sous le titre du fichier,
-                # blocs mermaid rendus, blocs {r}/{python} neutralises). Pas de compactage.
+                # Rendered, not quoted: .mmd files become Mermaid diagrams, .md files
+                # are included as they are (headings demoted under the file title,
+                # mermaid blocks rendered, {r}/{python} blocks neutralised). No compaction.
                 total_out += len(texte) + 1
                 sections.append("### %s\n\n%d octets, %d lignes\n\n%s\n"
                                 % (f, len(brut), len(lignes), rendre_md(lignes) if ext in ("md", "qmd") else rendre_mmd(lignes)))
@@ -336,9 +336,9 @@ def main():
             compact, groupes = compacter(lignes)
             total_out += sum(len(l) + 1 for l in compact)
             note = "%d groupes compactés" % groupes if groupes else ""
-            # cloture plus longue que toute suite de ` du contenu : un ``` dans un
-            # .py ou un .md ne referme plus le bloc (pandoc lisait alors la suite
-            # comme du Markdown : « Could not fetch resource »)
+            # fence longer than any run of ` in the content: a ``` inside a .py
+            # or a .md cannot close the block (pandoc would read what follows
+            # as Markdown: "Could not fetch resource")
             plus_long = max((len(m) for m in re.findall(r"`+", "\n".join(compact))), default=0)
             cloture = "`" * max(3, plus_long + 1)
             sections.append("### %s\n\n%d octets, %d lignes → %d lignes%s\n\n%s%s\n%s\n%s\n"
@@ -354,15 +354,15 @@ def main():
         o.write("lang: fr\n")
         if FORMAT == "qmd":
             o.write("engine: markdown\n")
-            o.write("code-annotations: false\n")  # un "<100>" dans un commentaire n'est pas une annotation     # pandoc seul : knitr voyait des ```{r} dans les rapports inclus et s'arretait
+            o.write("code-annotations: false\n")  # a "<100>" in a comment is not an annotation     # pandoc only: knitr stops on ```{r} in included reports
         if FORMAT == "qmd":
             o.write("format:\n  html:\n    toc: true\n    toc-depth: 3\n    toc-location: left\n"
                     "    number-sections: true\n    embed-resources: true\n    theme: cosmo\n"
                     "    code-overflow: wrap\n    fontsize: 0.9em\n")
             o.write("  pdf:\n    toc: true\n    toc-depth: 3\n    number-sections: true\n"
-                    "    shift-heading-level-by: -1\n"      # ## Synthese = section 1, pas 0.1
+                    "    shift-heading-level-by: -1\n"      # ## Synthese = section 1, not 0.1
                     "    papersize: a4\n    geometry: margin=2cm\n    fontsize: 10pt\n"
-                    "    monofont: DejaVu Sans Mono\n"      # trace de boites, ✓ ✗ ⟨⟩ ⚠ absents de Latin Modern Mono
+                    "    monofont: DejaVu Sans Mono\n"      # box drawing, ✓ ✗ ⟨⟩ ⚠ missing from Latin Modern Mono
                     "    include-in-header:\n      text: |\n" + PDF_PREAMBULE)
         o.write("---\n\n")
         o.write("## Synthèse\n\n")
@@ -385,7 +385,7 @@ def main():
                 "sont retirés ; les lignes de plus de %d caractères sont coupées en morceaux terminés par ↩. Les .md sont inclus tels quels (titres rétrogradés) et les .mmd rendus en "
                 "diagrammes Mermaid, sans compactage.\n" % LIGNE_MAX)
         o.write(":::\n\n" if FORMAT == "qmd" else "\n")
-        for t in table:                      # ne reste que les dossiers absents / fichiers illisibles
+        for t in table:                      # only missing directories / unreadable files remain
             o.write(t.strip("| ").split(" |")[0] + "\n")
         o.write("\n")
         o.write("\n".join(sections))
