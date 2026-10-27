@@ -1,46 +1,43 @@
-# Carte mémoire du DSP Calypso — API RAM, NDB, PARAM, mémoire interne, ports
+# Calypso DSP memory map - API RAM, NDB, PARAM, internal memory, ports
 
-> **État : PREMIÈRE VERSION, interrompue (limite d'usage, 2026-10-03 ~18:15).** Les tables de la
-> section 2 sont générées (DWARF de l'ELF + mesure du rejeu) ; le reste est écrit à la main à
-> partir de la mesure et des sources citées. Le générateur `tools/layer1_tester.py` est
-> inachevé (voir « Reste à faire ») : cette page n'est pas encore régénérable d'une commande.
+Section 2 is generated (DWARF of the layer1 ELF + replay measurement); the
+other sections are written from measurement and the cited sources.
+`harvard.sh` reads the section 2 table (`CARTE=`).
 
-## Comment ce fichier a été produit
+## How this file is produced
 
-* Offsets des champs : `gdb-multiarch -batch -ex 'ptype /o T_NDB_MCU_DSP' /opt/GSM/firmware/board/compal_e88/layer1.highram.elf`
-  (et `T_DB_MCU_TO_DSP`, `T_DB_DSP_TO_MCU`, `T_PARAM_MCU_DSP`) : c'est la disposition **compilée**
-  (DSP=36, CHIPSET=12, ANLG_FAM=2, `include/calypso/l1_environment.h`). Bases :
-  `print/x dsp_api` dans le même ELF (ndb=0xffd001a8, db_r=0xffd00050, db_w=0xffd00000, param=0xffd00862).
-* Mesure : `make layer1_tester && tools/layer1_tester -o mesure.tsv -j journal.tsv -p pcs.tsv rejeu.bin`
-  — rejeu de l'enregistrement de canal dédié (copie de `/dev/shm/calypso_rejeu_tch.bin`, ticks
-  1712..35633, 18391 ticks, 393 M instructions, 46 s). Fidélité : SACCH 132 bonnes / 33 Fire KO,
-  FACCH 35 / 0, parole 2654 trames toutes B_BFI = mêmes bilans que `tools/rejeu_banc`.
-* Conversion : mot DSP = 0x0800 + (adresse ARM − 0xFFD00000)/2 ; « octet API » = adresse ARM − 0xFFD00000.
-* « ROM lit / écrit » = accès faits par une instruction de la ROM (crochet `calypso_mbx_evt`) ;
-  « ARM modifie » = mots changés côté QEMU entre deux trames (enregistrements `A`), donc des
-  modifications, pas toutes les écritures ; valeurs = jusqu'à 4 plus fréquentes (valeur:compte).
-  1er PC en hexadécimal (`x:pppp` si page XPC ≠ 0). Champs `*hole*` non touchés omis.
+* Field offsets: `gdb-multiarch -batch -ex 'ptype /o T_NDB_MCU_DSP' /opt/GSM/firmware/board/compal_e88/layer1.highram.elf`
+  (and `T_DB_MCU_TO_DSP`, `T_DB_DSP_TO_MCU`, `T_PARAM_MCU_DSP`): the **compiled** layout
+  (DSP=36, CHIPSET=12, ANLG_FAM=2, `include/calypso/l1_environment.h`). Bases:
+  `print/x dsp_api` in the same ELF (ndb=0xffd001a8, db_r=0xffd00050, db_w=0xffd00000, param=0xffd00862).
+* Measurement: `make layer1_tester && tools/layer1_tester -o mesure.tsv -j journal.tsv -p pcs.tsv rejeu.bin`,
+  a replay of a dedicated-channel recording (copy of `/dev/shm/calypso_rejeu_tch.bin`).
+* Conversion: DSP word = 0x0800 + (ARM address - 0xFFD00000)/2; "API byte" = ARM address - 0xFFD00000.
+* "ROM reads / writes" = accesses made by a ROM instruction (`calypso_mbx_evt` hook);
+  "ARM changes" = words changed on the QEMU side between two frames (`A` records), i.e.
+  changes, not every write; values = up to the 4 most frequent (value:count).
+  First PC in hex (`x:pppp` when the XPC page is not 0). Untouched `*hole*` fields are omitted.
 
-## 1. Plan de l'espace de données (vu du DSP)
+## 1. Data space map (DSP view)
 
-| plage | contenu | source |
+| range | content | source |
 |---|---|---|
-| 0x0000..0x001f | MMR du C54x (IMR, IFR, ST0/1, AR0..7, SP, BK, BRC, PMST, XPC…) | qosmo `l1-dsp/calypso_c54x.h:28-54` |
-| 0x0020..0x005f | périphériques (timer 0x24..0x26, DMA 0x54..0x57) | `calypso_c54x.h`, `calypso_dma.h:45-48` |
-| 0x0800..0x0813 | page W0 (`T_DB_MCU_TO_DSP`, ARM 0xFFD00000) | ELF |
-| 0x0814..0x0827 | page W1 (ARM 0xFFD00028) | ELF |
-| 0x0828..0x083b | page R0 (`T_DB_DSP_TO_MCU`, ARM 0xFFD00050) | ELF |
-| 0x083c..0x084f | page R1 (ARM 0xFFD00078) | ELF |
-| 0x08d4..0x153d | NDB (`T_NDB_MCU_DSP`, ARM 0xFFD001A8, 6356 octets) | ELF |
-| 0x0c31..0x0cc1 | PARAM (`T_PARAM_MCU_DSP`, ARM 0xFFD00862) — **dans** NDB.a_sr_holes1 (290 octets = les 145 mots utiles de PARAM) | ELF |
-| 0x0cce..0x0df5 | tampon DMA des I/Q reçus (AAD 0x99c) — dans NDB.a_cport_holes | `c54x_mem.c` (FEED-DST) ; mesure : 3219 écritures hors instruction (DMA/BSP) |
-| 0x0ffc..0x0fff | mots du chargeur BL_ADDR_HI / BL_SIZE / BL_ADDR_LO / BL_CMD_STATUS (ARM 0xFFD00FF8..FFE) — dans NDB.a_cport_holes | `firmware/calypso/dsp.c:54-57` |
-| 0x153e..0x27ff | API RAM hors structures layer1 | — |
-| ≥ 0x2800 | mémoire interne du DSP (section 4) | — |
+| 0x0000..0x001f | C54x MMRs (IMR, IFR, ST0/1, AR0..7, SP, BK, BRC, PMST, XPC...) | qosmo `l1-dsp/calypso_c54x.h` |
+| 0x0020..0x005f | peripherals (timer 0x24..0x26, DMA 0x54..0x57) | `calypso_c54x.h`, `calypso_dma.h` |
+| 0x0800..0x0813 | W0 page (`T_DB_MCU_TO_DSP`, ARM 0xFFD00000) | ELF |
+| 0x0814..0x0827 | W1 page (ARM 0xFFD00028) | ELF |
+| 0x0828..0x083b | R0 page (`T_DB_DSP_TO_MCU`, ARM 0xFFD00050) | ELF |
+| 0x083c..0x084f | R1 page (ARM 0xFFD00078) | ELF |
+| 0x08d4..0x153d | NDB (`T_NDB_MCU_DSP`, ARM 0xFFD001A8, 6356 bytes) | ELF |
+| 0x0c31..0x0cc1 | PARAM (`T_PARAM_MCU_DSP`, ARM 0xFFD00862), **inside** NDB.a_sr_holes1 (290 bytes = the 145 useful PARAM words) | ELF |
+| 0x0cce..0x0df5 | DMA buffer of received I/Q (AAD 0x99c), inside NDB.a_cport_holes | `c54x_mem.c` (FEED-DST) |
+| 0x0ffc..0x0fff | loader words BL_ADDR_HI / BL_SIZE / BL_ADDR_LO / BL_CMD_STATUS (ARM 0xFFD00FF8..FFE), inside NDB.a_cport_holes | `firmware/calypso/dsp.c` |
+| 0x153e..0x27ff | API RAM outside the layer1 structures | - |
+| >= 0x2800 | DSP internal memory (section 4) | - |
 
-## 2. API RAM — tous les champs (générée)
+## 2. API RAM - all fields (generated)
 
-| zone | champ | octet API | ARM | mot DSP | ROM lit (n, 1er PC) | ROM écrit (n, 1er PC) | ARM modifie (n, valeurs) |
+| zone | field | API byte | ARM | DSP word | ROM reads (n, 1st PC) | ROM writes (n, 1st PC) | ARM changes (n, values) |
 |---|---|---|---|---|---|---|---|
 | W0 | d_task_d | 0x000 | 0xFFD00000 | 0x0800 | 25920, b001 | 0 | 1296, 000d:445,000e:361,0000:288,0018:202 |
 | W0 | d_burst_d | 0x002 | 0xFFD00002 | 0x0801 | 14950, b005 | 361, ba17 | 777, 0000:475,0002:102,0001:100,0003:100 |
@@ -320,111 +317,102 @@
 | PARAM | a_fir31_uplink[31] | 0x908 | 0xFFD00908 | 0x0c84..0x0ca2 | 0 | 0 | 0 |
 | PARAM | a_fir31_downlink[31] | 0x946 | 0xFFD00946 | 0x0ca3..0x0cc1 | 0 | 0 | 0 |
 
-Bits utiles (`include/calypso/l1_environment.h`, **positions** de bit) : B_BLUD 15 (bloc présent),
-B_AF 14, B_EMPTY_BLOCK 10, B_ECRC 9, B_SCH_CRC 8, B_FIRE1 6, B_FIRE0 5, B_BFI 2, B_UFI 0 ;
-d_dsp_page : B_GSM_PAGE 1<<0, B_GSM_TASK 1<<1 (masques) ; d_ctrl_system : B_TSQ 0..2,
-B_BCCH_FREQ_IND 3, B_TASK_ABORT 15 ; d_ctrl_tch : B_CHAN_MODE 0, B_CHAN_TYPE 4, B_RESET_SACCH 6,
+Bits (`include/calypso/l1_environment.h`, bit **positions**): B_BLUD 15 (block present),
+B_AF 14, B_EMPTY_BLOCK 10, B_ECRC 9, B_SCH_CRC 8, B_FIRE1 6, B_FIRE0 5, B_BFI 2, B_UFI 0;
+d_dsp_page: B_GSM_PAGE 1<<0, B_GSM_TASK 1<<1 (masks); d_ctrl_system: B_TSQ 0..2,
+B_BCCH_FREQ_IND 3, B_TASK_ABORT 15; d_ctrl_tch: B_CHAN_MODE 0, B_CHAN_TYPE 4, B_RESET_SACCH 6,
 B_VOCODER_ON 7, B_SYNC_TCH_UL 8, B_SYNC_TCH_DL 9, B_STOP_TCH_UL 10, B_STOP_TCH_DL 11, B_TCH_LOOP 12,
-B_SUBCHANNEL 15. Tâches : NO 0, FB 5, SB 6, TCH_FB 8, TCH_SB 9, RACH 10, AUL 11, DUL 12, TCHT 13,
+B_SUBCHANNEL 15. Tasks: NO 0, FB 5, SB 6, TCH_FB 8, TCH_SB 9, RACH 10, AUL 11, DUL 12, TCHT 13,
 TCHA 14, NBN 17, EBN 18, NBS 19, EBS 20, NP 21, EP 22, ALLC 24, CB 25, DDL 26, ADL 27, TCHD 28,
-CHECKSUM 33 (bit 15 = inversion I/Q, `dsp_task_iq_swap`).
+CHECKSUM 33 (bit 15 = I/Q inversion, `dsp_task_iq_swap`).
 
-PARAM (valeurs de `dsp_params`, lues dans l'ELF : `print/x dsp_params`) : d_transfer_rate 0x6666,
+PARAM (values of `dsp_params`, read from the ELF with `print/x dsp_params`): d_transfer_rate 0x6666,
 d_lat_mcu_bridge 15, d_lat_mcu_hom2sam 12, d_lat_mcu_bef_fast_access 5, d_lat_dsp_after_sam 4,
 d_gprs_install_address 0x7002, d_misc_config 1, d_cn_sw_workaround 0xe, d_fb_margin_beg 24,
 d_fb_margin_end 22, d_nsubb_idle 296, d_nsubb_dedic 30, d_fb_thr_det_iacq 0x3333,
 d_fb_thr_det_track 0x28f6, d_dc_off_thres 0x7fff, d_dummy_thres 0x4400, d_dem_pond_gewl 0x6800,
-d_dem_pond_red 0x4eb8, d_maccthresh1 0x1ec0, d_mldt −4, … (suite : `firmware/calypso/dsp_params.c`).
+d_dem_pond_red 0x4eb8, d_maccthresh1 0x1ec0, d_mldt -4, ... (rest: `firmware/calypso/dsp_params.c`).
 
-## 3. Faits mesurés sur l'interface (rejeu)
+## 3. Interface behaviour (replay)
 
-* **d_dsp_page (0x08d4)** : l'ARM l'alterne 0x0002/0x0003 (13234 modifications) ; la ROM le lit
-  13218 fois (1er PC 0xa51c) ; chaque modification est lue au tick suivant (latence 1,00).
-* **a_cu[0] (0x0a06)** : l'ARM pose B_BLUD (0x8000) 315 fois ; la ROM le lit 315 fois et le
-  réécrit 315 fois (PC 0xaa5a) : c'est la ROM qui consomme B_BLUD (le `w[0] &= ~B_BLUD` de
-  `montant.c:262` imite donc le bon comportement).
-* **a_du_1[0] (0x096e)** : l'ARM pose B_BLUD 2488 fois (parole montante TCH/F) ; la ROM le lit
-  5144 fois et l'écrit 2656 fois (PC 0xa925). **a_du_0 (0x0a24..)** : jamais modifié par l'ARM,
-  mais lu 5314 / écrit 7829 fois par la ROM. Voir incohérence n° 6.
-* **a_cd[0] (0x09d2)** : la ROM l'écrit 624 fois ; l'ARM y remet 0x0040 (B_FIRE1, `prim_tch.c:700`).
-* **a_dd_0[0] (0x09f0)** : ROM lit 7892 / écrit 7892 ; l'ARM y remet 0 après lecture (2654 fois).
-* **d_version_number1/2 (0x08da/0x08db)** : jamais touchés pendant le rejeu (écrits au boot).
+* **d_dsp_page (0x08d4)**: the ARM alternates 0x0002/0x0003; the ROM reads it (1st PC 0xa51c)
+  and sees each change at the next tick.
+* **a_cu[0] (0x0a06)**: the ARM sets B_BLUD (0x8000); the ROM reads it and rewrites it
+  (PC 0xaa5a): the ROM consumes B_BLUD (`montant.c` clears it the same way).
+* **a_du_1[0] (0x096e)**: the ARM sets B_BLUD for TCH/F uplink speech; the ROM reads and writes
+  it (PC 0xa925). **a_du_0 (0x0a24..)**: never changed by the ARM, but read and written by the
+  ROM. See inconsistency 6.
+* **a_cd[0] (0x09d2)**: written by the ROM; the ARM resets it to 0x0040 (B_FIRE1, `prim_tch.c`).
+* **a_dd_0[0] (0x09f0)**: read and written by the ROM; the ARM clears it after reading.
+* **d_version_number1/2 (0x08da/0x08db)**: written at boot only.
 
-## 4. Mémoire interne du DSP (établie le 2026-10-03 + mesure du rejeu)
+## 4. DSP internal memory
 
-| adresse | signification | ROM lit (n, 1er PC) | ROM écrit (n, 1er PC) | source |
+| address | meaning | ROM reads (n, 1st PC) | ROM writes (n, 1st PC) | source |
 |---|---|---|---|---|
-| 0x4280..0x429f | tampon montant entrelacé xCCH, 4 bursts × 8 mots, circulaire BK=32 | 1578, 8dbd | 1579, 8869 | mémoire rom-full-reste ; MAILBOX.md 2026-10-03 |
-| 0x3f8a..0x3f91 | burst montant émis (114 bits + hl/hu dans les 2 bits bas du mot 7), copié par PROM0 0x8900..0x891b | 1441, 85d3 | 13324, 8916 | idem |
-| 0x3f9b..0x3fa2 | flux A5 montant XORé sur 0x3f8a (PROM0 0x85d1) | 1441, 85d4 | 37225, b185 | `src/pont.c:570` |
-| 0x3f93..0x3f9a | flux A5 descendant | 11875, 8575 | 37225, b185 | brief 2026-10-03 |
-| 0x3f92 | bit 0x1000 = flux A5 prêt | 168751, b04c | 99947, b04c | brief |
-| 0x3d9b | pointeur de lecture du circulaire 0x4280 | 1573, 8bd5 | 1577, 8820 | `src/pont.c:571` |
-| 0x2bfa.. | codé natural-order / tampon de travail | 305283, a2c4 | 61427, 8ba8 | mémoire rom-montant-codage |
-| 0x2bf8 | drapeau parité classe 1a | 338033, 8df0 | 84547, 8daf | brief |
-| 0x3d90 | drapeaux qualité CHED (0x01 parité, 0x02 MA, 0x08 SD-min, 0x10 …) | 37455, 8758 | 29527, 8758 | brief |
-| 0x2d42.. (50 mots) | valeurs SD | 16195, 9abe | 16164, 9aad | brief |
-| 0x2c00..0x2c1f | métriques Viterbi | 2679012, a2c4 | 398814, 8ba8 | brief |
-| 0x3fad / 0x3fae | bits de mode (0x3fad bit 15 = verrou du répartiteur FB, PC 0x8753) | 343904 / 92658 | 27812 / 22517 | brief ; `c54x_mem.c` PROBE-3FAD-GATE |
-| 0x3d89 | pointeur d'écriture du circulaire 232 mots en 0x4d00 (init 0x90c0) | 13281, 9169 | 10634, 90c0 | `c54x_mem.c` garde-3d89 |
-| 0x43d8 | slot du gestionnaire courant (`ld *(0x43d8),A ; cala A` en 0xb01c) | 13218, b01c | 0 | `c54x_mem.c` HANDLER-WATCH |
+| 0x4280..0x429f | interleaved xCCH uplink buffer, 4 bursts x 8 words, circular BK=32 | 1578, 8dbd | 1579, 8869 | replay |
+| 0x3f8a..0x3f91 | transmitted uplink burst (114 bits + hl/hu in the 2 low bits of word 7), copied by PROM0 0x8900..0x891b | 1441, 85d3 | 13324, 8916 | replay |
+| 0x3f9b..0x3fa2 | uplink A5 keystream XORed onto 0x3f8a (PROM0 0x85d1) | 1441, 85d4 | 37225, b185 | `src/pont.c` |
+| 0x3f93..0x3f9a | downlink A5 keystream | 11875, 8575 | 37225, b185 | replay |
+| 0x3f92 | bit 0x1000 = A5 keystream ready | 168751, b04c | 99947, b04c | replay |
+| 0x3d9b | read pointer of the 0x4280 circular buffer | 1573, 8bd5 | 1577, 8820 | `src/pont.c` |
+| 0x2bfa.. | natural-order coded block / work buffer | 305283, a2c4 | 61427, 8ba8 | replay |
+| 0x2bf8 | class 1a parity flag | 338033, 8df0 | 84547, 8daf | replay |
+| 0x3d90 | CHED quality flags (0x01 parity, 0x02 MA, 0x08 SD-min, 0x10 ...) | 37455, 8758 | 29527, 8758 | replay |
+| 0x2d42.. (50 words) | SD values | 16195, 9abe | 16164, 9aad | replay |
+| 0x2c00..0x2c1f | Viterbi metrics | 2679012, a2c4 | 398814, 8ba8 | replay |
+| 0x3fad / 0x3fae | mode bits (0x3fad bit 15 = FB dispatcher lock, PC 0x8753) | 343904 / 92658 | 27812 / 22517 | `c54x_mem.c` PROBE-3FAD-GATE |
+| 0x3d89 | write pointer of the 232-word circular buffer at 0x4d00 (init 0x90c0) | 13281, 9169 | 10634, 90c0 | `c54x_mem.c` |
+| 0x43d8 | current handler slot (`ld *(0x43d8),A ; cala A` at 0xb01c) | 13218, b01c | 0 | `c54x_mem.c` HANDLER-WATCH |
 
-Récolte plus large (MAILBOX.md, README.fr.md, sources) : `recolte_c54x.tsv` (brouillon, non
-encore fusionné ici).
+## 5. I/O ports (PORTR/PORTW 0x74xx/0x75xx of the replay)
 
-## 5. Ports I/O (mesurés : PORTR/PORTW 0x74xx/0x75xx du rejeu)
-
-| port | sens | n | 1er PC | rôle | source |
+| port | dir | n | 1st PC | role | source |
 |---|---|---|---|---|---|
-| 0x0002 | W | 26436 | b572 | RIF SPCX (contrôle émission) | `calypso_rif.h:19` |
-| 0x0003 | R/W | 81949 / 88202 | a675 / a67b | RIF SPCR (contrôle réception) | `calypso_rif.h:20` |
-| 0x2800 | W | 147204 | b142 | A5 : commande (0 arrêt, 0x16/0x17) | `calypso_a5.c:39` |
-| 0x2801, 0x2802 | R | 36801 | b1a0, b16c | A5 : trace, état | `calypso_a5.c:40-41` |
-| 0x2803..0x2806 | W | 36801 | b145.. | A5 : Kc (= a_kc[0..3]) | `calypso_a5.c:42` |
-| 0x2807, 0x2808 | W | 36801 | b151, b154 | A5 : a_a5fn[0] (T3<<5\|T2), a_a5fn[1] (T1) | `calypso_a5.c:13-15` |
-| 0x2809..0x2818 | R | 36801 | b1ab.. | A5 : flux de clé (descendant puis montant) | `calypso_a5.c:45` |
-| 0xf900 | W | 232373 | a6c3 | API Control (CAL207 7.2.2) | `calypso_xio.c:38` |
-| 0xfa01 | W | 18809 | a658 | INTH du DSP | `calypso_xio.c` |
-| 0xfc24..0xfc28 | R/W | ~12500..31315 | a5e8.. | fenêtre DMA RHEA (AAD 0x099c = tampon 0x0cce) | `calypso_rhea_dma.c` |
+| 0x0002 | W | 26436 | b572 | RIF SPCX (transmit control) | `calypso_rif.h` |
+| 0x0003 | R/W | 81949 / 88202 | a675 / a67b | RIF SPCR (receive control) | `calypso_rif.h` |
+| 0x2800 | W | 147204 | b142 | A5: command (0 stop, 0x16/0x17) | `calypso_a5.c` |
+| 0x2801, 0x2802 | R | 36801 | b1a0, b16c | A5: trace, status | `calypso_a5.c` |
+| 0x2803..0x2806 | W | 36801 | b145.. | A5: Kc (= a_kc[0..3]) | `calypso_a5.c` |
+| 0x2807, 0x2808 | W | 36801 | b151, b154 | A5: a_a5fn[0] (T3<<5\|T2), a_a5fn[1] (T1) | `calypso_a5.c` |
+| 0x2809..0x2818 | R | 36801 | b1ab.. | A5: keystream (downlink then uplink) | `calypso_a5.c` |
+| 0xf900 | W | 232373 | a6c3 | API Control (CAL207 7.2.2) | `calypso_xio.c` |
+| 0xfa01 | W | 18809 | a658 | DSP INTH | `calypso_xio.c` |
+| 0xfc24..0xfc28 | R/W | ~12500..31315 | a5e8.. | RHEA DMA window (AAD 0x099c = buffer 0x0cce) | `calypso_rhea_dma.c` |
 
-Vecteurs d'interruption (`calypso_c54x.h:162-191`) : TPU frame vec 28 / IMR bit 12, API vec 25 /
-bit 9, DMA vec 30 / bit 14, RIF RX vec 16 / bit 0, A5 (CRYPT) vec 27 / bit 11.
+Interrupt vectors (`calypso_c54x.h`): TPU frame vec 28 / IMR bit 12, API vec 25 / bit 9,
+DMA vec 30 / bit 14, RIF RX vec 16 / bit 0, A5 (CRYPT) vec 27 / bit 11.
 
-## 6. Incohérences relevées (layer1 ↔ qosmo ↔ c54x_exe)
+## 6. Known inconsistencies (layer1 / qosmo / c54x_exe)
 
-1. **`calypso_bsp_tx_burst()` lit `data[0x0900 + i]`** (`qosmo/.../calypso_bsp.c:3572`) : 0x0900 est
-   dans le NDB (a_sch26[2..]), pas un tampon d'émission. Le burst émis par la ROM est en 0x3f8a
-   (déjà connu ; c54x_exe le prend là via `pont.c tx_rom_publier`).
-2. **Même nom, unités différentes** : `NDB_D_DSP_PAGE`/`NDB_D_FB_DET` = offsets d'**octets** dans le
-   NDB (0x000/0x048, `include/hw/arm/calypso/calypso_api.h`) et adresses **mot DSP absolues**
-   (0x08D4/0x08F8, `l1-dsp/calypso_fbsb.h:56-63`). Valeurs justes chacune dans sa convention ;
-   une unité qui inclurait les deux en-têtes aurait une redéfinition silencieuse (à vérifier).
-3. **B_BLUD** : position de bit (15) côté layer1, masque (1u<<15) côté qosmo — même nom.
-4. **CALYPSO_API_SIZE = 64 Kio** (32768 mots, `calypso_api.h`) contre 16 Kio réels (API_SIZE 0x2000
-   mots, `firmware/calypso/dsp.c:45`) ; l'enregistrement `S` fait 32768 mots, le DSP n'en voit que
-   0x2000. Aucune écriture ARM au-delà de 0x2000 dans le rejeu (0 mot).
-5. **d_ctrl_tch** : `dsp.c:503` documente b_chan_type sur les bits 4..7, `dsp_api.h` sur 4..5 avec
-   bit 6 = reset SACCH et bit 7 = vocodeur ON ; `dsp_load_tch_param(chan_type=SDCCH_8=4)` pose donc
-   le bit 6. Valeurs réellement écrites dans le rejeu : à analyser.
-6. **Parole montante TCH/F dans a_du_1** : `prim_tch.c:485` `tch_sub ? a_du_0 : a_du_1` (alors que la
-   descente prend `tch_sub ? a_dd_1 : a_dd_0`, `prim_tch.c:322`) ; l'ARM écrit 0x096e (a_du_1), la ROM
-   le lit, mais elle lit et écrit aussi a_du_0 (0x0a24) que l'ARM ne touche jamais. `montant.c:314`
-   lit NDB_A_DU_1 : cohérent avec la layer1. Rôle exact de a_du_0 pour la ROM : à confirmer.
-7. Tailles : sizeof ARM ≠ hôte (T_DB_MCU_TO_DSP 36/34, T_NDB 6356, T_PARAM 292 : bourrage de fin) ;
-   offsets identiques, sans effet.
-8. Recoupements **vérifiés justes** (à la main, contre l'ELF) : tous les WP_*/RP_*/NDB_* de
-   `calypso_api.h`, API_VERSION/API_VERSION2 (= d_version_number1/2), API_BL_STATUS 0x0FFE,
-   `calypso_fbsb.h` (d_dsp_page, d_dsp_state 0x08E2, d_fb_det, d_fb_mode, a_sync_demod[0..3]),
-   `calypso_arm2dsp.c` A2D_DSP_PAGE_OFF 0x01A8, `calypso_bsp.c` D_RACH_DEFAULT_OFFSET 0x023A (= d_rach),
-   `src/rejouer.c` W_PAGE/R_PAGE/NDB/PARAM/BL_*, `tools/rejeu_banc.c` (a_cd 0x1FC, a_fd 0x21A,
-   a_dd_0 0x238, a_kc 0x2CE, d_a5mode 0x1CE), `src/montant.c` NDB_D_TCH_MODE 0x006, `dsp.c`
-   SC_CHKSUM_VER (0x08DB = d_version_number2).
+1. **`calypso_bsp_tx_burst()` reads `data[0x0900 + i]`** (qosmo `calypso_bsp.c`): 0x0900 is inside
+   the NDB (a_sch26[2..]), not a transmit buffer. The ROM's transmitted burst is at 0x3f8a
+   (c54x_exe takes it there in `pont.c tx_rom_publier`).
+2. **Same name, different units**: `NDB_D_DSP_PAGE`/`NDB_D_FB_DET` are **byte** offsets in the
+   NDB (0x000/0x048, `calypso_api.h`) and absolute **DSP word** addresses
+   (0x08D4/0x08F8, `l1-dsp/calypso_fbsb.h`). A unit including both headers would get a
+   silent redefinition.
+3. **B_BLUD**: bit position (15) in layer1, mask (1u<<15) in qosmo, same name.
+4. **CALYPSO_API_SIZE = 64 KiB** (32768 words, `calypso_api.h`) versus 16 KiB in reality
+   (API_SIZE 0x2000 words, `firmware/calypso/dsp.c`); the ARM never writes beyond 0x2000.
+5. **d_ctrl_tch**: `dsp.c` documents b_chan_type on bits 4..7, `dsp_api.h` on 4..5 with
+   bit 6 = SACCH reset and bit 7 = vocoder ON; `dsp_load_tch_param(chan_type=SDCCH_8=4)` therefore
+   sets bit 6. Values actually written: not analysed yet.
+6. **TCH/F uplink speech in a_du_1**: `prim_tch.c` uses `tch_sub ? a_du_0 : a_du_1` (the downlink
+   uses `tch_sub ? a_dd_1 : a_dd_0`); the ARM writes 0x096e (a_du_1), the ROM reads it but also
+   reads and writes a_du_0 (0x0a24), which the ARM never touches. `montant.c` reads NDB_A_DU_1,
+   consistent with layer1. Role of a_du_0 for the ROM: to be confirmed.
+7. Sizes: sizeof differs between ARM and host (T_DB_MCU_TO_DSP 36/34, T_NDB 6356, T_PARAM 292:
+   tail padding); offsets are identical.
+8. Cross-checked against the ELF and correct: all WP_*/RP_*/NDB_* of `calypso_api.h`,
+   API_VERSION/API_VERSION2, API_BL_STATUS 0x0FFE, `calypso_fbsb.h` (d_dsp_page, d_dsp_state 0x08E2,
+   d_fb_det, d_fb_mode, a_sync_demod[0..3]), `calypso_arm2dsp.c` A2D_DSP_PAGE_OFF 0x01A8,
+   `calypso_bsp.c` D_RACH_DEFAULT_OFFSET 0x023A, `src/rejouer.c` W_PAGE/R_PAGE/NDB/PARAM/BL_*,
+   `tools/rejeu_banc.c` (a_cd 0x1FC, a_fd 0x21A, a_dd_0 0x238, a_kc 0x2CE, d_a5mode 0x1CE),
+   `src/montant.c` NDB_D_TCH_MODE 0x006, `dsp.c` SC_CHKSUM_VER (0x08DB = d_version_number2).
 
-## 7. Reste à faire
+## 7. TODO
 
-* Finir `tools/layer1_tester.py` (seule la partie extraction est écrite) : recoupement automatique,
-  balayage statique des fonctions layer1, jugements PASS/FAIL par champ et par fonction, génération
-  de cette page.
-* Analyser les valeurs ARM (d_ctrl_tch, d_fn, a_a5fn, page W vs d_dsp_page, écho W→R) — données
-  prêtes dans la mesure et le journal.
-* Fusionner la récolte (MAILBOX.md, README.fr.md, sources qosmo) dans la section 4.
+* Finish `tools/layer1_tester.py` (only extraction is written): automatic cross-check,
+  static scan of the layer1 functions, PASS/FAIL per field and function, generation of this page.
+* Analyse the ARM values (d_ctrl_tch, d_fn, a_a5fn, W page vs d_dsp_page, W->R echo).

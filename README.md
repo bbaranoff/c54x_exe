@@ -8,17 +8,19 @@ unmodified OsmocomBB layer 1 firmware runs under QEMU and talks to this process
 through the real shared API RAM, frame by frame, exactly as the ARM talks to
 the DSP on silicon. No radio, no SDR, no license anywhere in the chain.
 
-State on 2026-10-03 (runs recorded in [`docs/README.fr.md`](docs/README.fr.md)
-and [`MAILBOX.md`](MAILBOX.md)): cell selection, location update, SMS in both
-directions, mobile-originated and mobile-terminated voice calls with A5/1
-confirmed by the network, speech audible both ways. All downlink channel
-decoding is done by the ROM. Since 2026-10-03 the **uplink SDCCH/SACCH bursts
-sent to the BTS are the ROM's own coded bursts** (bit-exact with GSM 05.03 once
-four C54x core bugs were fixed). Open: the ROM flags every downlink speech frame
-as bad (BFI) although speech is intelligible, SACCH/8 downlink often fails its
-FIRE check, and the SB window is armed rarely enough that sync takes a few tries.
-The bench's coverage step prints, per signal-processing step, whether the run
-did it in the ROM or on the host (`tests/modules/99-couverture.sh`).
+What works: cell selection, location update, SMS in both directions,
+mobile-originated and mobile-terminated voice calls with A5/1, speech audible
+both ways. All downlink channel decoding is done by the ROM, and the uplink
+SDCCH/SACCH bursts sent to the BTS are the ROM's own coded bursts (bit-exact
+with GSM 05.03). The bench's coverage step prints, per signal-processing step,
+whether the run did it in the ROM or on the host (`/opt/GSM/tests/modules/99-couverture.sh`).
+
+## Known issues
+
+- The ROM flags every downlink speech frame as bad (BFI) although speech is intelligible.
+- SACCH/8 downlink often fails its FIRE check.
+- The SB window is armed rarely enough that synchronisation takes a few tries.
+- Real-time margin in TCH is thin (about 4.2 to 4.6 ms of DSP work per 4.62 ms frame).
 
 ## Architecture
 
@@ -101,9 +103,10 @@ src/        main.c (ROM loading, CLI), pont.c (ARM/DSP bridge, per-frame sequenc
             rejouer.c (replay), verbosite.c (trace levels)
 rom/        TI mask ROM dumps
 tools/      benches, test vectors, analysis scripts
-docs/       README.fr.md — the detailed, dated engineering notes (French)
+docs/       carte-memoire.md (DSP memory map), emulating-the-baseband.md,
+            CLAIMS-2026-10-04.md (signed claims snapshot)
 LAUNCH.md   process-by-process launch guide
-MAILBOX.md  dated log of hypotheses, refutations and measurements
+MAILBOX.md  ARM <-> DSP API RAM map and who writes what
 ```
 
 ## License
@@ -130,16 +133,14 @@ Two inert-by-default probes in `src/pont.c` (environment variables, `--arm` mode
 - `PONT_TX_OMBRE=1` — compares each real SDCCH block coded by the ROM with
   `gsm0503_xcch_encode` (`/tmp/tx-sonde/ombre.txt`, `reel.txt`).
 
-Uplink coding, as measured on 2026-10-03 (`tests/rom-tx/README.md`): the ROM writes the
+Uplink coding (`/opt/GSM/tests/rom-tx/README.md`): the ROM writes the
 interleaved block in `0x4280` (4 bursts × 8 words, circular, BK=32); FIRE parity is
 computed at PROM0 `0x9013`; at each transmit frame `0x890e-0x891b` copies the current burst
 to `data[0x3f8a..0x3f91]` (114 bits + hl/hu, MSB first), advances the pointer
 `data[0x3d9b]` and clears word 7 of that burst in `0x4280`; in ciphered mode the A5
-keystream (`0x3f9b..`, `calypso_a5.c`) is XORed onto `0x3f8a` itself. Four C54x core bugs
-had to be fixed in qosmo `c54x_exec.c` for the output to match GSM 05.03 on all 456 bits:
-logical (not arithmetic) 40-bit shift in `AND/OR/XOR src,SHIFT,dst`, SXM-respecting
-`LD/ADD/SUB Smem,16` and `LDM`, and `F0Bx/F1Bx` decoded as `OR A,-n,dst` instead of
-RSBX/SSBX (gates `CALYPSO_LOGIC40`, `CALYPSO_LD16_SEXT`, `CALYPSO_F0BX_SBIT` = old behaviour).
+keystream (`0x3f9b..`, `calypso_a5.c`) is XORed onto `0x3f8a` itself. The output matches GSM 05.03 on
+all 456 bits. Core options that restore earlier behaviour for comparison:
+`CALYPSO_LOGIC40`, `CALYPSO_LD16_SEXT`, `CALYPSO_F0BX_SBIT`.
 
 `C54X_BIN=/path/to/c54x_exe ./run.sh` runs another build of the executable.
 
@@ -170,5 +171,4 @@ BRUIT_SNR_DB=12 PONT=1 ./run.sh                     # core AWGN at 12 dB, no pro
 ```
 
 Log: `$RUNDIR/bruit.log` (periodic `STATS`, final `BILAN`); `./run.sh --stop` stops it. A rejected
-configuration stops `run.sh` before anything is launched. Details:
-`/opt/GSM/osmo-operator/wiki/Injecteur-bruit.md`.
+configuration stops `run.sh` before anything is launched.
