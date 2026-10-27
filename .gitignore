@@ -16,3 +16,12 @@ __pycache__/
 /rom/calypso_dsp.txt
 /c54x_exe.*
 /tools/layer1_tester
+# derive de binutils-2.21.1.tar.bz2 par repro_toa.sh
+/binutils-2.21.1/
+/build-tic54x/
+# ROM du DSP et derives (desassemblage, dump FreeCalypso) : jamais dans le depot
+/PROM0.bin
+*.dis
+/dsp-rom-3606-dump.txt
+*.avant-*
+.avant-*/
