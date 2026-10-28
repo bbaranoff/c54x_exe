@@ -18,6 +18,7 @@ __pycache__/
 /tools/layer1_tester
 # derive de binutils-2.21.1.tar.bz2 par repro_toa.sh
 /binutils-2.21.1/
+/binutils-2.21.1.tar.bz2
 /build-tic54x/
 # ROM du DSP et derives (desassemblage, dump FreeCalypso) : jamais dans le depot
 /PROM0.bin
