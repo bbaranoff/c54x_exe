@@ -653,7 +653,7 @@ etape5_air() {   # AIR=1: the air between the two Calypsos (pont/air.py), instea
 etape5_vsp() {
     [ "${CALYPSO_VSP:-0}" = 1 ] || return 0
     vivant vsp && { dire "5b. pont audio VSP deja lance (pid $(pid_de vsp))"; return 0; }
-    ( cd /opt/GSM/osmo-operator && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
+    ( cd "$(dirname "$PONT_PY")/.." && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
     echo $! > "$RUNDIR/vsp.pid"
     dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio  (journal $RUNDIR/vsp.log)"
 }
@@ -686,7 +686,7 @@ etape5() {   # the TRX bridge (PONT=1): BTS bursts to layer 1
     [ -n "${PONT_HORLOGE_MAX:-}" ] && dire "   horloge asservie : ralentissement jusqu'a ${PONT_HORLOGE_MAX} x le temps reel (PONT_HORLOGE_MAX)"
     # voice port (CALYPSO_VSP=1): PCM rings of the DSP <-> PulseAudio
     if [ "${CALYPSO_VSP:-0}" = 1 ] && ! vivant vsp; then
-        ( cd /opt/GSM/osmo-operator && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
+        ( cd "$(dirname "$PONT_PY")/.." && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
         echo $! > "$RUNDIR/vsp.pid"
         dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio"
     fi
