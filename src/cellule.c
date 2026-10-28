@@ -372,24 +372,21 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         } else *n_iq = 2 * 148;
         return type;
     }
-    /* [2026-09-30] CELLULE_SB_AMP=<n> : amplitude du seul SCH (FCCH et NB gardent
-     * amp). Le SNR de la ROM sur le SCH sature a 16384 ; le seul cas de banc a
-     * SNR non sature (6974) avait decode. A mesurer. */
+    /* CELLULE_SB_AMP=<n>: amplitude of the SCH only (FCCH and NB keep amp).
+     * The ROM's SNR on the SCH saturates at 16384. */
     if (type == 'S') { static int sba = -2; if (sba == -2) sba = env_int("CELLULE_SB_AMP", -1); if (sba > 0) amp = sba; }
     /* CELLULE_SB_PHASE=<deg> : carrier phase of the SCH burst */
     if (type == 'S') { static int sp = -2; if (sp == -2) sp = env_int("CELLULE_SB_PHASE", 0); phase0 = sp * M_PI / 180.0; }
     int16_t *burst_iq = iq;
-    int fen_n = 148;              /* echantillons sur lesquels portent elargissement et bruit du SCH */
-    /* [2026-09-30] CELLULE_SB_GARDE=<mode> : LA GARDE N'EST PAS DU SILENCE. En
-     * descendant GSM la BTS emet en continu : le SCH est precede du signal de TS7
-     * et suivi de TS1, pas de 21 echantillons nuls. Mesure en rejeu (SYM 1.0, DEC
-     * 0.35, bruit 3000) : les 20 % de SCH que la ROM rate le sont a burst bien
-     * place (TOA 23, SNR sature), et les bits faux se concentrent sur les
-     * PREMIERS bits d'information (bits 5-15 du mot, 65-84 %), c'est-a-dire le
-     * debut du burst : l'egaliseur demarre sur un front silence -> signal qu'il
-     * ne voit jamais sur silicium. Ici la fenetre entiere (marge, burst, marge)
-     * est modulee d'un seul trait, les marges portant des bits de garde :
-     * 1 = zeros, 2 = pseudo-aleatoires (graine = fn), 3 = uns. 0 = comme avant. */
+    int fen_n = 148;              /* samples covered by the SCH spread and noise */
+    /* CELLULE_SB_GARDE=<mode>: THE GUARD IS NOT SILENCE. On the GSM downlink
+     * the BTS transmits continuously: the SCH is preceded by the TS7 signal and
+     * followed by TS1, not by 21 null samples. The ROM's equaliser never sees a
+     * silence -> signal edge on silicon, and it misreads the FIRST information
+     * bits (bits 5-15 of the word) when given one. Here the whole window
+     * (margin, burst, margin) is modulated in a single pass, the margins
+     * carrying guard bits: 1 = zeros, 2 = pseudo-random (seed = fn), 3 = ones.
+     * 0 = plain silence margins. */
     if (m_tete >= 0) {
         static int garde = -2; if (garde == -2) garde = env_int("CELLULE_SB_GARDE", 0);
         int tot = m_tete + 148 + m_fin;
@@ -406,12 +403,12 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
               if (fc > 0) gmsk_moduler_filtre(ext, tot, amp, phase0, decalage, fc, iq);
               else gmsk_moduler(ext, tot, amp, phase0, decalage, iq); }
             *n_iq = 2 * tot;
-            burst_iq = iq;            /* elargissement et bruit sur toute la fenetre */
+            burst_iq = iq;            /* spread and noise over the whole window */
             fen_n = tot;
         } else {
             memset(iq, 0, (size_t)m_tete * 2 * sizeof(int16_t));
             { static double fc = -2; if (fc == -2) { const char *e = calypso_getenv("CELLULE_SB_FC"); fc = (e && *e) ? atof(e) : 0; }
-              /* [2026-09-30] CELLULE_SB_FC=<kHz> : chaine de reception modelisee (voir gmsk_moduler_filtre) */
+              /* CELLULE_SB_FC=<kHz>: modelled receive chain (see gmsk_moduler_filtre) */
               if (type == 'S' && fc > 0) gmsk_moduler_filtre(bits, 148, amp, phase0, decalage, fc, iq + 2 * m_tete);
               else gmsk_moduler(bits, 148, amp, phase0, decalage, iq + 2 * m_tete); }
             memset(iq + 2 * (m_tete + 148), 0, (size_t)m_fin * 2 * sizeof(int16_t));
@@ -468,26 +465,22 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
         static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_NB_SYM"); a = (e && *e) ? atof(e) : 0.3; }
         gmsk_elargir(burst_iq, 148, a);
     }
-    /* [2026-09-29] CELLULE_SB_SYM=<a> : le meme elargissement sur le SCH. Mesure
-     * du banc (run de 23:50, 129 fenetres SB natives, TOA 23-24) : la ROM rend
-     * CRC OK sur la moitie des SCH et, sur la plupart des echecs, seuls les
-     * bits 0-2 du mot SB sont faux (...1b/1f/1d au lieu de ...1c) : les memes
-     * positions du burst basculent selon le contenu, le profil « fil du
-     * rasoir » des NB avant CELLULE_NB_SYM. 0 par defaut tant que le rejeu ne
-     * l'a pas mesure. */
+    /* CELLULE_SB_SYM=<a>: the same spread on the SCH. Without it the ROM
+     * returns CRC OK on about half the SCHs, with only bits 0-2 of the SB word
+     * wrong (...1b/1f/1d instead of ...1c): the same burst positions flip
+     * depending on the content, the "razor's edge" profile of the NBs without
+     * CELLULE_NB_SYM. 0 by default. */
     if (type == 'S') {
         static double a = -2; if (a == -2) { const char *e = calypso_getenv("CELLULE_SB_SYM"); a = (e && *e) ? atof(e) : 0.0; }
         if (a != 0.0) gmsk_elargir(burst_iq, fen_n, a);
     }
-    /* [2026-09-30] CELLULE_SB_ISI=<h1>[,<h2>[,<h3>]] : la traine CAUSALE de
-     * CELLULE_NB_ISI, sur le SCH. Mesure : les 20 % de SCH rates le sont sur
-     * la moitie AVANT la sequence d'apprentissage, et l'ensemble des rates est
-     * fixe par le contenu (31/33 communs entre deux instants d'echantillonnage).
-     * C'est le mecanisme decrit pour les NB : la ROM choisit la fenetre de son
-     * estimation de canal au maximum d'energie sur des lags, notre GMSK a
-     * 1 ech/symbole met les fenetres a egalite et les donnees voisines
-     * tranchent. Une traine causale (comme le filtre analogique d'un vrai
-     * recepteur) leve l'egalite. Normalisee par 1+sum(h) pour rester en 16 bits. */
+    /* CELLULE_SB_ISI=<h1>[,<h2>[,<h3>]]: the CAUSAL tail of CELLULE_NB_ISI, on
+     * the SCH. Same mechanism as for the NBs: the ROM picks the window of its
+     * channel estimate at the energy maximum over lags, our GMSK at 1
+     * sample/symbol leaves the windows tied and the neighbouring data decides;
+     * the misses then fall on the half BEFORE the training sequence and are
+     * fixed by the content. A causal tail (like the analogue filter of a real
+     * receiver) breaks the tie. Normalised by 1+sum(h) to stay within 16 bits. */
     if (type == 'S') {
         static int isi_n = -2; static double h[4];
         if (isi_n == -2) { isi_n = 0; const char *e = calypso_getenv("CELLULE_SB_ISI");
@@ -504,13 +497,13 @@ char cellule_burst(uint32_t fn, uint8_t bsic, int amp, double decalage, int marg
             }
         }
     }
-    /* [2026-09-30] CELLULE_SB_NOISE=<sigma> : le meme bruit gaussien sur le SCH
-     * (voir CELLULE_NB_NOISE ci-dessous : sans bruit, l'echelle des bits
-     * souples de la ROM s'effondre). 0 = inchange. */
+    /* CELLULE_SB_NOISE=<sigma>: the same Gaussian noise on the SCH (see
+     * CELLULE_NB_NOISE below: without noise, the scale of the ROM's soft bits
+     * collapses). 0 = unchanged. */
     if (type == 'S') {
         static double sigma = -2; if (sigma == -2) { const char *e = calypso_getenv("CELLULE_SB_NOISE"); sigma = (e && *e) ? atof(e) : 0.0; }
         if (sigma > 0) {
-            static uint32_t graine = 0xffffffffu;   /* CELLULE_SB_NOISE_SEED : autre realisation du bruit */
+            static uint32_t graine = 0xffffffffu;   /* CELLULE_SB_NOISE_SEED: another noise realisation */
             if (graine == 0xffffffffu) graine = (uint32_t)env_int("CELLULE_SB_NOISE_SEED", 0);
             uint32_t seed = fn * 2654435761u + 777u + graine * 7919u;
             for (int k = 0; k < 2 * fen_n; k++) {

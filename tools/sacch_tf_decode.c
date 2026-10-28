@@ -1,15 +1,15 @@
-/* sacch_tf_decode.c - decode hors DSP la SACCH/TF jouee par le BSP.
+/* sacch_tf_decode.c - decodes outside the DSP the SACCH/TF played by the BSP.
  *
- * Lit /dev/shm/calypso_sacch_tf.bin (calypso_bsp.c, sonde [sacch_tf] :
- * enregistrements de 156 octets = tick BE32, fn BE32, 148 bits 0/1), regroupe
- * les bursts en blocs selon 45.002 (TCH/F, bloc du TN a fn%104 = 12 + 26*TN/2
- * modulo 104, puis +26, +52, +78) et les passe a gsm0503_xcch_decode, en clair
- * et dechiffres avec le Kc de /dev/shm/calypso_kc_l1.
+ * Reads /dev/shm/calypso_sacch_tf.bin (calypso_bsp.c, probe [sacch_tf]:
+ * 156-byte records = tick BE32, fn BE32, 148 bits 0/1), groups the bursts
+ * into blocks per 45.002 (TCH/F, block of the TN at fn%104 = 12 + 26*TN/2
+ * modulo 104, then +26, +52, +78) and feeds them to gsm0503_xcch_decode, in
+ * clear and deciphered with the Kc of /dev/shm/calypso_kc_l1.
  *
- * Si la SACCH decode ici et pas dans la ROM, le defaut est dans le chemin
- * BSP -> ROM ; si elle ne decode pas ici non plus, dans ce que le BSP recoit.
+ * If the SACCH decodes here and not in the ROM, the fault is in the
+ * BSP -> ROM path; if it does not decode here either, in what the BSP gets.
  *
- * ./sacch_tf_decode [fichier] [TN=2] [Kc en hexa, A5/1 ; defaut : calypso_kc_l1]
+ * ./sacch_tf_decode [file] [TN=2] [Kc in hex, A5/1; default: calypso_kc_l1]
  */
 #include <stdio.h>
 #include <stdlib.h>

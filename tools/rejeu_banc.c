@@ -1,32 +1,32 @@
-/* rejeu_banc.c - rejoue hors banc un TCH enregistre par c54x_exe.
+/* rejeu_banc.c - replays outside the bench a TCH recorded by c54x_exe.
  *
- * Entree : /dev/shm/calypso_rejeu_tch.bin (calypso_bsp.c + pont.c,
- * CALYPSO_REJEU_ENREG). Enregistrements :
- *   'S' tick, API RAM complete        'D' tick, registres, memoire de donnees
- *   'T' tick, drapeaux, budget        'A' tick, fenetre, n x (mot, valeur)
+ * Input: /dev/shm/calypso_rejeu_tch.bin (calypso_bsp.c + pont.c,
+ * CALYPSO_REJEU_ENREG). Records:
+ *   'S' tick, whole API RAM           'D' tick, registers, data memory
+ *   'T' tick, flags, budget           'A' tick, window, n x (word, value)
  *   'B' tick, tn, fn, one_shot, nwin, n, I/Q
- * On boote le DSP comme tools/tch_rejeu, on pose l'etat 'S'/'D', puis chaque
- * tick dans l'ordre de pont.c : ecritures ARM d'avant le TICK, interruption
- * trame, phase A jusqu'a l'IDLE (TCH), ecritures ARM d'entre A et GO,
- * livraisons d'I/Q, reste du budget, pompe DMA. On imprime chaque resultat
- * SACCH (a_cd) et FACCH (a_fd).
+ * The DSP is booted like tools/tch_rejeu, the 'S'/'D' state is loaded, then
+ * each tick in the order of pont.c: ARM writes before the TICK, frame
+ * interrupt, phase A until the IDLE (TCH), ARM writes between A and the GO,
+ * I/Q deliveries, rest of the budget, DMA pump. Every SACCH (a_cd) and
+ * FACCH (a_fd) result is printed.
  *
- * Si le rejeu reproduit le Fire KO du banc, on peut iterer ici sans relancer
- * le banc ; REJEU_SANS_D=1 garde l'etat du boot local au lieu de 'D'.
+ * If the replay reproduces the bench's Fire KO, one can iterate here without
+ * restarting the bench; REJEU_SANS_D=1 keeps the local boot state instead of 'D'.
  *
- * Diagnostic (avec REJEU_TRACE=1) : REJEU_STOP_W=adr (ecritures d'un mot, PC fautif), REJEU_STOP_NW=n
- * (nombre d'ecritures avant arret, 6), REJEU_ANNEAU_W=n (n instructions avant la 1re ecriture),
- * REJEU_STOP_PC=pc, REJEU_STOP_TMIN=tick (ignorer avant ce tick), REJEU_PEEK=adr:n,... (memoire au
- * point d'arret). L'API RAM est dsp->data[0x0800..] : a_dd_0 = 0x09f0.
+ * Diagnostics (with REJEU_TRACE=1): REJEU_STOP_W=adr (writes of one word, offending PC),
+ * REJEU_STOP_NW=n (number of writes before stopping, 6), REJEU_ANNEAU_W=n (n instructions before
+ * the 1st write), REJEU_STOP_PC=pc, REJEU_STOP_TMIN=tick (ignore before this tick),
+ * REJEU_PEEK=adr:n,... (memory at the breakpoint). The API RAM is dsp->data[0x0800..]:
+ * a_dd_0 = 0x09f0.
  *
- * [2026-10-04] Montant et descendant du TCH :
- *   REJEU_TX=1        chaque burst montant final (script TSP, src/tsp_tx.c) : fn de la page W, type,
- *                     TSC, hl/hu, 148 bits -- a decoder hors ligne (libosmocoding, A5 au fn de la ROM)
- *   REJEU_TX_PHASE=1  a quel moment du tick la ROM finit ce script (phase A, B, pompe DMA)
- *   REJEU_BLUD=1      qui pose / efface B_BLUD de a_cu, a_fu, a_du (ARM a T, ROM a T+1)
- *   REJEU_DL=1        chaque burst descendant livre (fenetre 0) : fn du pont, fn de la page W (a_a5fn,
- *                     les deux doivent etre egaux), bits demodules (grossierement : TSC a 14/26)
- * C'est REJEU_BLUD qui a montre que montant.c effacait B_BLUD de a_fu avant la ROM (appels sans FACCH).
+ * Uplink and downlink of the TCH:
+ *   REJEU_TX=1        each final uplink burst (TSP script, src/tsp_tx.c): fn of the W page, type,
+ *                     TSC, hl/hu, 148 bits -- to decode offline (libosmocoding, A5 at the ROM's fn)
+ *   REJEU_TX_PHASE=1  at which point of the tick the ROM finishes this script (phase A, B, DMA pump)
+ *   REJEU_BLUD=1      who sets / clears B_BLUD of a_cu, a_fu, a_du (ARM at T, ROM at T+1)
+ *   REJEU_DL=1        each downlink burst delivered (window 0): fn of the bridge, fn of the W page
+ *                     (a_a5fn, both must be equal), demodulated bits (roughly: TSC at 14/26)
  *
  *   ./rejeu_banc [fichier] [ticks max]
  */
@@ -54,10 +54,10 @@ QemuMutex calypso_pcb_daram_lock;
 void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 { (void)addr; if (!wr) memset(buf, 0, len); }
 
-#define API_WORDS 0x2000u          /* fenetre API vue du DSP : data 0x0800..0x27ff */
-#define ENREG_API_WORDS CALYPSO_API_WORDS   /* taille de l'API RAM enregistree par pont.c */
+#define API_WORDS 0x2000u          /* API window as seen by the DSP: data 0x0800..0x27ff */
+#define ENREG_API_WORDS CALYPSO_API_WORDS   /* size of the API RAM recorded by pont.c */
 #define NDB 0xD4u
-#define W_PAGE(p) ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 mots (comme src/rejouer.c) */
+#define W_PAGE(p) ((p) ? 0x14u : 0x00u)   /* T_DB_MCU_TO_DSP, 17 words (like src/rejouer.c) */
 static uint32_t g_page_it_fn; static unsigned g_page_it_pg; static uint16_t g_page_it_td, g_page_it_tu, g_page_it_tra, g_page_it_ctrl, g_it_tch_mode, g_it_du1;
 #define PARAM 0x431u
 #define BL_ADDR_HI_W 0x7FCu
@@ -105,17 +105,17 @@ static void boot(void)
     printf("boot local : %ld insn, idle=%d\n", b, dsp->idle);
 }
 
-/* SONDE (REJEU_SONDE=1) : ou la ROM range-t-elle les bursts SACCH ?
- * Pour chaque burst du canal (slot 0 livre par le BSP), on retrouve les bits
- * par demodulation GMSK differentielle (polarite calee sur la TSC7), on les
- * dechiffre (Kc et d_a5mode pris dans l'API RAM), puis au tick ou a_cd change
- * on cherche dans la memoire du DSP ou sont les 116 bits de chacun des quatre
- * bursts du bloc (bits souples : signe negatif ou positif = 1). */
+/* PROBE (REJEU_SONDE=1): where does the ROM store the SACCH bursts?
+ * For each burst of the channel (slot 0 delivered by the BSP), the bits are
+ * recovered by differential GMSK demodulation (polarity locked on the TSC7),
+ * deciphered (Kc and d_a5mode taken from the API RAM), then at the tick where
+ * a_cd changes the DSP memory is searched for the 116 bits of each of the
+ * four bursts of the block (soft bits: negative or positive sign = 1). */
 static const uint8_t TSC7[26] = {1,1,1,0,1,1,1,1,0,0,0,1,0,0,1,0,1,1,1,0,1,1,1,1,0,0};
 static struct { uint32_t fn; uint8_t b[148]; } memo[4096];
 static int nmemo;
-/* Demodulation GMSK differentielle d'un burst livre (148 bits, polarite calee sur la TSC7) ;
- * rend le score TSC (0..26) ou -1 si la fenetre est trop courte. */
+/* Differential GMSK demodulation of a delivered burst (148 bits, polarity locked on the TSC7);
+ * returns the TSC score (0..26) or -1 if the window is too short. */
 static int demod_burst(const int16_t *iq, int n, int marge, uint8_t *out, int *polarite)
 {
     if (n / 2 < marge + 148) return -1;
@@ -150,7 +150,7 @@ static void memo_burst(uint32_t fn, const int16_t *iq, int n, int marge)
 }
 static const uint8_t *memo_trouver(uint32_t fn)
 {
-    /* Bits exacts de la sonde du BSP (calypso_sacch_tf.bin), s'il y en a. */
+    /* Exact bits of the BSP probe (calypso_sacch_tf.bin), if any. */
     static uint8_t (*vrai)[156]; static int nvrai = -1;
     if (nvrai < 0) {
         nvrai = 0;
@@ -184,7 +184,7 @@ static void sonde_bloc(uint32_t fn_dernier)
             if (m0 > best[0]) { best[0] = m0; ad[0] = a; }
             if (m1 > best[1]) { best[1] = m1; ad[1] = a; }
         }
-        /* aussi en 57+57 sans les bits de vol (e[] seuls) */
+        /* also as 57+57 without the stealing bits (e[] only) */
         uint8_t e[114]; memcpy(e, b + 3, 57); memcpy(e + 57, b + 88, 57);
         int be = 0; unsigned ae = 0;
         for (unsigned a = 0x60; a + 114 < C54X_DATA_SIZE; a++) {
@@ -196,8 +196,8 @@ static void sonde_bloc(uint32_t fn_dernier)
     }
 }
 
-/* REJEU_TRACE=1 : pas a pas, anneau des dernieres instructions, arret des que
- * SP sort de la pile ou que PC tombe en DARAM basse (< 0x0800, hors OVLY). */
+/* REJEU_TRACE=1: step by step, ring of the last instructions, stop as soon as
+ * SP leaves the stack or PC falls into low DARAM (< 0x0800, outside OVLY). */
 uint16_t prog_fetch(C54xState *s, uint16_t pc);
 uint16_t data_read(C54xState *s, uint16_t addr);
 #define ANNEAU 4096
@@ -219,11 +219,9 @@ static int vsp_courir(C54xState *d, int n) { (void)d; return (int)courir(n); }
 static long courir(long n)
 {
     if (trace_on < 0) trace_on = getenv("REJEU_TRACE") != NULL;
-    /* [2026-10-03] Boucler jusqu'au budget, comme le banc (pont.c c54x_run_profile) : c54x_run rend la
-     * main de lui-meme a un point interruptible au bout de CALYPSO_DSP_YIELD instructions (32768 par
-     * defaut). Un seul appel perdait le reste du budget de chaque phase : le DSP ne finissait pas son
-     * travail (SACCH 70 bonnes / 69 Fire KO, a_dd[2] jamais ecrit = FFFF, BFI=0) la ou le banc et le pas
-     * a pas donnent SACCH 132/33 et BFI 2654/2654. */
+    /* Loop up to the budget, like the bench (pont.c c54x_run_profile): c54x_run yields by itself at
+     * an interruptible point after CALYPSO_DSP_YIELD instructions (32768 by default). A single call
+     * would lose the rest of each phase's budget and the DSP would not finish its work. */
     if (!trace_on) {
         long k = 0;
         while (k < n && dsp->running && !dsp->idle) {
@@ -240,13 +238,13 @@ static long courir(long n)
         anneau[i].pc = pc; anneau[i].op = prog_fetch(dsp, pc); anneau[i].op2 = prog_fetch(dsp, pc + 1);
         anneau[i].sp = dsp->sp; anneau[i].st0 = dsp->st0; anneau[i].st1 = dsp->st1; anneau[i].tick = g_c54x_exe_fn;
         memcpy(anneau[i].ar, dsp->ar, sizeof dsp->ar); anneau[i].a = dsp->a; anneau[i].b = dsp->b;
-        {   /* [2026-10-15] REJEU_PCPLAGE=lo-hi : histogramme des PC executes dans la plage (fin de rejeu) */
+        {   /* REJEU_PCPLAGE=lo-hi: histogram of the PCs executed in the range (end of replay) */
             static int init; static unsigned lo, hi; static unsigned long *h;
             if (!init) { init = 1; const char *e = getenv("REJEU_PCPLAGE");
                 if (e && sscanf(e, "%x-%x", &lo, &hi) == 2 && hi >= lo) { h = calloc(hi - lo + 1, sizeof *h); g_pcplage = h; g_pclo = lo; g_pchi = hi; atexit(pcplage_resume); } }
             if (h && pc >= lo && pc <= hi && dsp->xpc == 0) h[pc - lo]++;
         }
-        {   /* [2026-10-15] REJEU_PCS=pc1,pc2,... : nombre d'executions de chaque PC (resume en fin de rejeu) */
+        {   /* REJEU_PCS=pc1,pc2,...: number of executions of each PC (summary at end of replay) */
             static int npcs = -1; static uint16_t pcs[32]; static unsigned long cpt[32];
             if (npcs < 0) { npcs = 0; const char *e = getenv("REJEU_PCS");
                 while (e && *e && npcs < 32) { pcs[npcs++] = (uint16_t)strtoul(e, (char **)&e, 16); if (*e == ',') e++; else break; }
@@ -254,10 +252,10 @@ static long courir(long n)
             for (int q = 0; q < npcs; q++) if (pc == pcs[q]) cpt[q]++;
             g_pcs = pcs; g_pcs_cpt = cpt; g_npcs = npcs;
         }
-        {   /* [2026-10-16] REJEU_CODEC=fichier (avec REJEU_TRACE=1) : le codeur FR de la ROM, trame par trame.
-             * SO = les 160 echantillons qu'il lit (PDROM 0xe6af, deja (s>>3)<<2 comme Gsm_Preprocess),
-             * ENC = la trame qu'il rend (0x0a24, format TI : c000 52b0 0000 puis 260 bits). Avec
-             * CALYPSO_VSP_UL_FICHIER (micro de test), tools/cmp_codeur.py les compare a libgsm. */
+        {   /* REJEU_CODEC=file (with REJEU_TRACE=1): the ROM's FR coder, frame by frame.
+             * SO = the 160 samples it reads (PDROM 0xe6af, already (s>>3)<<2 like Gsm_Preprocess),
+             * ENC = the frame it returns (0x0a24, TI format: c000 52b0 0000 then 260 bits). With
+             * CALYPSO_VSP_UL_FICHIER (test microphone), tools/cmp_codeur.py compares them with libgsm. */
             static int vt = -1; static FILE *fv;
             if (vt < 0) { const char *e = getenv("REJEU_CODEC"); vt = e && *e; if (vt) fv = fopen(e, "w"); if (!fv) vt = 0; }
             if (vt && dsp->xpc == 0) {
@@ -265,8 +263,8 @@ static long courir(long n)
                 if (pc == 0xe3fe) { fprintf(fv, "ENC fn=%u A", g_page_it_fn); for (int j = 0; j < 20; j++) fprintf(fv, " %04x", dsp->data[0x0a24 + j]); fprintf(fv, "\n"); }
             }
         }
-        {   /* [2026-10-15] REJEU_MOTS=1 : le tampon de burst 0x3f8a..0x3f91 tel que la routine d'emballage
-             * le recoit, AVANT le XOR A5 (PC 0x85cb) -- a correler avec les bits emis (verif_codage). */
+        {   /* REJEU_MOTS=1: the burst buffer 0x3f8a..0x3f91 as the packing routine receives it,
+             * BEFORE the A5 XOR (PC 0x85cb) -- to correlate with the transmitted bits (verif_codage). */
             static int mots = -1; if (mots < 0) mots = getenv("REJEU_MOTS") != NULL;
             if (mots && pc == 0x85cb) {
                 printf("MOTS tick=%u fn=%u :", g_c54x_exe_fn, g_page_it_fn);
@@ -299,7 +297,7 @@ static long courir(long n)
         if (dsp->sp < 0x5900 || dsp->sp > 0x5c00 || (getenv("REJEU_STOP_PC") && (long)g_c54x_exe_fn >= (getenv("REJEU_STOP_TMIN") ? atol(getenv("REJEU_STOP_TMIN")) : 0) && npc == (uint16_t)strtoul(getenv("REJEU_STOP_PC"), NULL, 16)) || (getenv("REJEU_STOP_DEBUG") && dsp->data[0x08dc] != 0x0074 && g_c54x_exe_fn > 6200)) {
             plante = 1;
             printf("PLANTAGE tick=%u pc=%04x sp=%04x xpc=%d\n", g_c54x_exe_fn, npc, dsp->sp, dsp->xpc);
-            {   /* REJEU_PEEK=debut:n[,debut:n...] : memoire lue par data_read au point d'arret */
+            {   /* REJEU_PEEK=start:n[,start:n...]: memory read through data_read at the breakpoint */
                 const char *pk = getenv("REJEU_PEEK");
                 while (pk && *pk) {
                     unsigned a0 = strtoul(pk, (char **)&pk, 16), m = 1;
@@ -325,9 +323,9 @@ static long courir(long n)
     return k;
 }
 
-/* [2026-10-04] REJEU_TX_PHASE=1 : a quel moment du tick la ROM finit-elle le burst montant dans le
- * script TSP (apres la phase A, apres la phase B, a quelle iteration de la pompe DMA) ? Compare les 16
- * mots BULDATA a la derniere lecture, sans toucher au `nouveau` de tsp_tx_lire (copie locale). */
+/* REJEU_TX_PHASE=1: at which point of the tick does the ROM finish the uplink burst in the TSP
+ * script (after phase A, after phase B, at which iteration of the DMA pump)? Compares the 16
+ * BULDATA words with the last read, without touching the `nouveau` of tsp_tx_lire (local copy). */
 static void tsp_phase(uint32_t tick, const char *etape, int k)
 {
     static uint16_t vu[16]; static int actif = -1;
@@ -347,7 +345,7 @@ static void tsp_phase(uint32_t tick, const char *etape, int k)
     printf("tick=%u SCRIPT TSP nouveau : %s%s%d\n", tick, etape, k >= 0 ? " iteration " : "", k >= 0 ? k : 0);
 }
 
-/* Un tick = les enregistrements entre deux 'T'. */
+/* One tick = the records between two 'T'. */
 typedef struct { size_t debut, fin; uint32_t tick; uint8_t drap; long budget; } Tick;
 
 int main(int argc, char **argv)
@@ -385,7 +383,7 @@ int main(int argc, char **argv)
     calypso_bsp_init(dsp);
     boot();
 
-    /* Premiere passe : l'etat de depart et le decoupage en ticks. */
+    /* First pass: the starting state and the split into ticks. */
     static Tick ticks[40000]; int nt = 0;
     size_t p = 0;
     while (p < taille) {
@@ -394,7 +392,7 @@ int main(int argc, char **argv)
         switch (k) {
         case 'S': l = 5 + (size_t)ENREG_API_WORDS * 2; break;
         case 'D': l = 5 + sizeof(EnregRegs) + C54X_DATA_SIZE * 2; break;
-        case 'P': l = 5 + 0x8000 * 2; break;   /* [2026-10-22] memoire programme 0x0000-0x7FFF */
+        case 'P': l = 5 + 0x8000 * 2; break;   /* program memory 0x0000-0x7FFF */
         case 'T': l = 10; break;
         case 'A': l = 8 + 4 * (size_t)be16(fichier + p + 6); break;
         case 'B': l = 15 + 2 * (size_t)be16(fichier + p + 13); break;
@@ -411,13 +409,13 @@ int main(int argc, char **argv)
             EnregRegs r; memcpy(&r, fichier + p + 5, sizeof r);
             uint16_t sauve_api[API_WORDS]; memcpy(sauve_api, api, sizeof sauve_api);
             memcpy(dsp->data, fichier + p + 5 + sizeof r, C54X_DATA_SIZE * 2);
-            memcpy(api, sauve_api, sizeof sauve_api);    /* 'S' fait foi pour l'API RAM */
+            memcpy(api, sauve_api, sizeof sauve_api);    /* 'S' is authoritative for the API RAM */
             dsp->a = r.a; dsp->b = r.b; memcpy(dsp->ar, r.ar, sizeof r.ar); dsp->t = r.t; dsp->trn = r.trn;
             dsp->sp = r.sp; dsp->bk = r.bk; dsp->brc = r.brc; dsp->rsa = r.rsa; dsp->rea = r.rea;
             dsp->st0 = r.st0; dsp->st1 = r.st1; dsp->pmst = r.pmst; dsp->imr = r.imr; dsp->ifr = r.ifr;
             dsp->xpc = r.xpc; dsp->pc = r.pc; dsp->idle = r.idle; dsp->running = r.running;
             printf("etat 'D' pose : pc=%04x sp=%04x idle=%d imr=%04x\n", r.pc & 0xffff, r.sp, r.idle, r.imr);
-            {   /* REJEU_POKE=adr=val[,adr=val...] : corriger l'etat de depart */
+            {   /* REJEU_POKE=adr=val[,adr=val...]: patch the starting state */
                 const char *e = getenv("REJEU_POKE");
                 while (e && *e) {
                     unsigned a, v; if (sscanf(e, "%x=%x", &a, &v) != 2) break;
@@ -442,7 +440,7 @@ fini:
 
     uint16_t prec_cd = 0xffff, prec_fd = 0xffff;
     int sacch_ok = 0, sacch_ko = 0;
-    unsigned long tx_n = 0, tx_rach = 0, tx_nb = 0, tx_inc = 0;   /* bursts montants finaux (script TSP) */
+    unsigned long tx_n = 0, tx_rach = 0, tx_nb = 0, tx_inc = 0;   /* final uplink bursts (TSP script) */
     unsigned long tx_hist26[26] = {0};
     static char tx_dernier[16] = "-";
     uint16_t prec_dd = 0; unsigned long parole_n = 0, parole_bfi = 0, parole_err = 0;
@@ -450,10 +448,10 @@ fini:
         Tick *t = &ticks[it];
         g_c54x_exe_fn = t->tick;
         long budget = t->budget;
-        /* [2026-10-22] REJEU_BUDGET=n : budget par tick impose (le banc enregistre INSNS) */
+        /* REJEU_BUDGET=n: forced budget per tick (the bench records INSNS) */
         if (getenv("REJEU_BUDGET")) budget = atol(getenv("REJEU_BUDGET"));
         uint32_t dernier_livre = 0xffffffffu;
-        /* ecritures ARM, fenetre 0 */
+        /* ARM writes, window 0 */
         for (size_t q = t->debut; q < t->fin;) {
             uint8_t k = fichier[q];
             size_t l = k == 'T' ? 10 : k == 'A' ? 8 + 4 * (size_t)be16(fichier + q + 6)
@@ -466,8 +464,8 @@ fini:
                 }
             q += l;
         }
-        {   /* [2026-10-15] REJEU_TCH_MODE_AND / _OR (hexa) : forcer des bits de d_tch_mode (NDB mot 3)
-             * a chaque tick, apres les ecritures ARM -- p.ex. AND=7fff efface B_MUTE_VOCODEC_UL (phase C1). */
+        {   /* REJEU_TCH_MODE_AND / _OR (hex): force bits of d_tch_mode (NDB word 3) on every
+             * tick, after the ARM writes -- e.g. AND=7fff clears B_MUTE_VOCODEC_UL. */
             static int lu; static unsigned m_and = 0xffff, m_or = 0;
             if (!lu) { lu = 1; const char *e;
                        if ((e = getenv("REJEU_TCH_MODE_AND"))) m_and = strtoul(e, NULL, 16);
@@ -475,9 +473,9 @@ fini:
                        if (m_and != 0xffff || m_or) printf("d_tch_mode force a chaque tick : AND %04x OR %04x\n", m_and, m_or); }
             if (m_and != 0xffff || m_or) api[NDB + 3] = (uint16_t)((api[NDB + 3] & m_and) | m_or);
         }
-        {   /* [2026-10-15] REJEU_W16_BIT14=1 : quand l'ARM pose B_TASK_ABORT (bit 15 de d_ctrl_system,
-             * mot 16 de la page W), ajouter le bit 14 -- la ROM (PROM0 0xa569) ne lance alors la tache 43
-             * (decodeur de parole) que si ce bit l'accompagne. */
+        {   /* REJEU_W16_BIT14=1: when the ARM sets B_TASK_ABORT (bit 15 of d_ctrl_system, word 16
+             * of the W page), add bit 14 -- the ROM (PROM0 0xa569) then only starts task 43 (speech
+             * decoder) if this bit comes with it. */
             static int on = -1; static unsigned long n;
             if (on < 0) on = getenv("REJEU_W16_BIT14") != NULL;
             for (int pg = 0; on && pg < 2; pg++) {
@@ -485,14 +483,14 @@ fini:
                 if (!(*w16 & 0x4000)) { *w16 |= 0x4000; if (n++ < 3) printf("tick=%u : d_ctrl_system page %d |= 0x4000\n", t->tick, pg); }
             }
         }
-        /* [2026-10-15] REJEU_MISC_TASK=1 : B_MISC_TASK (bit 3) dans d_dsp_page, comme la pile TI --
-         * la ROM ne lance la tache 34 (commandes audio -> tache 64 -> decodeur de parole 0xc4f7)
-         * que si ce bit est pose (PROM0 0xb0f9, 0x3fb0 = copie de d_dsp_page). */
+        /* REJEU_MISC_TASK=1: B_MISC_TASK (bit 3) in d_dsp_page, like the TI stack -- the ROM
+         * only starts task 34 (audio commands -> task 64 -> speech decoder 0xc4f7) if this bit
+         * is set (PROM0 0xb0f9, 0x3fb0 = copy of d_dsp_page). */
         if (getenv("REJEU_MISC_TASK") && (api[NDB + 0] & 0x0002)) api[NDB + 0] |= 0x0008;
-        /* [2026-10-22] REJEU_SYNC_DL=1 : la L1 TI pose B_SYNC_TCH_UL (bit 8 de d_ctrl_tch, W mot 9) au premier
-         * TCH mais jamais le bit 9 (B_SYNC_AMR chez TI, B_SYNC_TCH_DL pour la ROM et osmocom dsp.c) : le poser. */
-        /* [2026-10-22 21:40] REJEU_SYNC_DL=2 : comme montant.c, aussi sur la premiere page a tache TCH (task_d 13) :
-         * la L1 TI de Magnetite pose d_ctrl_tch=0x0091, sans le bit 8. */
+        /* REJEU_SYNC_DL=1: the TI L1 sets B_SYNC_TCH_UL (bit 8 of d_ctrl_tch, W word 9) at the first
+         * TCH but never bit 9 (B_SYNC_AMR at TI, B_SYNC_TCH_DL for the ROM and osmocom dsp.c): set it. */
+        /* REJEU_SYNC_DL=2: like montant.c, also on the first page with a TCH task (task_d 13):
+         * the Magnetite TI L1 sets d_ctrl_tch=0x0091, without bit 8. */
         if (getenv("REJEU_SYNC_DL")) {
             static bool fait;
             int mode2 = atoi(getenv("REJEU_SYNC_DL")) == 2;
@@ -505,9 +503,9 @@ fini:
                 }
             }
         }
-        {   /* [2026-10-15] REJEU_DU1_VERS_DU0=1 : la trame de parole que le firmware pose dans a_du_1
-             * (prim_tch.c : tch_sub ? a_du_0 : a_du_1) est recopiee dans a_du_0 -- la ROM relit a_du_0
-             * a PC 0x909c une fois par bloc, jamais a_du_1 au-dela de l'aiguillage (phase C1). */
+        {   /* REJEU_DU1_VERS_DU0=1: the speech frame the firmware posts in a_du_1
+             * (prim_tch.c: tch_sub ? a_du_0 : a_du_1) is copied into a_du_0 -- the ROM re-reads
+             * a_du_0 at PC 0x909c once per block, never a_du_1 beyond the dispatch. */
             static int on = -1; static unsigned long n;
             if (on < 0) on = getenv("REJEU_DU1_VERS_DU0") != NULL;
             uint16_t *du1 = &api[NDB + 0x134 / 2], *du0 = &api[NDB + 0x2A0 / 2];
@@ -517,8 +515,8 @@ fini:
                 if (n++ < 3) printf("tick=%u : a_du_1 -> a_du_0 (en-tete %04x)\n", t->tick, du0[0]);
             }
         }
-        {   /* [2026-10-15] REJEU_DD0=1 : chaque trame de parole descendante (a_dd_0, B_BLUD, mots 3..19,
-             * format TI) avec son tick -- reference libgsm pour juger la sortie du vocodeur ROM. */
+        {   /* REJEU_DD0=1: each downlink speech frame (a_dd_0, B_BLUD, words 3..19, TI format)
+             * with its tick -- libgsm reference to judge the output of the ROM vocoder. */
             static int on = -1; static uint16_t prec[22];
             if (on < 0) on = getenv("REJEU_DD0") != NULL;
             uint16_t *dd0 = &api[NDB + 0x238 / 2];
@@ -529,9 +527,9 @@ fini:
                 memcpy(prec, dd0, sizeof prec);
             }
         }
-        {   /* [2026-10-15] REJEU_DU1=1 : chaque trame de parole posee par l'ARM (a_du_1 avec B_BLUD,
-             * format TI, mots 3.. octet fort d'abord), avec le fn de la page W -- reference pour
-             * comparer hors ligne au codage de la ROM (verif_codage.py). */
+        {   /* REJEU_DU1=1: each speech frame posted by the ARM (a_du_1 with B_BLUD, TI format,
+             * words 3.. high byte first), with the fn of the W page -- reference for offline
+             * comparison with the ROM's coding (verif_codage.py). */
             static int on = -1; static uint16_t prec[22];
             if (on < 0) on = getenv("REJEU_DU1") != NULL;
             uint16_t *du1 = &api[NDB + 0x134 / 2];
@@ -545,25 +543,25 @@ fini:
                 memcpy(prec, du1, sizeof prec);
             }
         }
-        /* phase A : comme jouer_trame(phase 1) */
+        /* phase A: like jouer_trame(phase 1) */
         calypso_dma_tick(dsp);
         reveil();
         if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (t->drap & 1))
-            {   /* fn GSM de la page W que la ROM va lire a cette IT (comme pont.c tx_tsp_dater) */
+            {   /* GSM fn of the W page the ROM is about to read at this IT (like pont.c tx_tsp_dater) */
                 uint16_t v = api[NDB + 0]; unsigned pg = (v & 1u) ? 1u : 0u; const uint16_t *w = &api[W_PAGE(pg)];
                 unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
                 g_page_it_fn = (1326u * t1 + 51u * ((t3 + 26u - t2) % 26u) + t3) % 2715648u;
                 g_page_it_pg = pg; g_page_it_td = w[0]; g_page_it_tu = w[2]; g_page_it_tra = w[7];
-                g_page_it_ctrl = w[9];   /* d_ctrl_tch (W 0x0809 / 0x081d) : phase C1 du 2026-10-15 */
-                g_it_tch_mode = api[NDB + 3];          /* d_tch_mode (NDB mot 3) : B_PLAY_UL, mutes */
-                g_it_du1 = api[NDB + 0x134 / 2];       /* a_du_1[0] : B_BLUD = trame de parole de l'ARM */
+                g_page_it_ctrl = w[9];   /* d_ctrl_tch (W 0x0809 / 0x081d) */
+                g_it_tch_mode = api[NDB + 3];          /* d_tch_mode (NDB word 3): B_PLAY_UL, mutes */
+                g_it_du1 = api[NDB + 0x134 / 2];       /* a_du_1[0]: B_BLUD = speech frame from the ARM */
             }
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         long fait = 0;
         if (!dsp->idle) fait = courir(budget / 8);
         while (!dsp->idle && fait < budget / 2) fait += courir(256);
         tsp_phase(t->tick, "fin de phase A", -1);
-        /* ecritures ARM, fenetre 1, puis livraisons I/Q dans l'ordre */
+        /* ARM writes, window 1, then I/Q deliveries in order */
         for (size_t q = t->debut; q < t->fin;) {
             uint8_t k = fichier[q];
             size_t l = k == 'T' ? 10 : k == 'A' ? 8 + 4 * (size_t)be16(fichier + q + 6)
@@ -581,8 +579,8 @@ fini:
                 int n = be16(fichier + q + 13);
                 static int16_t iq[1024];
                 size_t qb = q;
-                /* [2026-10-22] REJEU_IQ_DECAL=n : sur les ticks de tache TCH (td=0x000d), livrer les I/Q
-                 * enregistres au tick +n (fenetre 0) -- quel calage fait lire a la ROM l'UA de la FACCH ? */
+                /* REJEU_IQ_DECAL=n: on the TCH task ticks (td=0x000d), deliver the I/Q recorded at
+                 * tick +n (window 0) -- which alignment makes the ROM read the UA of the FACCH? */
                 {   static int dec = 9999;
                     if (dec == 9999) { const char *e = getenv("REJEU_IQ_DECAL"); dec = e ? atoi(e) : 0; }
                     if (dec && fichier[q + 5] == 0 && g_page_it_td == 0x000d && it + dec >= 0 && it + dec < nt) {
@@ -605,10 +603,10 @@ fini:
                     int nwin = be16(fichier + q + 11) / 2, marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
                     memo_burst(be32(fichier + q + 6), iq, n, marge);
                 }
-                /* [2026-10-04] REJEU_DL=1 : chaque burst descendant livre (fenetre 0), avec le fn que le
-                 * pont lui a donne et le fn de la page W (a_a5fn) lu a l'IT de ce tick : les deux doivent
-                 * etre egaux pour que la ROM dechiffre au bon fn. Bits demodules a dechiffrer/decoder
-                 * hors ligne (libosmocoding). */
+                /* REJEU_DL=1: each downlink burst delivered (window 0), with the fn the bridge gave
+                 * it and the fn of the W page (a_a5fn) read at this tick's IT: both must be equal
+                 * for the ROM to decipher at the right fn. Demodulated bits to decipher/decode
+                 * offline (libosmocoding). */
                 if (fichier[q + 5] == 0 && getenv("REJEU_DL")) {
                     int nwin = be16(fichier + q + 11) / 2, marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
                     uint8_t b[148]; int pol; int sc = demod_burst(iq, n, marge, b, &pol);
@@ -621,7 +619,7 @@ fini:
             }
             q += l;
         }
-        /* phase B : reste du budget, puis la pompe DMA de pont.c */
+        /* phase B: rest of the budget, then the DMA pump of pont.c */
         reveil();
         tsp_phase(t->tick, "apres les livraisons I/Q (avant phase B)", -1);
         if (!dsp->idle && budget - fait > 0) courir(budget - fait);
@@ -632,18 +630,18 @@ fini:
             if (!dsp->idle) courir(budget / 4);
             tsp_phase(t->tick, "pompe DMA", k);
         }
-        /* [2026-10-15] port voix (CALYPSO_VSP=1, avec CALYPSO_VSP_SHM=0 hors banc) */
+        /* voice port (CALYPSO_VSP=1, with CALYPSO_VSP_SHM=0 outside the bench) */
         if (dsp->running) calypso_vsp_trame(dsp, vsp_courir, g_page_it_fn);
-        {   /* [2026-10-04] le burst montant final de la ROM (script TSP, src/tsp_tx.c), REJEU_TX=1 : chaque burst */
+        {   /* the ROM's final uplink burst (TSP script, src/tsp_tx.c), REJEU_TX=1: every burst */
             struct tsp_tx_burst tb; bool nouveau = false;
             if (tsp_tx_lire(dsp->data, &tb, &nouveau) && nouveau) {
                 tx_n++; if (tb.type == TSP_TX_RACH) tx_rach++; else if (tb.type == TSP_TX_NB) tx_nb++; else tx_inc++;
                 snprintf(tx_dernier, sizeof tx_dernier, "%s%s", tb.type == TSP_TX_RACH ? "RACH" : tb.type == TSP_TX_NB ? "NB" : "?",
                          tb.type == TSP_TX_NB ? (tb.bits[60] || tb.bits[87] ? "/vol" : "/parole") : "");
-                /* fn GSM de la page W designee par d_dsp_page (a_a5fn, voir pont.c tx_tsp_dater) */
+                /* GSM fn of the W page designated by d_dsp_page (a_a5fn, see pont.c tx_tsp_dater) */
                 uint32_t fn_gsm = g_page_it_fn;
                 tx_hist26[fn_gsm % 26]++;
-                if (getenv("REJEU_TX")) {   /* [2026-10-15] Kc/algo courants, pour dechiffrer hors ligne */
+                if (getenv("REJEU_TX")) {   /* current Kc/algo, to decipher offline */
                     static char kc_prec[40];
                     char kcs[40]; uint16_t *akc = &api[NDB + 0x2CE / 2];
                     snprintf(kcs, sizeof kcs, "%d %04x%04x%04x%04x", api[NDB + 0x1CE / 2], akc[3], akc[2], akc[1], akc[0]);
@@ -657,13 +655,13 @@ fini:
                 }
             }
         }
-        {   /* [2026-10-15] REJEU_CTRL=1 : par tick, ce que la ROM lit a l'IT (taches d/u, d_ctrl_tch de la
-             * page W) et ce qu'elle emet a la fin du tick -- pour savoir si la parole montante manque
-             * faute de d_ctrl_tch = TCH_F/FS (0x0011) ou pour une autre raison (phase C1). */
+        {   /* REJEU_CTRL=1: per tick, what the ROM reads at the IT (d/u tasks, d_ctrl_tch of the
+             * W page) and what it sends at the end of the tick -- to tell whether uplink speech is
+             * missing for lack of d_ctrl_tch = TCH_F/FS (0x0011) or for another reason. */
             static int ctrl_on = -1; static unsigned long tx_avant;
             if (ctrl_on < 0) ctrl_on = getenv("REJEU_CTRL") != NULL;
             char scr[64] = "-";
-            if (ctrl_on && (g_page_it_tu || g_page_it_td)) {   /* tout script TSP (0x1c0a + 16 mots 0x04/0x06) */
+            if (ctrl_on && (g_page_it_tu || g_page_it_td)) {   /* any TSP script (0x1c0a + 16 words 0x04/0x06) */
                 int k = 0; scr[0] = 0;
                 for (unsigned a = 0x0080; a + 18 < 0x8000 && k < 4; a++) {
                     if (dsp->data[a] != 0x1c0a) continue;
@@ -680,9 +678,9 @@ fini:
             tx_avant = tx_n;
         }
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2];
-        uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0 : parole descendante */
-        {   /* [2026-10-04] REJEU_BLUD=1 : qui efface B_BLUD des tampons montants (a_cu, a_fu, a_du) ?
-             * En fin de tick (apres la ROM) ; les poses sont des ecritures ARM enregistrees. */
+        uint16_t *dd = &api[NDB + 0x238 / 2];   /* a_dd_0: downlink speech */
+        {   /* REJEU_BLUD=1: who clears B_BLUD of the uplink buffers (a_cu, a_fu, a_du)?
+             * At the end of the tick (after the ROM); the sets are recorded ARM writes. */
             static int blud_on = -1; static uint16_t blud_prec[3];
             if (blud_on < 0) blud_on = getenv("REJEU_BLUD") != NULL;
             if (blud_on) {
@@ -696,7 +694,7 @@ fini:
         }
         {   static int dit;
             if (!dsp->idle && dit < 5) { dit++; printf("tick=%u : DSP PAS A L'IDLE en fin de tick, pc=%04x sp=%04x\n", t->tick, dsp->pc & 0xffff, dsp->sp); } }
-        {   /* REJEU_DUMP=t1-t2,dossier : memoire de donnees du DSP en fin de tick */
+        {   /* REJEU_DUMP=t1-t2,dir: DSP data memory at the end of the tick */
             const char *e = getenv("REJEU_DUMP");
             unsigned t1, t2; char dos[512];
             if (e && sscanf(e, "%u-%u,%511s", &t1, &t2, dos) == 3 && t->tick >= t1 && t->tick <= t2) {
@@ -719,9 +717,9 @@ fini:
         if (fd[0] != prec_fd && (fd[0] & 0x8000))
             printf("tick=%u FACCH a_fd0=%04x %s L2=%02x %02x %02x\n", t->tick, fd[0],
                    (fd[0] & (1u << 6)) ? "FIRE KO" : "ok", fd[3] & 0xff, fd[3] >> 8, fd[4] & 0xff);
-        /* [2026-09-30] a_dd_0 : B_BLUD (bit 15), B_BFI (bit 2), mot 2 = erreurs
-         * rapportees par la ROM. Une ligne par trame de parole (REJEU_PAROLE=1)
-         * et un bilan ; sert a etudier le B_BFI hors banc. */
+        /* a_dd_0: B_BLUD (bit 15), B_BFI (bit 2), word 2 = errors reported by
+         * the ROM. One line per speech frame (REJEU_PAROLE=1) and a summary;
+         * used to study the B_BFI outside the bench. */
         if (dd[0] != prec_dd && (dd[0] & 0x8000)) {
             parole_n++; if (dd[0] & 0x4) parole_bfi++; parole_err += dd[2];
             if (getenv("REJEU_PAROLE"))

@@ -1,28 +1,28 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * dsp_tester.c - testeur de fonctions du DSP Calypso (mask-ROM TI 3606).
+ * dsp_tester.c - function tester for the Calypso DSP (TI 3606 mask-ROM).
  *
- * Sans QEMU ni ARM : le testeur JOUE l'ARM osmocom-bb (tools/dsp_banc_commun.c :
- * dsp_power_on, l1_sync, ordonnanceur TDMA, items de prim_*.c recopies) et la
- * BTS (bursts synthetiques codes par libosmocoding, modules en GMSK comme le
- * BSP du banc). Pour chaque fonction du DSP il pose les codes de tache dans
- * l'API RAM exactement comme le firmware, fait tourner les trames, lit les
- * sorties (pages R, NDB, bursts montants emis) et les compare a la reference
- * libosmocoding. Une ligne PASS / FAIL / NON-IMPL par fonction.
+ * Without QEMU or ARM: the tester PLAYS the osmocom-bb ARM (tools/dsp_banc_commun.c:
+ * dsp_power_on, l1_sync, TDMA scheduler, items of prim_*.c copied) and the
+ * BTS (synthetic bursts coded by libosmocoding, GMSK-modulated like the
+ * bench BSP). For each DSP function it posts the task codes in the API RAM
+ * exactly like the firmware, runs the frames, reads the outputs (R pages,
+ * NDB, uplink bursts sent) and compares them with the libosmocoding
+ * reference. One PASS / FAIL / NON-IMPL line per function.
  *
- * Un test qui revele un defaut du DSP (ou du coeur emule) reste FAIL, avec le
- * diagnostic ; aucun contournement n'est applique pour le faire passer.
+ * A test that reveals a defect of the DSP (or of the emulated core) stays
+ * FAIL, with the diagnosis; no workaround is applied to make it pass.
  *
- *   ./dsp_tester --list            les tests
- *   ./dsp_tester --all             tout
- *   ./dsp_tester fb sb nb ...      les tests nommes
- *   options : -v (detail par trame), --rom-dir DIR, --insns N (budget/trame),
- *             --bsic N
- * Code de retour : nombre de FAIL.
+ *   ./dsp_tester --list            the tests
+ *   ./dsp_tester --all             everything
+ *   ./dsp_tester fb sb nb ...      the named tests
+ *   options: -v (per-frame detail), --rom-dir DIR, --insns N (budget/frame),
+ *            --bsic N
+ * Exit code: number of FAILs.
  *
- * Chaque test tourne dans un processus fils, a partir du DSP deja demarre
- * (fork apres dsp_power_on) : etat de depart identique, et un plantage du
- * coeur n'emporte que son test.
+ * Each test runs in a child process, starting from the already booted DSP
+ * (fork after dsp_power_on): identical starting state, and a crash of the
+ * core only takes its own test down.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,7 +46,7 @@ static const char *NOMV[] = { "PASS", "FAIL", "NON-IMPL" };
 static char g_detail[8192];
 static size_t g_dl;
 static int g_v;                      /* -v */
-static int g_trace;                  /* --trace N : niveau des traces du coeur (src/verbosite.c) */
+static int g_trace;                  /* --trace N: trace level of the core (src/verbosite.c) */
 static void det(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void det(const char *fmt, ...)
 {
@@ -68,16 +68,16 @@ static void vlog(const char *fmt, ...)
 static struct banc_boot g_boot;
 static int g_boot_rc;
 
-/* ---- outils --------------------------------------------------------------- */
+/* ---- helpers -------------------------------------------------------------- */
 static uint32_t g_alea = 0x1234567u;
 static uint8_t alea8(void) { g_alea = g_alea * 1103515245u + 12345u; return (uint8_t)(g_alea >> 16); }
-/* Bloc L2 de 23 octets determine par une graine : contenu unique par bloc,
- * de sorte qu'un a_cd perime ne puisse pas passer pour un bon decodage. */
+/* 23-byte L2 block determined by a seed: unique content per block, so that
+ * a stale a_cd cannot pass for a good decode. */
 static void l2_bloc(uint32_t graine, uint8_t l2[23])
 {
     uint32_t s = graine * 2654435761u + 0x9e3779b9u;
     for (int i = 0; i < 23; i++) { s = s * 1103515245u + 12345u; l2[i] = (uint8_t)(s >> 16); }
-    l2[0] = (uint8_t)(graine >> 8); l2[1] = (uint8_t)graine;     /* lisible dans les traces */
+    l2[0] = (uint8_t)(graine >> 8); l2[1] = (uint8_t)graine;     /* readable in the traces */
 }
 static void hex23(char *o, const uint8_t *b, int n)
 {
@@ -97,7 +97,7 @@ static unsigned popdiff(const uint8_t *a, const uint8_t *b, int n)
     unsigned d = 0; for (int i = 0; i < n; i++) d += (a[i] & 1) != (b[i] & 1); return d;
 }
 
-/* source radio courante + contenu des blocs de la cellule */
+/* current radio source + content of the cell's blocks */
 static uint8_t g_l2_cell[64][23];
 static const uint8_t *cellule_nb_alea(uint32_t fn0, int p51)
 {
@@ -122,9 +122,9 @@ static int t_boot(void)
 static int scenario_vide(uint32_t fn) { (void)fn; return TDMA_IFLG_DSP; }
 static int t_idle(void)
 {
-    /* L'ARM clot un scenario vide a chaque trame (page W remise a zero par
-     * l1_sync, aucune tache) : la ROM recoit l'IT trame, lit une page vide et
-     * doit revenir a l'IDLE, sans erreur. */
+    /* The ARM closes an empty scenario on every frame (W page zeroed by
+     * l1_sync, no task): the ROM gets the frame IT, reads an empty page and
+     * must return to IDLE, without error. */
     banc_source = banc_cellule;
     banc_crochet_l1s = scenario_vide;
     uint32_t i0 = banc_dsp->insn_count;
@@ -149,8 +149,8 @@ static int chk_cmd(uint8_t p1, uint8_t p2, uint16_t p3)
 static const struct tdma_sched_item chk_set[] = { SCHED_ITEM_DT(chk_cmd, 0, 0, 0), SCHED_END_FRAME(), SCHED_END_SET() };
 static int t_checksum(void)
 {
-    /* calypso/dsp.c dsp_checksum_task() : d_task_md = CHECKSUM_DSP_TASK (33),
-     * puis a_pm[0] = version du code, a_pm[1] = somme, API 0x08DB = patch. */
+    /* calypso/dsp.c dsp_checksum_task(): d_task_md = CHECKSUM_DSP_TASK (33),
+     * then a_pm[0] = code version, a_pm[1] = sum, API 0x08DB = patch. */
     T_DB_DSP_TO_MCU *r0 = (T_DB_DSP_TO_MCU *)&banc_api[0x28], *r1 = (T_DB_DSP_TO_MCU *)&banc_api[0x3C];
     banc_source = banc_cellule;
     tdma_schedule_set(1, chk_set, 0);
@@ -215,22 +215,23 @@ static const struct tdma_sched_item fb_sched_set[] = {
     SCHED_END_SET()
 };
 
-/* Une recherche FB en mode `mode`, commande posee a la prochaine l1_sync.
- * Rend la trame FCCH que le firmware en deduit (fn_offset de prim_fbsb.c, avec
- * l'arrondi que synchronize_tdma() fait par les qbits), -1 si rien ;
- * *residu = ecart du TOA a la position nominale (23 + n x 1250), en symboles. */
+/* One FB search in mode `mode`, command posted at the next l1_sync.
+ * Returns the FCCH frame the firmware derives from it (fn_offset of
+ * prim_fbsb.c, with the rounding synchronize_tdma() does through the qbits),
+ * -1 if nothing; *residu = TOA offset from the nominal position
+ * (23 + n x 1250), in symbols. */
 static long une_fb(int mode, uint32_t *debut, int *residu)
 {
     memset(&g_fb, 0, sizeof g_fb);
-    tdma_schedule_set(0, fb_sched_set, (uint16_t)mode);   /* hors l1_sync : 0 = la prochaine */
-    banc_trame();                         /* la l1_sync de cette trame pose la commande */
-    *debut = g_fb_cmd_fn + 1;             /* next_time de la commande : 1re trame de recherche */
+    tdma_schedule_set(0, fb_sched_set, (uint16_t)mode);   /* outside l1_sync: 0 = the next one */
+    banc_trame();                         /* this frame's l1_sync posts the command */
+    *debut = g_fb_cmd_fn + 1;             /* next_time of the command: 1st search frame */
     for (int k = 0; k < 14 && !g_fb.det; k++) banc_trame();
     if (g_fb.det <= 0) return -1;
     int toa = g_fb.toa - 23;
     int n = (int)lrint((double)toa / BITS_PER_TDMA);
     *residu = toa - n * BITS_PER_TDMA;
-    /* prim_fbsb.c : fn_offset = current - attempt + ntdma, et current - attempt = debut */
+    /* prim_fbsb.c: fn_offset = current - attempt + ntdma, and current - attempt = debut */
     return (long)(g_fb.fn_resp - (uint32_t)g_fb.attempt) + n;
 }
 static int est_fcch(uint32_t f) { return (f % 51) % 10 == 0 && (f % 51) <= 40; }
@@ -241,7 +242,7 @@ static int t_fb_mode(int mode, int16_t dac, int hz_attendu, const char *quoi)
     banc_cfg.afc_dac = dac;
     int ok = 0, n = 0, sautees = 0;
     for (int essai = 0; essai < 6; essai++) {
-        banc_courir(3 + 7 * (unsigned)essai);           /* positions differentes vis-a-vis de la FCCH */
+        banc_courir(3 + 7 * (unsigned)essai);           /* different positions relative to the FCCH */
         uint32_t debut; int residu = 0;
         long fcch = une_fb(mode, &debut, &residu);
         n++;
@@ -263,9 +264,9 @@ static int t_fb_mode(int mode, int16_t dac, int hz_attendu, const char *quoi)
 }
 static int t_fb0(void) { return t_fb_mode(0, -700, 0, "FB mode 0 (acquisition)"); }
 static int t_fb1(void) { return t_fb_mode(1, -700, 0, "FB mode 1 (poursuite)"); }
-/* calypso_twl3025.c : (dac + 700) x 287 / (2^15/947) Hz, ~8.29 Hz/LSB. Le VCXO
- * tire de +60 LSB : la porteuse recue parait a -497 Hz, signe que la boucle du
- * firmware (afc_correct : dac += norm x err / pente) ramene vers -700. */
+/* calypso_twl3025.c: (dac + 700) x 287 / (2^15/947) Hz, ~8.29 Hz/LSB. The VCXO
+ * pulls by +60 LSB: the received carrier appears at -497 Hz, so the firmware
+ * loop (afc_correct: dac += norm x err / slope) brings it back towards -700. */
 static int t_fb_afc(void)
 {
     int hz = (int)lrint(-60.0 * 287.0 / (32768.0 / 947.0));
@@ -317,18 +318,18 @@ static uint8_t decode_sb(uint32_t sb, uint32_t *fn)
 
 static int t_sb(void)
 {
-    /* La commande SB vise directement chaque trame SCH (p51 = 1, 11, .., 41) :
-     * la 1re commande du sb_sched_set a next_time = trame SCH. */
+    /* The SB command targets each SCH frame directly (p51 = 1, 11, .., 41):
+     * the 1st command of sb_sched_set has next_time = SCH frame. */
     banc_source = banc_cellule;
     int n = 0, ok = 0, crc_faux = 0, faux = 0, rate = 0, fen = 0;
     char ligne[400];
     for (int k = 0; k < 20; k++) {
-        uint32_t c = banc_fn();                 /* current_time de la prochaine l1_sync */
+        uint32_t c = banc_fn();                 /* current_time of the next l1_sync */
         uint32_t s = c + 2; while ((s % 51) % 10 != 1 || (s % 51) > 41) s++;
         unsigned long fen0 = banc_stats.depots_fenetre_sb;
         memset(g_sb, 0, sizeof g_sb);
         while (banc_fn() < s - 2) banc_trame();
-        /* l1_sync(s-2) programme le set a +1 : cmd1 a l1_sync(s-1), next_time s */
+        /* l1_sync(s-2) schedules the set at +1: cmd1 at l1_sync(s-1), next_time s */
         tdma_schedule_set(1, sb_sched_set, 0);
         for (int i = 0; i < 6; i++) banc_trame();
         n++;
@@ -354,11 +355,11 @@ static int t_sb(void)
         n, ok, rate, faux, fen);
     (void)crc_faux;
     if (faux) return V_FAIL;
-    /* un recepteur sain decode un SCH propre a coup sur ; on tolere 1 sur 20 */
+    /* a healthy receiver decodes a clean SCH every time; 1 in 20 is tolerated */
     return (ok >= n - 1) ? V_PASS : V_FAIL;
 }
 
-/* FB0 -> FB1 -> SB, comme l1s_fbsb_req() + les reponses de prim_fbsb.c */
+/* FB0 -> FB1 -> SB, like l1s_fbsb_req() + the responses of prim_fbsb.c */
 static int t_fbsb(void)
 {
     banc_source = banc_cellule;
@@ -371,11 +372,11 @@ static int t_fbsb(void)
     long f1 = une_fb(1, &debut, &residu);
     if (f1 < 0) { det("FB1 introuvable"); return V_FAIL; }
     det("FB1 : TOA=%d %+d Hz -> FCCH %ld\n", g_fb.toa, g_fb.freq, f1);
-    /* delay = fn_offset + 11 - fn - 1, programme dans la l1_sync de la reponse */
+    /* delay = fn_offset + 11 - fn - 1, scheduled in the l1_sync of the response */
     int toa = g_fb.toa - 23;
     int ntdma = toa < 0 ? -1 : toa / BITS_PER_TDMA;
     int fn_offset = (int)g_fb.fn_resp - g_fb.attempt + ntdma;
-    /* nous sommes apres la trame de reponse : le set part de la prochaine l1_sync */
+    /* we are past the response frame: the set starts at the next l1_sync */
     int delay = fn_offset + 11 - (int)banc_fn() - 1;
     if (delay < 0) delay = 0;
     uint32_t s_vise = (uint32_t)(fn_offset + 11);
@@ -393,7 +394,7 @@ static int t_fbsb(void)
 }
 
 /* ===================================================================== */
-/*  NB descendant (layer1/prim_rx_nb.c)                                    */
+/*  downlink NB (layer1/prim_rx_nb.c)                                      */
 /* ===================================================================== */
 static struct { int n_blocs, ok, fire, faux, vide, mauvais_id, err_tot; uint16_t tache; uint8_t chan_type;
                 uint32_t blocs_fn[64]; int toa[4], snr[4]; char premier_ko[400]; } g_nb;
@@ -407,7 +408,7 @@ static int nb_resp(uint8_t p1, uint8_t burst_id, uint16_t p3)
     g_nb.toa[burst_id] = (int16_t)dsp_api.db_r->a_serv_demod[D_TOA];
     g_nb.snr[burst_id] = dsp_api.db_r->a_serv_demod[D_SNR];
     if (burst_id == 3) {
-        uint32_t fn0 = banc_courant.fn - 5;       /* rx du burst 0 : current - 4 - 1 */
+        uint32_t fn0 = banc_courant.fn - 5;       /* rx of burst 0: current - 4 - 1 */
         uint8_t l2[23];
         uint16_t fire = (dsp_api.ndb->a_cd[0] & ((1 << B_FIRE1) | (1 << B_FIRE0))) >> B_FIRE0;
         uint16_t err = dsp_api.ndb->a_cd[2];
@@ -450,8 +451,8 @@ static const struct tdma_sched_item nb_sched_set[] = {
 };
 static const uint8_t *nb_l2_cellule(uint32_t fn0) { return cellule_nb_alea(fn0, (int)(fn0 % 51)); }
 
-/* Lecture de n blocs xCCH de la cellule a la position p51 (2 = BCCH,
- * 6 = CCCH, 22 = SDCCH/4 n0, 42 = SACCH/4 ...) avec la tache `tache`. */
+/* Read n xCCH blocks of the cell at position p51 (2 = BCCH, 6 = CCCH,
+ * 22 = SDCCH/4 n0, 42 = SACCH/4 ...) with task `tache`. */
 static int nb_lecture(uint16_t tache, uint8_t chan_type, int p51, int modulo, int n_blocs, const char *quoi)
 {
     memset(&g_nb, 0, sizeof g_nb);
@@ -474,7 +475,7 @@ static int nb_lecture(uint16_t tache, uint8_t chan_type, int p51, int modulo, in
 static int t_nb_bcch(void) { return nb_lecture(ALLC_DSP_TASK, SDCCH_4, 2, 51, 8, "BCCH norm. (ALLC, comme osmocom-bb)"); }
 
 /* ===================================================================== */
-/*  NB montant (layer1/prim_tx_nb.c)                                       */
+/*  uplink NB (layer1/prim_tx_nb.c)                                        */
 /* ===================================================================== */
 static struct { uint16_t tache; uint8_t l2[16][23]; uint32_t fn_cmd[16][4]; int n_blocs; int sacch; } g_tx;
 static int tx_resp(uint8_t p1, uint8_t burst_id, uint16_t p3)
@@ -512,8 +513,8 @@ static const struct tdma_sched_item nb_sched_set_ul[] = {
     SCHED_END_SET()
 };
 
-/* Comparer les bursts emis (banc_ul) apres chaque commande de bloc avec
- * gsm0503_xcch_encode ; a5 : flux attendu XORe (algo, Kc) au fn du burst. */
+/* Compare the bursts sent (banc_ul) after each block command with
+ * gsm0503_xcch_encode; a5: expected stream XORed (algo, Kc) at the burst's fn. */
 static int ul_comparer_xcch(int a5_algo, const uint8_t *kc, const char *quoi)
 {
     int blocs_ok = 0, bursts_ok = 0, bursts_n = 0, manquants = 0;
@@ -524,7 +525,7 @@ static int ul_comparer_xcch(int a5_algo, const uint8_t *kc, const char *quoi)
         int bon = 0;
         for (int k = 0; k < 4; k++) {
             uint32_t f = g_tx.fn_cmd[b][k];
-            /* le burst emis pour la trame f : capture a la fin de la trame f */
+            /* the burst sent for frame f: captured at the end of frame f */
             const struct banc_ul_burst *u = NULL;
             for (int i = 0; i < banc_n_ul && i < BANC_UL_MAX; i++)
                 if (banc_ul[i].fn == f) u = &banc_ul[i];
@@ -541,7 +542,7 @@ static int ul_comparer_xcch(int a5_algo, const uint8_t *kc, const char *quoi)
             if (!d && u->rang == k) { bon++; bursts_ok++; continue; }
             if (!premier[0]) {
                 int dec = 99;
-                if (a5_algo) {            /* chiffre a une autre trame ? */
+                if (a5_algo) {            /* ciphered at another frame? */
                     for (int df = -3; df <= 3; df++) {
                         uint8_t a2[116]; memcpy(a2, e + 116 * k, 116);
                         ubit_t dl[114], ul[114]; osmo_a5(a5_algo, kc, f + df, dl, ul);
@@ -578,9 +579,9 @@ static int ul_bloc(uint16_t tache, int p51, int modulo, int n_blocs, int a5, con
     return ul_comparer_xcch(a5, kc, quoi);
 }
 static int t_tx_sdcch(void) { return ul_bloc(DUL_DSP_TASK, 22 + 15, 51, 6, 0, NULL, "SDCCH/4 n0 montant (DUL, comme osmocom-bb)"); }
-/* Meme bloc, chiffre A5/1 par la ROM : ul_comparer_xcch compare au flux osmo_a5(kc, fn) de la trame
- * de la commande (next_time) et dit si la ROM a chiffre avec le flux d'une autre trame (fn+-d). C'est
- * la question ouverte « a quelle heure la ROM chiffre le montant » (99-couverture.sh:137). */
+/* Same block, A5/1-ciphered by the ROM: ul_comparer_xcch compares with the osmo_a5(kc, fn) stream
+ * of the command's frame (next_time) and tells whether the ROM ciphered with the stream of another
+ * frame (fn+-d): at which time the ROM ciphers the uplink (99-couverture.sh:137). */
 static int t_tx_sdcch_a5(void)
 {
     static const uint8_t kc[8] = { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
@@ -588,14 +589,14 @@ static int t_tx_sdcch_a5(void)
 }
 
 /* ===================================================================== */
-/*  RACH montant (layer1/prim_rach.c)                                      */
+/*  uplink RACH (layer1/prim_rach.c)                                       */
 /* ===================================================================== */
-/* Le firmware ecrit d_rach = (ra << 8) | (bsic << 2) dans le NDB et d_task_ra = RACH_DSP_TASK (10) dans
- * la page W (prim_rach.c l1s_tx_rach_cmd). La ROM code l'access-burst (36 bits codes) dans son anneau
- * TX de mode 2 (pointeur 0x3d97), le serialiseur 0x8900 le copie dans data[0x3f8a] a la trame d'emission,
- * et l'emetteur 0x85a2 y ajoute la sequence de synchro (DROM 0xa0d9, 41 bits) et les queues. Ici on
- * compare les 36 bits codes trouves dans 0x3f8a a gsm0503_rach_ext_encode(ra, bsic) (bits 49..84 du
- * burst de 148). */
+/* The firmware writes d_rach = (ra << 8) | (bsic << 2) in the NDB and d_task_ra = RACH_DSP_TASK (10)
+ * in the W page (prim_rach.c l1s_tx_rach_cmd). The ROM codes the access burst (36 coded bits) in its
+ * mode 2 TX ring (pointer 0x3d97), the serialiser 0x8900 copies it into data[0x3f8a] at the transmit
+ * frame, and the transmitter 0x85a2 adds the sync sequence (DROM 0xa0d9, 41 bits) and the tail bits.
+ * Here the 36 coded bits found in 0x3f8a are compared with gsm0503_rach_ext_encode(ra, bsic)
+ * (bits 49..84 of the 148-bit burst). */
 static struct { uint8_t ra, bsic; uint32_t fn_cmd; } g_rach;
 static int rach_cmd(uint8_t p1, uint8_t p2, uint16_t p3)
 {
@@ -626,11 +627,11 @@ static int t_rach(void)
         n++;
         ubit_t cod[36];
         gsm0503_rach_ext_encode(cod, g_rach.ra, g_rach.bsic, false);
-        /* 1. les 36 bits codes dans data[0x3f8a..0x3f8c] (le codeur de la ROM) */
+        /* 1. the 36 coded bits in data[0x3f8a..0x3f8c] (the ROM's coder) */
         const uint16_t *m = banc_dsp->data;
         int d36 = 0;
         for (int k = 0; k < 36; k++) d36 += ((m[0x3f8a + k / 16] >> (15 - k % 16)) & 1) != cod[k];
-        /* 2. le burst final (script TSP, emetteur 0x8605) : [8 garde][8 queue etendue 00111010][41 sync][36][3 queue][garde] */
+        /* 2. the final burst (TSP script, transmitter 0x8605): [8 guard][8 extended tail 00111010][41 sync][36][3 tail][guard] */
         char att[8 + 41 + 36 + 3 + 1]; int p = 0;
         memcpy(att, "00111010", 8); p = 8;
         memcpy(att + p, sync, 41); p += 41;
@@ -655,12 +656,12 @@ static int t_rach(void)
 }
 
 /* ===================================================================== */
-/*  table des tests                                                        */
+/*  test table                                                             */
 /* ===================================================================== */
-/* TOA de la FB quand la FCCH est dans la TOUTE PREMIERE trame de recherche
- * (commande a p51 = 9, recherche des p51 = 10 : FCCH). FBPOS_MODE=0|1 (defaut 1).
- * Avec BANC_FB_DECAL=k (decalage du burst depuis l'ouverture de la fenetre), donne
- * le TOA de la FB en fonction de k, sans les termes de pages de 48 d'une FCCH lointaine. */
+/* TOA of the FB when the FCCH is in the VERY FIRST search frame (command at
+ * p51 = 9, search from p51 = 10: FCCH). FBPOS_MODE=0|1 (default 1).
+ * With BANC_FB_DECAL=k (offset of the burst from the window opening), gives the
+ * TOA of the FB as a function of k, without the 48-page terms of a distant FCCH. */
 static int t_fb_pos(void)
 {
     banc_source = banc_cellule;
@@ -699,11 +700,11 @@ static const Test TESTS[] = {
 };
 #define N_TESTS (int)(sizeof TESTS / sizeof TESTS[0])
 
-/* Un test dans un fils, depuis le DSP demarre. */
+/* One test in a child, from the booted DSP. */
 static int lancer(const Test *t)
 {
     int tube[2];
-    /* DSP_TESTER_NOFORK=1 : le test tourne dans ce processus (gdb, gprof) ; un plantage emporte tout. */
+    /* DSP_TESTER_NOFORK=1: the test runs in this process (gdb, gprof); a crash takes everything down. */
     static int nofork = -1;
     if (nofork < 0) { const char *e = getenv("DSP_TESTER_NOFORK"); nofork = (e && *e == '1') ? 1 : 0; }
     if (nofork) {
@@ -746,7 +747,7 @@ static int lancer(const Test *t)
         d = crash;
     }
     printf("[%-8s] %-10s %-14s ", NOMV[v], t->nom, t->tache);
-    /* premiere ligne du detail sur la ligne du verdict, le reste indente */
+    /* first line of the detail on the verdict line, the rest indented */
     const char *q = d;
     while (*q) {
         const char *e = strchr(q, '\n');
@@ -792,9 +793,9 @@ int main(int argc, char **argv)
         if (!vu) { fprintf(stderr, "test inconnu : %s (--list)\n", choix[k]); return 255; }
     }
     banc_cfg.verbeux = g_v;
-    /* Les sondes du coeur ecrivent sur stderr ; filtrees comme dans c54x_exe
-     * (src/verbosite.c). Les fils ecrivent dans le meme tube, le fil de
-     * filtrage reste dans le pere. */
+    /* The core probes write to stderr; filtered like in c54x_exe
+     * (src/verbosite.c). The children write into the same pipe, the
+     * filtering thread stays in the parent. */
     verbosite_installer(g_trace);
     if (banc_init() < 0) return 255;
     g_boot_rc = banc_dsp_power_on(&g_boot);

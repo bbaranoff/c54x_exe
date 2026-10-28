@@ -44,20 +44,20 @@
 #include "carte_tx.h"
 #include "hw/arm/calypso/calypso_debug.h"
 
-extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c : provenance du TOA */
+extern int g_toa_grille, g_toa_valeur;   /* c54x_mem.c: provenance of the TOA */
 extern uint32_t g_c54x_exe_fn;          /* main.c: value returned by calypso_trx_get_fn() */
 
 static volatile sig_atomic_t g_stop;
 static void sur_signal(int sig) { (void)sig; g_stop = 1; }
 
-/* [2026-10-06] STOP / GO COOPERATIFS SUR LE DSP EN MARCHE (harvard.sh stop / go).
- * SIGUSR1 demande une pause, prise a la frontiere de trame suivante (en haut de
- * la boucle TICK : le DSP a rendu son DONE, il est en IDLE, l'ARM attend) ;
- * SIGUSR2 reprend. Pendant la pause, l'etat du coeur est ecrit dans
- * PONT_PAUSE_FICHIER (une ligne « CLE valeur » par element, lisible par un
- * shell) ; a la reprise la premiere ligne devient « ETAT reprise ». Rien n'est
- * ecrit dans l'API RAM ni dans le coeur : le firmware ne voit qu'une trame plus
- * longue, comme un SIGSTOP, mais a un point propre et avec les registres. */
+/* COOPERATIVE STOP / GO ON THE RUNNING DSP (harvard.sh stop / go).
+ * SIGUSR1 requests a pause, taken at the next frame boundary (top of the
+ * TICK loop: the DSP has returned its DONE, it is in IDLE, the ARM waits);
+ * SIGUSR2 resumes. During the pause, the core state is written to
+ * PONT_PAUSE_FICHIER (one "KEY value" line per item, readable by a shell);
+ * on resume the first line becomes "ETAT reprise". Nothing is written into
+ * the API RAM or the core: the firmware only sees a longer frame, like a
+ * SIGSTOP, but at a clean point and with the registers. */
 #define PONT_PAUSE_FICHIER "/dev/shm/calypso_dsp_pause"
 static volatile sig_atomic_t g_pause;
 static void sur_pause(int sig) { g_pause = (sig == SIGUSR1); }
@@ -113,9 +113,9 @@ C54xState *pont_allouer_dsp(void)
         fprintf(stderr, "pont : shm_open(%s) : %s\n", CALYPSO_PONT_SHM, strerror(errno));
         return NULL;
     }
-    /* [2026-10-06] shm_open applique le umask : 0666 devient 0644 sous root, et un
-     * harvard.sh lance sous le compte de l'utilisateur ne peut plus ECRIRE l'API RAM
-     * (d@!, demos sb/si3). fchmod force 0666 pour que le shm soit ecrivable par tous. */
+    /* shm_open applies the umask: 0666 becomes 0644 under root, and a harvard.sh
+     * run under the user's account could then no longer WRITE the API RAM (d@!,
+     * sb/si3 demos). fchmod forces 0666 so that the shm is writable by everyone. */
     if (fchmod(fd, 0666) < 0) {
         fprintf(stderr, "pont : fchmod(%s, 0666) : %s\n", CALYPSO_PONT_SHM, strerror(errno));
     }
@@ -226,9 +226,9 @@ static const uint16_t g_cellules[] = {
 #define N_CELLULES (sizeof(g_cellules) / sizeof(g_cellules[0]))
 static uint16_t g_cell_prev[N_CELLULES];
 static uint16_t g_trace_pc_prev;
-/* [2026-10-03] Zones surveillees en plus pendant une trace d'injection (PONT_TX_TRACE_BLOC) :
- * a_cu (entree du codeur) et le tampon de sortie 0x4280.. + 0x2be4.. ; chaque ecriture est
- * journalisee avec le PC de l'instruction qui l'a faite. */
+/* Extra areas watched during an injection trace (PONT_TX_TRACE_BLOC): a_cu (coder input)
+ * and the output buffer 0x4280.. + 0x2be4..; every write is logged with the PC of the
+ * instruction that made it. */
 static uint16_t g_zone_prev[0x10000];
 static bool g_zone_active;
 static void trace_zones(C54xState *dsp, bool init)
@@ -306,13 +306,14 @@ static void pcc_publier(void)
     printf("\n");
 }
 
-/* ── SONDE TX : la ROM execute-t-elle les taches montantes ? ───────────────────
- * [2026-10-03] PONT_TX_SONDE=N (N evenements, 0/absent = inerte). A chaque trame
- * ou l'ARM a pose d_task_u (ou d_task_ra) dans l'une des pages W, on compare la
- * memoire de donnees du DSP avant et apres l'execution de la trame et on cherche
- * ce que la ROM aurait ecrit : (a) les plages modifiees, (b) les suites de >= 100
- * mots ne valant que 0 ou 1 — l'allure des 148 bits durs d'un burst montant, que
- * calypso_bsp_tx_burst() lit a l'adresse CANDIDATE data[0x0900]. Ne modifie rien. */
+/* ── TX PROBE: does the ROM execute the uplink tasks? ──────────────────────────
+ * PONT_TX_SONDE=N (N events, 0/absent = inert). On every frame where the ARM
+ * posted d_task_u (or d_task_ra) in one of the W pages, the DSP data memory is
+ * compared before and after the frame's execution, looking for what the ROM
+ * would have written: (a) the modified ranges, (b) the runs of >= 100 words
+ * holding only 0 or 1 — the shape of the 148 hard bits of an uplink burst,
+ * which calypso_bsp_tx_burst() reads at the CANDIDATE address data[0x0900].
+ * Modifies nothing. */
 static uint16_t *g_tx_snap;
 static int g_tx_n = -1, g_tx_arme;
 static int tx_sonde_active(void)
@@ -323,10 +324,10 @@ static int tx_sonde_active(void)
 static void tx_sonde_avant(const C54xState *dsp, const uint16_t *api_ram)
 {
     (void)api_ram;
-    /* [2026-10-03] On photographie a CHAQUE trame : l'ARM pose ses taches APRES le
-     * TICK (l1_sync tourne entre le TICK et le GO), donc d_task_u est encore a 0 ici
-     * et armer sur sa valeur de ce moment ne declenchait jamais. La decision se
-     * prend dans tx_sonde_apres(). */
+    /* Snapshot on EVERY frame: the ARM posts its tasks AFTER the TICK (l1_sync
+     * runs between the TICK and the GO), so d_task_u is still 0 here and
+     * arming on its value at this moment never triggers. The decision is
+     * taken in tx_sonde_apres(). */
     g_tx_arme = 0;
     if (!tx_sonde_active()) return;
     if (!g_tx_snap) g_tx_snap = malloc(sizeof(uint16_t) * C54X_DATA_SIZE);
@@ -338,8 +339,8 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
 {
     if (!g_tx_arme || !g_tx_snap || g_tx_n <= 0) return;
     g_tx_arme = 0;
-    /* declenche si une tache montante est posee dans l'une des pages W, et
-     * AUSSI sur la trame suivante (la ROM peut l'executer une trame plus tard). */
+    /* triggers if an uplink task is posted in one of the W pages, and ALSO
+     * on the next frame (the ROM may execute it one frame later). */
     static int suite;
     int pose = api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2] || api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2] ||
                api_ram[(API_W_PAGE(0) + 0x06u) / 2] || api_ram[(API_W_PAGE(1) + 0x06u) / 2];
@@ -347,18 +348,18 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
     suite = pose ? 1 : 0;
     unsigned changes = 0, a, nplages = 0, runs = 0;
     for (a = 0; a < C54X_DATA_SIZE; a++) if (dsp->data[a] != g_tx_snap[a]) changes++;
-    /* une trame ou la ROM ne touche a rien (tache deja traitee, ROM au repos) ne
-     * compte pas dans les N evenements : elle noyait la mesure. */
+    /* a frame where the ROM touches nothing (task already handled, ROM at
+     * rest) does not count among the N events: it would drown the measurement. */
     if (changes == 0) return;
     g_tx_n--;
     printf("  [tx-sonde] fn=%u task_u: page0=0x%04x page1=0x%04x task_ra: page0=0x%04x page1=0x%04x pc=0x%04x\n", fn,
            api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2], api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2],
            api_ram[(API_W_PAGE(0) + 0x06u) / 2], api_ram[(API_W_PAGE(1) + 0x06u) / 2], dsp->pc);
     printf("  [tx-sonde]   %u mots de donnees modifies pendant la trame\n", changes);
-    /* Les plages modifiees d'au moins 8 mots, ET LEUR CONTENU dans
-     * /tmp/tx-sonde/fn<fn>_<adresse>.txt (un mot hexa par ligne) : de quoi
-     * chercher hors ligne le bloc encode attendu, sous toutes ses formes (un bit
-     * par mot, 16 bits par mot...). */
+    /* The modified ranges of at least 8 words, AND THEIR CONTENT in
+     * /tmp/tx-sonde/fn<fn>_<adresse>.txt (one hex word per line): enough to
+     * search offline for the expected encoded block, in all its forms (one
+     * bit per word, 16 bits per word...). */
     mkdir("/tmp/tx-sonde", 0777);
     for (a = 0; a < C54X_DATA_SIZE && nplages < 12; ) {
         if (dsp->data[a] == g_tx_snap[a]) { a++; continue; }
@@ -373,7 +374,7 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
         }
         a = b + 1;
     }
-    /* suites de >= 100 mots valant 0 ou 1, dont au moins 40 modifies */
+    /* runs of >= 100 words holding 0 or 1, at least 40 of them modified */
     for (a = 0; a < C54X_DATA_SIZE && runs < 4; ) {
         if (dsp->data[a] > 1) { a++; continue; }
         unsigned b = a, ch = 0, uns = 0;
@@ -389,16 +390,15 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
     fflush(stdout);
 }
 
-/* ── INJECTION DE BLOCS L2 DANS LA ROM (experience de linearite) ───────────────
- * [2026-10-03] PONT_TX_INJECT=<fichier> : une ligne par bloc de 23 octets hexa.
- * A chaque bloc montant (a_cu) que le firmware pose, APRES que montant.c l'a
- * publie (donc le lien reel n'est pas touche : la BTS recoit le vrai bloc), on
- * ecrit le bloc de test dans a_cu a sa place, pour que la ROM l'encode a la
- * trame suivante. Le codage etant lineaire, un bloc nul puis des blocs a un
- * seul bit donnent la carte entre bits d'entree et bits de sortie du tampon
- * lu par la sonde TX (PONT_TX_SONDE). Meme ordre d'octets que prendre_ul()
- * (montant.c) : mot 3 + i/2, octet faible d'abord. Ne fait rien si la
- * variable est absente. */
+/* ── INJECTION OF L2 BLOCKS INTO THE ROM (linearity experiment) ────────────────
+ * PONT_TX_INJECT=<file>: one line per 23-byte hex block. On every uplink
+ * block (a_cu) the firmware posts, AFTER montant.c has published it (so the
+ * real link is untouched: the BTS gets the real block), the test block is
+ * written into a_cu in its place, so that the ROM encodes it on the next
+ * frame. The coding being linear, a null block then single-bit blocks give
+ * the map between input bits and output bits of the buffer read by the TX
+ * probe (PONT_TX_SONDE). Same byte order as prendre_ul() (montant.c):
+ * word 3 + i/2, low byte first. Does nothing if the variable is absent. */
 #define TX_INJ_MAX 600
 static uint8_t g_inj_bloc[TX_INJ_MAX][23];
 static C54xState *dsp_global_tx;
@@ -421,7 +421,7 @@ static void tx_inject_charger(void)
     fclose(fp);
     printf("  [tx-inject] %d blocs de test charges depuis %s\n", g_inj_n, f);
 }
-/* avant = B_BLUD de a_cu AVANT montant_scruter() : un bloc vient d'etre pose. */
+/* avant = B_BLUD of a_cu BEFORE montant_scruter(): a block has just been posted. */
 static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
 {
     if (g_inj_n < 0) tx_inject_charger();
@@ -434,7 +434,7 @@ static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
     const uint8_t *b = g_inj_bloc[g_inj_i];
     for (int i = 0; i < 23; i += 2)
         w[3 + i / 2] = (uint16_t)(b[i] | ((i + 1 < 23 ? b[i + 1] : 0) << 8));
-    g_inj_attente = g_inj_i;   /* sa sortie sera lue a la fin de la trame suivante */
+    g_inj_attente = g_inj_i;   /* its output will be read at the end of the next frame */
     { static long cible = -2;
       if (cible == -2) { const char *e = calypso_getenv("PONT_TX_TRACE_BLOC"); cible = (e && *e) ? atol(e) : -1; }
       if (cible == g_inj_i && !g_trace_f) {
@@ -451,10 +451,11 @@ static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
     g_inj_i++;
 }
 
-/* Fin de la trame qui suit l'injection : on ecrit, pour ce bloc, les plages OU
- * LA ROM A DEPOSE sa sortie (relevees par la sonde TX : 0x4280.. et 0x2be4..),
- * a ADRESSES FIXES, qu'elles aient change ou non. /tmp/tx-sonde/inj_<bloc>.txt :
- * « adresse mot » par ligne. Independant du compteur d'evenements de la sonde. */
+/* End of the frame following the injection: for this block, write the ranges
+ * WHERE THE ROM DEPOSITED its output (found by the TX probe: 0x4280.. and
+ * 0x2be4..), at FIXED ADDRESSES, whether they changed or not.
+ * /tmp/tx-sonde/inj_<bloc>.txt: "address word" per line. Independent of the
+ * probe's event counter. */
 static void tx_inject_fulldump(const C54xState *dsp, int bloc, uint32_t fn, int d)
 {
     static int actif=-1;
@@ -470,10 +471,10 @@ static void tx_inject_fulldump(const C54xState *dsp, int bloc, uint32_t fn, int 
 }
 static void tx_inject_sortie(const C54xState *dsp, uint32_t fn)
 {
-    /* [2026-10-03] la ROM peut finir son travail sur PLUSIEURS trames (la parite FIRE, le remplissage
-     * des bursts suivants) : on releve les memes plages pendant les 8 trames qui suivent l'injection,
-     * /tmp/tx-sonde/injf_<bloc>_<d>.txt (d = trames apres l'injection), en plus du releve historique
-     * inj_<bloc>.txt de la premiere trame. */
+    /* the ROM may finish its work over SEVERAL frames (the FIRE parity, the filling of the next
+     * bursts): the same ranges are recorded during the 8 frames following the injection,
+     * /tmp/tx-sonde/injf_<bloc>_<d>.txt (d = frames after the injection), in addition to
+     * inj_<bloc>.txt of the first frame. */
     static int restant = 0, bloc = -1, d = 0;
     if (g_inj_attente >= 0) { bloc = g_inj_attente; restant = 8; d = 0; }
     if (restant <= 0) { g_inj_attente = -1; return; }
@@ -498,33 +499,35 @@ static void tx_inject_sortie(const C54xState *dsp, uint32_t fn)
     g_inj_attente = -1;
 }
 
-/* ── MODE OMBRE : la ROM encode, l'hote encode, on compare ─────────────────────
- * [2026-10-03] PONT_TX_OMBRE=1. A chaque bloc SDCCH montant REEL (a_cu, B_BLUD
- * pose par le firmware), apres que montant.c l'a publie, on garde ses 23 octets ;
- * a la fin de la trame suivante on lit le tampon que la ROM a rempli (data[0x4280],
- * 4 groupes de 8 mots = 4 bursts) et on le compare aux bits de gsm0503_xcch_encode
- * (celui que le pont utilise). Rien n'est ecrit dans le DSP ni envoye : le lien reste
- * celui de l'hote. Disposition mesuree : bit j du burst g a la colonne q = j - 2g dans
- * le groupe (premiere moitie, q < 57) et q = j - 2g - 2 (seconde moitie, apres le bit
- * de vol en q = 57). Compare q in [0,50) et [58,106) : zone sure pour g = 0..3.
- * Sortie : « [ombre] fn=.. g0 a/b g1 .. » + totaux, et le detail dans /tmp/tx-sonde/ombre.txt. */
+/* ── SHADOW MODE: the ROM encodes, the host encodes, both are compared ─────────
+ * PONT_TX_OMBRE=1. On every REAL uplink SDCCH block (a_cu, B_BLUD set by the
+ * firmware), after montant.c has published it, its 23 bytes are kept; at the
+ * end of the next frame the buffer the ROM filled is read (data[0x4280],
+ * 4 groups of 8 words = 4 bursts) and compared with the bits of
+ * gsm0503_xcch_encode (the one the bridge uses). Nothing is written into the
+ * DSP or sent: the link stays the host's. Layout: bit j of burst g at column
+ * q = j - 2g in the group (first half, q < 57) and q = j - 2g - 2 (second half,
+ * after the stealing bit at q = 57). Compares q in [0,50) and [58,106): safe
+ * zone for g = 0..3. Output: "[ombre] fn=.. g0 a/b g1 .." + totals, and the
+ * detail in /tmp/tx-sonde/ombre.txt. */
 static int g_omb = -1, g_omb_att;
 static int g_txf_restant, g_txf_d; static uint8_t g_txf_l2[23];
 static int g_rt_restant, g_rt_d, g_rt_n; static uint8_t g_rt_l2[23];
 static uint8_t g_omb_l2[23];
 static unsigned long g_omb_blocs, g_omb_parfaits, g_omb_ok[4], g_omb_n[4];
-/* ── OMBRE DESCENDANTE : reecrire a la source ce que l'ARM va lire ──────────────
- * [2026-10-06] CALYPSO_SHADOW_LAC=<n> et CALYPSO_SHADOW_SB=1. a_cd (NDB) porte
- * le bloc L2 descendant decode, a_sch le SCH decode ; l'ARM les lit APRES le DONE.
- * En lockstep le DSP ecrit puis l'ARM lit : on s'intercale juste avant le DONE, donc
- * ce qu'on pose est bien ce que le firmware recoit (deterministe, pas de course).
- *   - SI3 : si a_cd est un System Information 3 (octet type L2 = 0x1b), on remplace
- *     les 2 octets du LAC (LAI) par n -> mobile.log : CGI=MCC-MNC-n-CI. Flag FIRE
- *     inchange, aucun CRC ne protege le L3. (Le cell_id n'est pas touche.)
- *   - SB : a_sch (R0/R1) <- DEAD BEEF. DESTRUCTIF : le firmware perd la synchro SCH ;
- *     a n'activer que pour montrer la perte de cellule.
- * Offsets : a_cd[3]=debut L2 (dsp_memcpy_from_api be=0, 2 octets/mot, octet bas d'abord)
- * donc type=octet bas de a_cd[4], cell_id = octet haut de a_cd[4] (MSB) | octet bas de a_cd[5] (LSB). */
+/* ── DOWNLINK SHADOW: rewrite at the source what the ARM is about to read ──────
+ * CALYPSO_SHADOW_LAC=<n> and CALYPSO_SHADOW_SB=1. a_cd (NDB) carries the
+ * decoded downlink L2 block, a_sch the decoded SCH; the ARM reads them AFTER
+ * the DONE. In lockstep the DSP writes then the ARM reads: this steps in just
+ * before the DONE, so what is set is exactly what the firmware receives
+ * (deterministic, no race).
+ *   - SI3: if a_cd is a System Information 3 (L2 type byte = 0x1b), the 2 LAC
+ *     bytes (LAI) are replaced by n -> mobile.log: CGI=MCC-MNC-n-CI. FIRE flag
+ *     unchanged, no CRC protects the L3. (The cell_id is not touched.)
+ *   - SB: a_sch (R0/R1) <- DEAD BEEF. DESTRUCTIVE: the firmware loses SCH sync;
+ *     only enable it to show the loss of the cell.
+ * Offsets: a_cd[3]=start of L2 (dsp_memcpy_from_api be=0, 2 bytes/word, low byte first)
+ * so type=low byte of a_cd[4], cell_id = high byte of a_cd[4] (MSB) | low byte of a_cd[5] (LSB). */
 static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
 {
     static int lac = -2, sb = -2;
@@ -536,11 +539,11 @@ static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
                      if (sb) printf("  [ombre-dl] SB a_sch force a 40C3 2026 (CCC 2026 ; DESTRUCTIF : perte de synchro)\n"); }
     if (!api_ram) return;
     if (lac >= 0) {
-        /* LAI dans SI3 : octets L2 8-9 = LAC (gros-boutiste). dsp_memcpy be=0 les place tous deux dans
-         * a_cd[7] : octet 8 (LAC MSB) = octet bas de a_cd[7], octet 9 (LAC LSB) = octet haut. Donc
-         * a_cd[7] = (LAC_LSB << 8) | LAC_MSB = octet-echange du LAC. On ne touche PAS le cell_id (a_cd[4..5]). */
+        /* LAI in SI3: L2 bytes 8-9 = LAC (big-endian). dsp_memcpy be=0 puts both into a_cd[7]:
+         * byte 8 (LAC MSB) = low byte of a_cd[7], byte 9 (LAC LSB) = high byte. Hence
+         * a_cd[7] = (LAC_LSB << 8) | LAC_MSB = byte-swapped LAC. The cell_id (a_cd[4..5]) is NOT touched. */
         uint16_t *w = &api_ram[(API_NDB + NDB_A_CD) / 2];
-        if ((w[4] & 0xff) == 0x1b) {                       /* SI3 (type L2 = octet bas de a_cd[4]) */
+        if ((w[4] & 0xff) == 0x1b) {                       /* SI3 (L2 type = low byte of a_cd[4]) */
             uint16_t cible = (uint16_t)(((lac & 0xff) << 8) | ((lac >> 8) & 0xff));
             if (w[7] != cible) {
                 int av = ((w[7] & 0xff) << 8) | ((w[7] >> 8) & 0xff);
@@ -552,8 +555,8 @@ static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
         }
     }
     if (sb) {
-        for (unsigned base = 0x0037; ; base = 0x004b) {    /* a_sch[0] R0=0x0837, R1=0x084b ; index = adr - 0x0800 */
-            api_ram[base] = 0x40c3; api_ram[base + 1] = 0x2026;   /* CCC 2026, marqueur lisible */
+        for (unsigned base = 0x0037; ; base = 0x004b) {    /* a_sch[0] R0=0x0837, R1=0x084b; index = adr - 0x0800 */
+            api_ram[base] = 0x40c3; api_ram[base + 1] = 0x2026;   /* CCC 2026, readable marker */
             if (base == 0x004b) break;
         }
     }
@@ -573,10 +576,10 @@ static void tx_ombre_pose(const uint16_t *api_ram, int blud_avant)
     { static int ar=-1; if(ar<0){const char*e=calypso_getenv("PONT_TX_REELFULL");ar=(e&&*e=='1');}
       if(ar){ memcpy(g_rt_l2,g_omb_l2,23); g_rt_restant=6; g_rt_d=0; } }
 }
-/* [2026-10-03] PONT_TX_TXFRAMES=1 : apres chaque bloc reel pose (a_cu), on enregistre data[0x4280]
- * (32 mots) a CHAQUE trame pendant 10 trames, avec le L2 et l'offset d, dans /tmp/tx-sonde/txf.txt.
- * But : les lanes de parite du burst peuvent n'etre ecrites qu'a la trame d'EMISSION de chaque burst
- * (une par burst), apres la trame de codage. */
+/* PONT_TX_TXFRAMES=1: after each real block posted (a_cu), data[0x4280] (32 words) is recorded
+ * on EVERY frame for 10 frames, with the L2 and the offset d, in /tmp/tx-sonde/txf.txt.
+ * Purpose: the parity lanes of the burst may only be written at the TRANSMIT frame of each
+ * burst (one per burst), after the coding frame. */
 static void tx_txframes(const C54xState *dsp)
 {
     static int actif=-1;
@@ -642,27 +645,27 @@ static void tx_ombre_compare(const C54xState *dsp, uint32_t fn)
     fflush(stdout);
 }
 
-/* [2026-10-03] BURSTS MONTANTS xCCH EMIS PAR LA ROM -> pont.py.
- * A chaque trame d'emission, la ROM (PROM0 0x890e-0x891b) copie le burst courant du tampon circulaire
- * 0x4280..0x429f (BK=32, 4 bursts de 8 mots) vers data[0x3f8a..0x3f91] : 114 bits + hl/hu dans les 2 bits
- * bas du mot 7, MSB d'abord ; puis remet a 0 le mot 7 du burst dans 0x4280 et range le pointeur avance de
- * 8 dans data[0x3d9b] (mvkd ar2,@0x1b, DP=0x7b). Le codage d'un bloc remet ce pointeur a 0x4280
- * (0x8820). Un changement de data[0x3d9b] en fin de trame = un burst vient de partir ; son rang est
- * ((p - 0x4280)/8 + 3) & 3. Mesure (trace du bloc ff x23) : les 4 copies dans 0x3f8a sont
- * gsm0503_xcch_encode bit a bit.
- * Les 4 bursts d'un bloc sont publies ensemble dans /dev/shm/calypso_xcch_ul_rom (anneau, format :
- * pont/dsp/uplink.py), avec le L2 pose dans a_cu juste avant le burst 0 (pour le journal ; le pont
- * ne s'y fie pas, il redecode les bursts). En mode chiffre la ROM XORe le flux de cle A5 montant
- * (data[0x3f9b..0x3fa2], calypso_a5.c) sur 0x3f8a meme : on publie ce flux a cote des bits, le pont
- * defait le XOR (la ROM chiffre a l'heure du DSP, pas au fn ou le pont emet) et rechiffre au fn de
- * l'air. MONTANT_ROM_UL=0 coupe la publication. */
+/* UPLINK xCCH BURSTS SENT BY THE ROM -> pont.py.
+ * On every transmit frame, the ROM (PROM0 0x890e-0x891b) copies the current burst from the circular
+ * buffer 0x4280..0x429f (BK=32, 4 bursts of 8 words) to data[0x3f8a..0x3f91]: 114 bits + hl/hu in
+ * the 2 low bits of word 7, MSB first; then zeroes word 7 of the burst in 0x4280 and stores the
+ * pointer advanced by 8 in data[0x3d9b] (mvkd ar2,@0x1b, DP=0x7b). Coding a block resets this
+ * pointer to 0x4280 (0x8820). A change of data[0x3d9b] at the end of a frame = a burst has just
+ * left; its rank is ((p - 0x4280)/8 + 3) & 3. The 4 copies in 0x3f8a are gsm0503_xcch_encode bit
+ * for bit.
+ * The 4 bursts of a block are published together in /dev/shm/calypso_xcch_ul_rom (ring, format:
+ * pont/dsp/uplink.py), with the L2 posted in a_cu just before burst 0 (for the journal; the bridge
+ * does not rely on it, it re-decodes the bursts). In ciphered mode the ROM XORs the uplink A5 key
+ * stream (data[0x3f9b..0x3fa2], calypso_a5.c) onto 0x3f8a itself: this stream is published next
+ * to the bits, the bridge undoes the XOR (the ROM ciphers at the DSP's time, not at the fn where
+ * the bridge transmits) and re-ciphers at the air fn. MONTANT_ROM_UL=0 turns the publication off. */
 #define ROM_UL_SHM      "/dev/shm/calypso_xcch_ul_rom"
 #define ROM_UL_SLOTS    8
 #define ROM_UL_SLOT_SZ  1024    /* seq(4) fn(4) l2(23) .(1) bits(4 x 116 ubits) flux(4 x 116 ubits) */
-#define ROM_UL_FLUX     0x3f9b  /* flux de cle A5 montant que la ROM XORe sur 0x3f8a (PROM0 0x85d1) */
+#define ROM_UL_FLUX     0x3f9b  /* uplink A5 key stream the ROM XORs onto 0x3f8a (PROM0 0x85d1) */
 #define ROM_UL_PTR      0x3d9b
 #define ROM_UL_BURST    0x3f8a
-static uint8_t g_romul_l2_pose[23];     /* dernier L2 pose dans a_cu (tx_rom_pose) */
+static uint8_t g_romul_l2_pose[23];     /* last L2 posted in a_cu (tx_rom_pose) */
 static void tx_rom_pose(const uint16_t *api_ram, int blud_avant)
 {
     if (!blud_avant) return;
@@ -671,20 +674,19 @@ static void tx_rom_pose(const uint16_t *api_ram, int blud_avant)
         g_romul_l2_pose[i] = (uint8_t)(i & 1 ? w[3 + i / 2] >> 8 : w[3 + i / 2] & 0xff);
 }
 
-/* [2026-10-04] LE BURST MONTANT FINAL DE LA ROM (script TSP, voir src/tsp_tx.h). Chaque trame ou le
- * script porte un burst nouveau, on le publie dans /dev/shm/calypso_tx_rom (anneau : en-tete w(4)
- * slots(4), puis des cases de 160 octets : seq(4) fn(4) type(1) tsc(1) offset(1) .(1) bits(148)).
- * fn = la trame du tick (m.a), celle que l'ARM a donnee au DSP pour ce burst : c'est aussi le
- * numero de trame avec lequel la ROM a chiffre (dsp_tester tx-sdcch-a5 : XOR = osmo_a5(kc, fn de la
- * commande), 24/24). Le pont peut donc emettre ce burst tel quel a ce fn, sans codage ni A5 cote
- * hote (PONT_UL_RAW=1 dans pont/dsp/uplink.py). MONTANT_ROM_TX=0 coupe la publication. */
-/* [2026-10-04] LE NUMERO DE TRAME DU BURST. Le tick du pas-a-pas (m.a) n'est PAS le fn GSM : le
- * firmware se cale sur la SCH (run de 17:49 : SB fn=409 au tick ~1009) et le pont emettait les bursts
- * de la ROM a fn%51 = 5..8 au lieu de 15..18. Le fn vrai est dans la page W que le firmware remet au
- * DSP : a_a5fn[0] = (T3 << 5) | T2, a_a5fn[1] = T1 (calypso/dsp.c dsp_load_tch_param, ecrit avec
- * chaque tache RX/TX de next_time). On le releve a l'IT trame, sur la page que d_dsp_page designe ;
- * les pages sans tache RX/TX (RACH) gardent un a_a5fn perime : on prend alors tick + decalage, le
- * decalage etant celui de la derniere page datee. */
+/* THE ROM'S FINAL UPLINK BURST (TSP script, see src/tsp_tx.h). On every frame where the script
+ * carries a new burst, it is published in /dev/shm/calypso_tx_rom (ring: header w(4) slots(4),
+ * then 160-byte slots: seq(4) fn(4) type(1) tsc(1) offset(1) .(1) bits(148)).
+ * fn = the GSM frame of this burst, the one the ARM gave the DSP for it: it is also the frame
+ * number the ROM ciphered with (dsp_tester tx-sdcch-a5: XOR = osmo_a5(kc, fn of the command),
+ * 24/24). The bridge can therefore transmit this burst as is at this fn, without coding or A5 on
+ * the host side (PONT_UL_RAW=1 in pont/dsp/uplink.py). MONTANT_ROM_TX=0 turns the publication off. */
+/* THE FRAME NUMBER OF THE BURST. The lockstep tick (m.a) is NOT the GSM fn: the firmware aligns
+ * itself on the SCH. The true fn is in the W page the firmware hands to the DSP:
+ * a_a5fn[0] = (T3 << 5) | T2, a_a5fn[1] = T1 (calypso/dsp.c dsp_load_tch_param, written with
+ * every RX/TX task of next_time). It is read at the frame IT, on the page d_dsp_page designates;
+ * pages without an RX/TX task (RACH) keep a stale a_a5fn: tick + offset is used then, the offset
+ * being that of the last dated page. */
 #define GSM_HYPERFRAME 2715648u
 static struct { bool valide; uint32_t fn; bool dec_valide; int32_t dec; uint32_t tick, tick_dec; bool tache_tx; } g_tsp_fn;
 static uint32_t gsmtime2fn(unsigned t1, unsigned t2, unsigned t3)
@@ -695,7 +697,7 @@ static void rach_dfn_noter(const C54xState *dsp, uint32_t tick);
 static void scruter_ra_c(void);
 static void rach_pend_echeance(uint32_t tick);
 static struct { bool actif; uint32_t tick; uint8_t bits[148]; } g_rach_pend;
-static uint32_t g_rom_emis_tick = 0xffffffffu;   /* dernier burst non NB emis par la ROM (RACH) */
+static uint32_t g_rom_emis_tick = 0xffffffffu;   /* last non-NB burst sent by the ROM (RACH) */
 static void rach_pend_publier(uint32_t tick_emis, const char *quoi);
 static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
 {
@@ -705,36 +707,35 @@ static void tx_tsp_dater(const C54xState *dsp, uint32_t tick)
     const uint16_t *w = &api[API_W_PAGE(pg) / 2];
     bool datee = (w[WP_D_TASK_D / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0;
     g_tsp_fn.tick = tick; g_tsp_fn.valide = false;
-    /* [2026-10-19] une tache d'emission commandee cette trame (RACH : c'est elle que l'extcode
-     * du firmware trx detourne pour emettre FB/SB/dummy/NB) : tx_tsp_publier republie meme un
-     * burst identique au precedent quand MONTANT_ROM_TX_CHAQUE=1 */
+    /* a transmit task commanded this frame (RACH: the one the trx firmware's extcode hijacks
+     * to send FB/SB/dummy/NB): tx_tsp_publier republishes even a burst identical to the
+     * previous one when MONTANT_ROM_TX_CHAQUE=1 */
     g_tsp_fn.tache_tx = (v & B_GSM_TASK) && ((w[WP_D_TASK_RA / 2] & 0x7fff) != 0 || (w[WP_D_TASK_U / 2] & 0x7fff) != 0);
     if (v & B_GSM_TASK) rach_dfn_noter(dsp, tick);
     rach_pend_echeance(tick);
-    if ((tick % 64u) == 0) scruter_ra_c();   /* [2026-10-22 14:15] RA_C lu au fil de l'eau, pas seulement au RACH suivant */
+    if ((tick % 64u) == 0) scruter_ra_c();   /* RA_C read as it comes, not only at the next RACH */
     if (!(v & B_GSM_TASK) || !datee) return;
     unsigned t2 = w[12] & 0x1f, t3 = (w[12] >> 5) & 0x3f, t1 = w[13] & 0x7ff;
     if (t2 >= 26 || t3 >= 51) return;
-    /* [2026-10-20] firmware trx (mode BTS) : il ne pose jamais a_a5fn (pas de dsp_load_tch_param),
-     * la page dit t1=t2=t3=0 a chaque trame et tous les bursts du TRX partaient avec fn=0 dans
-     * l'anneau calypso_tx_rom. On garde alors le tick nu (source 0), monotone. */
+    /* trx firmware (BTS mode): it never sets a_a5fn (no dsp_load_tch_param), the page says
+     * t1=t2=t3=0 on every frame and every TRX burst would carry fn=0 in the calypso_tx_rom
+     * ring. The bare tick (source 0), monotonic, is kept instead. */
     if (t1 == 0 && t2 == 0 && t3 == 0) return;
     g_tsp_fn.fn = gsmtime2fn(t1, t2, t3); g_tsp_fn.valide = true;
     g_tsp_fn.dec = (int32_t)((g_tsp_fn.fn + GSM_HYPERFRAME - (tick % GSM_HYPERFRAME)) % GSM_HYPERFRAME);
     g_tsp_fn.dec_valide = true;
     g_tsp_fn.tick_dec = tick;
-    calypso_bsp_off_mobile_a5fn(tick, g_tsp_fn.fn);   /* [2026-10-22] l'offset de veille suit le dedie */
+    calypso_bsp_off_mobile_a5fn(tick, g_tsp_fn.fn);   /* the idle offset follows the dedicated one */
 }
-/* [2026-10-22] RACH DATE A UNE TRAME PRES. En veille le fn du mobile n'est connu que par le dernier SB ou le
- * dernier a_a5fn ; la L1 TI recale sa base de temps (tpu_offset) et revient d'un dedie avec l'un ou l'autre, a
- * une trame pres (22/10 : 494 a_a5fn, 495 attendu ; run precedent l'inverse). Un RACH date faux = IMM ASS
- * ignoree, le mobile renvoie un RACH. Donc : un nouveau RACH sans entree en dedie depuis le precedent (moins de
- * 1000 trames) -> correction suivante parmi 0, +1, -1 ; un dedie obtenu -> la correction reste.
- * CALYPSO_RACH_CORR=0 pour couper. */
-/* [2026-10-22 12:10] RA_C : la trace L1 TI (rvinterf, CALYPSO_RVINTERF_LOG) dit a quel fn le MOBILE a emis
- * chaque RACH. Lue a chaque RACH (le RA_C du precedent est arrive depuis) ; le tick du RACH correspondant
- * vient de la file des derniers RACH. Apprend l'offset du mobile (calypso_bsp_off_mobile_rac) et remet la
- * correction tournante a 0. */
+/* RACH DATED TO WITHIN ONE FRAME. In idle the mobile's fn is only known through the last SB or the last
+ * a_a5fn; the TI L1 realigns its time base (tpu_offset) and comes back from a dedicated channel with one
+ * or the other, to within one frame. A wrongly dated RACH = IMM ASS ignored, the mobile sends another
+ * RACH. Hence: a new RACH without a dedicated channel since the previous one (less than 1000 frames)
+ * -> next correction among 0, +1, -1; a dedicated channel obtained -> the correction stays.
+ * CALYPSO_RACH_CORR=0 to turn it off. */
+/* RA_C: the TI L1 trace (rvinterf, CALYPSO_RVINTERF_LOG) says at which fn the MOBILE sent each RACH.
+ * Read at every RACH (the RA_C of the previous one has arrived since); the tick of the matching RACH
+ * comes from the queue of the last RACHs. Learns the mobile's offset (calypso_bsp_off_mobile_rac). */
 static uint32_t g_rach_ticks[16]; static unsigned g_rach_w;
 static int rach_corr_idx_reset;
 static void scruter_ra_c(void)
@@ -753,7 +754,7 @@ static void scruter_ra_c(void)
         const char *p = strstr(l, "L1: RA_C");
         if (!p) continue;
         unsigned r = (unsigned)strtoul(p + 8, NULL, 10) % 42432u;
-        /* le RACH dont le tick est le plus proche de r (mod 42432), parmi les 16 derniers */
+        /* the RACH whose tick is closest to r (mod 42432), among the last 16 */
         int best = -1; long bd = 1L << 30;
         for (unsigned k = 0; k < 16 && k < g_rach_w; k++) {
             uint32_t t = g_rach_ticks[(g_rach_w - 1 - k) % 16];
@@ -767,20 +768,18 @@ static void scruter_ra_c(void)
 static int rach_corr(uint32_t tick)
 {
     static int on = -1, idx; static uint32_t t_prec; static unsigned dedie_prec; static bool vu;
-    /* [2026-10-22 13:20] l'apprentissage RA_C ne remet PLUS la rotation a 0 : l'offset RA_C oscille de +-1 (766/767)
-     * et chaque RACH repartait a la correction 0, sans jamais explorer +1/-1 -- dix RACH sans canal, acces abandonne,
-     * reselection (13:16). La rotation continue tant qu'aucun dedie n'est obtenu, et garde la valeur gagnante. */
+    /* RA_C learning does not reset the rotation: the RA_C offset oscillates by +-1, so the rotation
+     * keeps going as long as no dedicated channel is obtained, and keeps the winning value. */
     rach_corr_idx_reset = 0;
-    static const int seq[5] = { 0, +1, -1, +2, -2 };   /* [2026-10-22] +-2 vus entre deux acces */
+    static const int seq[5] = { 0, +1, -1, +2, -2 };   /* +-2 seen between two accesses */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_CORR"); on = !(e && *e == '0'); }
     if (!on) return 0;
-    /* [2026-10-22 14:05] ROTATION COUPEE PAR DEFAUT. Run de 14:02 : RA_C - tick = 760 pour les six RACH d'un meme
-     * acces, offset appris des le 2e (« [off-mobile] 758 -> 760 ») ; c'est la rotation ajoutee par-dessus qui
-     * datait faux les suivants (5630/5631, 5848/5850, 6097/6096, 6311/6309) : 5 SDCCH en Timeout a la BSC.
-     * On garde la file des RACH et la lecture RA_C (apprentissage), sans correction. CALYPSO_RACH_ROTATION=1. */
+    /* ROTATION OFF BY DEFAULT: with RA_C - tick constant over the RACHs of one access and the offset
+     * learnt from the 2nd one, a rotation added on top dates the following ones wrong. The RACH queue
+     * and the RA_C reading (learning) are kept, without correction. CALYPSO_RACH_ROTATION=1 enables it. */
     static int rot = -1;
     if (rot < 0) { const char *e = calypso_getenv("CALYPSO_RACH_ROTATION"); rot = (e && *e == '1'); }
-    if (!vu || (uint32_t)(tick - t_prec) > 8) {      /* un nouveau RACH (les deux chemins tombent au meme tick) */
+    if (!vu || (uint32_t)(tick - t_prec) > 8) {      /* a new RACH (both paths land on the same tick) */
         scruter_ra_c();
         rach_corr_idx_reset = 0;
         g_rach_ticks[g_rach_w++ % 16] = tick;
@@ -793,12 +792,10 @@ static int rach_corr(uint32_t tick)
     }
     return rot ? seq[idx] : 0;
 }
-/* [2026-10-22 14:05] RACH DATE PAR d_fn. Run de 13:57 : 5 RACH pour une IMM ASS acceptee (BSC : « lchan allocation
- * failed ... WAIT_RLL_RTP_ESTABLISH: Timeout » pour chaque SDCCH perdu). Publie 2070/2290/2523/2747/2977, le
- * mobile (RA_C) 2069/2289/2521/2749/2977 : seul le 5e concordait. Le fn du tick (offset RA_C, 768..770) glisse
- * d'une trame a l'autre et la rotation en ajoute. La page W du RACH porte d_fn = fn_report | (fn%104) << 8, le
- * fn du MOBILE : on prend le fn le plus proche de l'estimation qui a ce reste modulo 104 (+ CALYPSO_RACH_DFN_K).
- * CALYPSO_RACH_DFN=0 : ancienne voie (estimation + rotation). */
+/* RACH DATED BY d_fn. The fn of the tick (RA_C offset, 768..770) drifts from one frame to the next and
+ * the rotation adds to it. The W page of the RACH carries d_fn = fn_report | (fn%104) << 8, the fn of
+ * the MOBILE: the fn closest to the estimate that has this remainder modulo 104 is taken
+ * (+ CALYPSO_RACH_DFN_K). CALYPSO_RACH_DFN=0: estimate + rotation only. */
 static struct { bool valide; uint32_t tick; unsigned fn104; } g_rach_dfn;
 static void rach_dfn_noter(const C54xState *dsp, uint32_t tick)
 {
@@ -814,7 +811,7 @@ static void rach_dfn_noter(const C54xState *dsp, uint32_t tick)
 static bool rach_dfn_caler(uint32_t tick, uint32_t estime, uint32_t *fn)
 {
     static int on = -1, k = 0;
-    /* 14:05 : le firmware TI ne pose pas d_fn sur la tache RACH (0 -> calage faux de +6) : coupe par defaut */
+    /* the TI firmware does not set d_fn on the RACH task (0 -> wrong alignment of +6): off by default */
     if (on < 0) { const char *e = calypso_getenv("CALYPSO_RACH_DFN"); on = (e && *e == '1');
                   e = calypso_getenv("CALYPSO_RACH_DFN_K"); k = (e && *e) ? atoi(e) : 0; }
     if (!on || !g_rach_dfn.valide || (uint32_t)(tick - g_rach_dfn.tick + 2) > 4) return false;
@@ -830,32 +827,31 @@ static bool rach_dfn_caler(uint32_t tick, uint32_t estime, uint32_t *fn)
 static uint32_t tx_tsp_fn(uint32_t tick, int *source)
 {
     if (g_tsp_fn.valide && g_tsp_fn.tick == tick) { *source = 1; return g_tsp_fn.fn; }
-    /* [2026-10-21 23:10] decalage a_a5fn PERIME au-dela de 102 trames (CALYPSO_TSP_DEC_TTL ; 0 = jamais) : la L1 TI ne
-     * pose a_a5fn qu'en connexion chiffree ; en veille le mobile se resynchronise (SB) et son fn glisse d'une trame
-     * par rapport au decalage fige de la derniere connexion -> RACH date fn+1 (RA_C 33884 contre 33885 publie),
-     * IMM ASS ignorees, echec d'acces, reselection (barres perdues), paging sans reponse (MT SMS en echec). Au-dela,
-     * le calage BSP (source 3), qui suit les recalages de l'offset. */
+    /* a_a5fn offset STALE beyond 102 frames (CALYPSO_TSP_DEC_TTL; 0 = never): the TI L1 only sets a_a5fn
+     * in a ciphered connection; in idle the mobile resynchronises (SB) and its fn drifts by one frame
+     * from the offset frozen at the last connection, which would date the RACH fn+1 (IMM ASS ignored).
+     * Beyond that, the BSP alignment (source 3), which follows the offset realignments. */
     static int ttl = -1;
     if (ttl < 0) { const char *e = calypso_getenv("CALYPSO_TSP_DEC_TTL"); ttl = (e && *e) ? atoi(e) : 102; }
     if (g_tsp_fn.dec_valide && (ttl == 0 || (uint32_t)(tick - g_tsp_fn.tick_dec) <= (uint32_t)ttl)) {
         *source = 2; return (uint32_t)((tick + (uint32_t)g_tsp_fn.dec) % GSM_HYPERFRAME);
     }
-    /* [2026-10-21 23:15] firmware sans a_a5fn en veille (L1 TI) : le fn que le MOBILE croit, appris au dernier SB
-     * livre en fenetre SB (calypso_bsp.c g_off_mobile) ; c'est a lui que l'IMM ASS doit correspondre. */
-    scruter_ra_c();   /* [2026-10-22 14:15] le RA_C du RACH precedent AVANT d'estimer (il arrivait un RACH trop tard) */
+    /* firmware without a_a5fn in idle (TI L1): the fn the MOBILE believes, learnt at the last SB delivered
+     * in the SB window (calypso_bsp.c g_off_mobile); the IMM ASS must match that one. */
+    scruter_ra_c();   /* the RA_C of the previous RACH BEFORE estimating */
     { uint32_t f, c; if (calypso_bsp_fn_mobile_du_tick(tick, &f)) { *source = 4;
-          if (rach_dfn_caler(tick, f, &c)) { rach_corr(tick); return c; }   /* rach_corr : file des RACH pour RA_C */
+          if (rach_dfn_caler(tick, f, &c)) { rach_corr(tick); return c; }   /* rach_corr: RACH queue for RA_C */
           return (uint32_t)((f + GSM_HYPERFRAME + rach_corr(tick)) % GSM_HYPERFRAME); } }
-    /* [2026-10-21 18:45] firmware sans a_a5fn (L1 TI, Magnetite) : la trame BTS du calage TS0 */
+    /* firmware without a_a5fn (TI L1, Magnetite): the BTS frame of the TS0 alignment */
     { uint32_t f; if (calypso_bsp_fn_bts_du_tick(tick, &f)) { *source = 3; return f; } }
     *source = 0; return tick;
 }
 #define ROM_TX_SHM   "/dev/shm/calypso_tx_rom"
 #define ROM_TX_SLOTS 256
 #define ROM_TX_SZ    160
-/* [2026-10-20] L'anneau calypso_tx_rom est partage par tx_tsp_publier (bursts captures au script TSP) et
- * tx_page_publier (mode TRX : bursts synthetises depuis la page de l'extcode, un par slot TX). Case de
- * 160 octets : seq(4) fn(4) type(1) tsc(1) offset(1) src(1) bits(148) ; src : bit 7 = A5, bits 4-6 = tn. */
+/* The calypso_tx_rom ring is shared by tx_tsp_publier (bursts captured from the TSP script) and
+ * tx_page_publier (TRX mode: bursts synthesised from the extcode page, one per TX slot). 160-byte
+ * slot: seq(4) fn(4) type(1) tsc(1) offset(1) src(1) bits(148); src: bit 7 = A5, bits 4-6 = tn. */
 static int g_ring_fd = -1;
 static uint32_t g_ring_w;
 static bool ring_publier(int type, const uint8_t *bits, int tsc, int offset, uint8_t src, uint32_t fn_gsm)
@@ -898,41 +894,40 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     struct tsp_tx_burst b; bool nouveau = false;
     if (!tsp_tx_lire(dsp->data, &b, &nouveau)) return;
     if (!nouveau && !(chaque && g_tsp_fn.tache_tx && g_tsp_fn.tick == fn)) return;
-    /* [2026-10-20] LE SCH DE L'EXTCODE (firmware trx) SORT A MOITIE FAUX SUR CE BANC. Mesure du jour
-     * (air TRX -> mobile, 999 SB livres dans la fenetre SB du mobile, 0 decode, [a_sch] crc_ko a TOA 23) :
-     * compares a gsm0503_sch_encode() des mots sch[0..1] de la page etendue (0x2000/0x2200 + 32), les
-     * 39 premiers bits codes du burst sont EXACTS et les 39 derniers (bits 106..144 : haut de l'info,
-     * parite CRC-10, queue) sont faux a ~50 %. L'encodeur SCH est dans l'extcode du DSP (dsp_extcode.c,
-     * 0x015c), pas dans la ROM : c'est une instruction de ce code-la que le coeur emule mal (a trouver :
-     * la boucle de parite). En attendant, prothese derriere MONTANT_ROM_TX_SB_RECODE (1 par defaut en
-     * mode TRX, 0 pour la couper) : on recode le SCH a partir des mots sch de la page dont la premiere
-     * moitie correspond bit a bit au burst capture, et on remplace la seconde moitie dans ce qu'on
-     * publie. Le compteur dit combien de bits differaient : l'ecart a surveiller quand le coeur sera
-     * corrige (0 = la prothese ne sert plus). */
+    /* THE EXTCODE'S SCH (trx firmware) COMES OUT HALF WRONG ON THIS BENCH. Compared with
+     * gsm0503_sch_encode() of the sch[0..1] words of the extended page (0x2000/0x2200 + 32), the
+     * first 39 coded bits of the burst are EXACT and the last 39 (bits 106..144: top of the info,
+     * CRC-10 parity, tail) are ~50 % wrong. The SCH encoder is in the DSP extcode (dsp_extcode.c,
+     * 0x015c), not in the ROM: an instruction of that code (the parity loop) is mis-emulated by the
+     * core. Prosthesis behind MONTANT_ROM_TX_SB_RECODE (1 by default in TRX mode, 0 to turn it
+     * off): the SCH is re-encoded from the sch words of the page whose first half matches the
+     * captured burst bit for bit, and the second half is replaced in what is published. The
+     * counter says how many bits differed: the gap to watch once the core is fixed (0 = the
+     * prosthesis is no longer needed). */
     if (b.type == TSP_TX_SB && chaque) {
         static int recode = -1; static unsigned n_sb, n_recodes, n_sans_page, n_bits_faux;
         if (recode < 0) { const char *e = calypso_getenv("MONTANT_ROM_TX_SB_RECODE"); recode = !(e && *e == '0'); }
         if (recode) {
             n_sb++;
-            /* Les deux pages portent chacune un mot sch : celui de ce SB et celui du SB d'avant (10 ou
-             * 11 trames plus tot). La premiere moitie codee ne les distingue pas toujours (elle ne porte
-             * pas T2 ni le bit bas de T1/T3') : on prend, parmi les pages dont la premiere moitie colle,
-             * celle au fn le plus recent. Mesure du jour avec « la premiere qui colle » : un SB sur
-             * trois portait le fn du SB precedent (fn decode 234601 puis 234233 a 10 trames d'ecart). */
+            /* Both pages each carry an sch word: that of this SB and that of the previous SB (10 or
+             * 11 frames earlier). The first coded half does not always tell them apart (it carries
+             * neither T2 nor the low bit of T1/T3'): among the pages whose first half matches, the
+             * one with the most recent fn is taken, otherwise one SB in three would carry the fn of
+             * the previous SB. */
             int fait = 0; uint32_t fn_best = 0; ubit_t code_best[78];
             for (unsigned base = 0x2000; base <= 0x2200; base += 0x200) {
                 uint32_t sch = dsp->data[base + 32] | ((uint32_t)dsp->data[base + 33] << 16);
                 uint8_t info[4] = { sch & 0xff, (sch >> 8) & 0xff, (sch >> 16) & 0xff, (sch >> 24) & 0xff };
                 ubit_t code[78];
                 if (gsm0503_sch_encode(code, info) < 0) continue;
-                if (memcmp(code, b.bits + 3, 39) != 0) continue;         /* pas la page de ce burst */
-                /* inverse de sb_build() (prim_bts.c) : t1&1 -> bit 23, t1&0x1fe -> bits 8..15, t1&0x600 -> bits 0..1,
+                if (memcmp(code, b.bits + 3, 39) != 0) continue;         /* not the page of this burst */
+                /* inverse of sb_build() (prim_bts.c): t1&1 -> bit 23, t1&0x1fe -> bits 8..15, t1&0x600 -> bits 0..1,
                  * t2 -> bits 18..22, t3'&1 -> bit 24, t3'&6 -> bits 16..17, bsic -> bits 2..7.
-                 * Verifie sur 0x005a1c1c = BSIC 7, T1 56, T2 22, T3 41 (le SB que le mobile a decode). */
+                 * Checked on 0x005a1c1c = BSIC 7, T1 56, T2 22, T3 41. */
                 uint32_t t1 = ((sch >> 23) & 1) | ((sch >> 7) & 0x1fe) | ((sch & 3) << 9);
                 uint32_t t2 = (sch >> 18) & 0x1f, t3 = (((sch >> 24) & 1) | (((sch >> 16) & 3) << 1)) * 10 + 1;
-                /* 05.02 3.3.2.2.1 : FN = 51 ((T3 - T2) mod 26) + T3 + 51 x 26 x T1 (le premier jet avait T2 - T3 :
-                 * fn decode qui RECULAIT de 51 par 51 trames, offset de calage faux) */
+                /* 05.02 3.3.2.2.1: FN = 51 ((T3 - T2) mod 26) + T3 + 51 x 26 x T1 (T3 - T2, not T2 - T3:
+                 * the latter gives a decoded fn that goes BACK by 51 every 51 frames) */
                 uint32_t fnsb = 51 * 26 * t1 + 51 * ((t3 + 26 - t2) % 26) + t3;
                 if (!fait || (int32_t)(fnsb - fn_best) > 0) { fn_best = fnsb; memcpy(code_best, code, sizeof code); }
                 fait = 1;
@@ -942,12 +937,12 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
                 for (int k = 0; k < 39; k++) faux += (b.bits[106 + k] != code_best[39 + k]);
                 n_bits_faux += (unsigned)faux;
                 if (faux) { memcpy(b.bits + 106, code_best + 39, 39); n_recodes++; }
-                /* [2026-10-20] CALAGE DU MONTANT DU TRX. Ce SB (fn GSM fn_best) part au tick `fn` : on
-                 * connait donc l'horloge du firmware trx. Le BSP de cette instance recoit les bursts du
-                 * mobile tagues de leur fn GSM (a_a5fn du mobile) et doit les jouer a la trame ou le
-                 * firmware les attend (calypso_bsp_trx_calage, CALYPSO_BSP_TRX=1). On n'applique que
-                 * quand deux SB consecutifs donnent le meme ecart (les deux pages ne portent pas
-                 * toujours le sch de CE burst : fn decode faux d'un SB sur trois sinon). */
+                /* TRX UPLINK ALIGNMENT. This SB (GSM fn fn_best) leaves at tick `fn`: the trx
+                 * firmware's clock is therefore known. The BSP of this instance receives the mobile's
+                 * bursts tagged with their GSM fn (the mobile's a_a5fn) and must play them at the
+                 * frame where the firmware expects them (calypso_bsp_trx_calage, CALYPSO_BSP_TRX=1).
+                 * Only applied when two consecutive SBs give the same gap (the two pages do not
+                 * always carry the sch of THIS burst). */
                 static int32_t ecart_prec = INT32_MIN; static unsigned n_cal;
                 int32_t ecart = (int32_t)(fn_best - fn);
                 if (ecart == ecart_prec) {
@@ -967,9 +962,9 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     int src = 0;
     uint32_t fn_gsm = tx_tsp_fn(fn, &src);
     uint8_t octet_src = (uint8_t)src;
-    /* [2026-10-15] bit 7 : burst NB chiffre par la ROM -- le coprocesseur A5 a
-     * calcule un flux A5/1-2 pour ce fn (a une trame pres : recalage SACCH,
-     * calypso_a5.c). Lu par le pont pour le compteur « A5 ul rom= ». */
+    /* bit 7: NB burst ciphered by the ROM -- the A5 coprocessor computed an
+     * A5/1-2 stream for this fn (to within one frame: SACCH realignment,
+     * calypso_a5.c). Read by the bridge for the "A5 ul rom=" counter. */
     {
         uint32_t fa;
         if (b.type == TSP_TX_NB && calypso_a5_dernier(&fa)) {
@@ -977,8 +972,8 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
             if (d <= 1 || d >= (int32_t)GSM_HYPERFRAME - 1) octet_src |= 0x80;
         }
     }
-    /* [2026-10-20] bits 4-6 : l'intervalle sur lequel le firmware emet (TCH TS1..7 ; 0 = TS0) : l'air
-     * porte le burst a cet intervalle du TRX */
+    /* bits 4-6: the timeslot the firmware transmits on (TCH TS1..7; 0 = TS0): the air
+     * carries the burst at this TRX timeslot */
     octet_src |= (uint8_t)((montant_tn_dedie() & 7) << 4);
     if (!ring_publier(b.type, b.bits, b.tsc, b.offset, octet_src, fn_gsm)) { actif = 0; return; }
     uint32_t w_compte = g_ring_w;
@@ -993,18 +988,18 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
         printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, SB %u, DUMMY %u, FB %u, inconnus %u\n", n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu, n_rach, n_nb, n_sb, n_dummy, n_fb, n_inconnu);
 }
 
-/* [2026-10-21 19:00] RACH VERS L'AIR (CALYPSO_RACH_VERS_AIR=1, Magnetite). La capture au script TSP de la
- * ROM (0x3cbb/0x3ccd, chemin du firmware osmocom) ne voit pas le burst d'acces du firmware TI : montant.c
- * detectait bien les RACH (d_task_ra, ra/bsic) mais ils n'allaient qu'a /dev/shm/calypso_rach, que l'air
- * ne lit pas -> B->A 0, pas de CHAN RQD, « Network forbidden ». On code le burst d'acces (05.03,
- * gsm0503_rach_ext_encode) et on le publie dans calypso_tx_rom, date de la trame BTS du calage. */
-/* [2026-10-21 19:40] a_pm JAMAIS NUL (CALYPSO_BSP_BRUIT_FOND=1, Magnetite). La L1 TI lit pm = a_pm >> 5
- * (l1ddsp_meas_read) et compte chaque pm nul comme une panne (l1_check_pm_error : 100 -> recovery, DSP
- * relance). Le modele de puissance du banc (calypso_bsp_rssi_apm) ne passe que sur les ecritures du DSP ;
- * un a_pm laisse a 0 par la ROM partait tel quel. Avant de rendre la trame a l'ARM, chaque mot a_pm nul
- * des deux pages R recoit le modele (plancher 64). */
-/* [2026-10-22 00:20] sonde [apmT] (voir calypso_apm_trace_on) : pages R au TICK (ce que le DSP a laisse
- * apres la trame precedente et ce que la L1 a remis a zero), puis au DONE avant/apres le modele. */
+/* RACH TO THE AIR (CALYPSO_RACH_VERS_AIR=1, Magnetite). The capture at the ROM's TSP script
+ * (0x3cbb/0x3ccd, the osmocom firmware path) does not see the TI firmware's access burst: montant.c
+ * detects the RACHs (d_task_ra, ra/bsic) but they only go to /dev/shm/calypso_rach, which the air
+ * does not read. The access burst is coded here (05.03, gsm0503_rach_ext_encode) and published in
+ * calypso_tx_rom, dated with the BTS frame of the alignment. */
+/* a_pm NEVER ZERO (CALYPSO_BSP_BRUIT_FOND=1, Magnetite). The TI L1 reads pm = a_pm >> 5
+ * (l1ddsp_meas_read) and counts every zero pm as a failure (l1_check_pm_error: 100 -> recovery, DSP
+ * restarted). The bench power model (calypso_bsp_rssi_apm) only runs on DSP writes; an a_pm left
+ * at 0 by the ROM would go out as is. Before handing the frame back to the ARM, every zero a_pm
+ * word of both R pages receives the model (floor 64). */
+/* probe [apmT] (see calypso_apm_trace_on): R pages at the TICK (what the DSP left after the
+ * previous frame and what the L1 zeroed), then at the DONE before/after the model. */
 static uint16_t g_apm_tick_r[2][4];
 static void apm_trace_tick(const uint16_t *api_ram, uint32_t tick, uint32_t b)
 {
@@ -1035,16 +1030,16 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
         uint16_t *a = &api_ram[(API_R_PAGE(pg) + RP_A_PM) / 2];
         uint16_t avant[3] = { a[0], a[1], a[2] };
         int depile[3] = { -2, -2, -2 };
-        /* [2026-10-21] une mesure par fenetre, dans l'ordre des fenetres livrees (file, voir calypso_bsp.c) */
-        /* [2026-10-22 00:20] les mots 12..14 sont ecrits par le DSP et servis dans l'ordre par c54x_mem.c
-         * (calypso_bsp_rssi_apm_suivante) ; un zero ici est une page remise a zero par la L1 : plancher sans
-         * consommer la file (jamais 0 : l1_check_pm_error). */
+        /* one measurement per window, in the order of the delivered windows (queue, see calypso_bsp.c) */
+        /* words 12..14 are written by the DSP and served in order by c54x_mem.c
+         * (calypso_bsp_rssi_apm_suivante); a zero here is a page zeroed by the L1: floor without
+         * consuming the queue (never 0: l1_check_pm_error). */
         for (int k = 0; k < 3; k++)
             if ((a[k] >> 5) == 0) a[k] = calypso_bsp_rssi_apm();
-        /* [2026-10-21 23:58] SONDE [apm-fort] : PM remplacees avec le MAV d'un VRAI burst (veille, ARFCN 1),
-         * ou trame ou une fenetre en a recu un. 200 lignes. */
-        /* bilan toutes les 255 trames (periode de paging du banc) : PM remplacees avec un burst, du bruit,
-         * ou sans fenetre en file -- c'est la veille qui compte, la sonde detaillee s'epuise au balayage */
+        /* PROBE [apm-fort]: PMs replaced with the MAV of a REAL burst (idle, ARFCN 1), or a frame
+         * where a window received one. 200 lines. */
+        /* summary every 255 frames (paging period of the bench): PMs replaced with a burst, with noise,
+         * or with no window queued -- idle is what matters, the detailed probe runs out during the scan */
         {
             static unsigned long b_burst, b_bruit, b_vide, b_t0; static uint32_t b_tick;
             for (int k = 0; k < 3; k++) {
@@ -1066,20 +1061,20 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
                    pg, r[4], r[0], avant[0], a[0], avant[1], a[1], avant[2], a[2], depile[0], depile[1], depile[2], t);
         }
     }
-    /* [2026-10-21 20:00] MESURE PLEINE LISTE (RXL_R 548) : la L1 TI (DSP 36) programme d_task_md = 0x200 + n
-     * (n <= 8 mesures, l1_sync.c) et lit les n PM dans les mots 12..12+n-1 de la page R (l1ddsp_meas_read,
-     * nbmeas = 8 vu au gdb) : au-dela des 3 mots a_pm, ce sont les mots de a_sch. Le modele de puissance du
-     * banc ne couvrait que les mots 12..14 : 15..19 restaient a 0 (vu au moniteur, d_task_md 0x0208), 5 PM
-     * nuls sur 8 a chaque trame du balayage -> recovery. La page R reprend d_task_md (mot 4) : on s'en sert. */
-    /* [2026-10-21 21:50] MODE DEDIE : les taches SDCCH/SACCH (ADL 22, DDL 24 cote L1 TI) lisent la puissance dans
-     * a_serv_demod[D_PM], mot 9 de la page R pour le DSP 36 (l1_defty.h : a_serv_demod 8..11). Le DSP emule l'y
-     * laissait a 0 apres l'IMM ASS : « > PM 1778 22 », « > PM 1808 24 » a chaque trame, ABORT, retour en veille.
-     * Meme plancher que a_pm, des qu'une tache descendante (d_task_d, mot 0) est rapportee. */
+    /* FULL-LIST MEASUREMENT (RXL_R 548): the TI L1 (DSP 36) programs d_task_md = 0x200 + n
+     * (n <= 8 measurements, l1_sync.c) and reads the n PMs in words 12..12+n-1 of the R page
+     * (l1ddsp_meas_read, nbmeas = 8): beyond the 3 a_pm words, these are the a_sch words. The power
+     * model therefore has to cover words 12..12+n-1, not just 12..14, otherwise 5 zero PMs out of 8
+     * on every scan frame trigger a recovery. The R page echoes d_task_md (word 4): that is used. */
+    /* DEDICATED MODE: the SDCCH/SACCH tasks (ADL 22, DDL 24 on the TI L1 side) read the power in
+     * a_serv_demod[D_PM], word 9 of the R page for DSP 36 (l1_defty.h: a_serv_demod 8..11). Left at 0
+     * by the emulated DSP after the IMM ASS, it gives "> PM 1778 22", "> PM 1808 24" on every frame,
+     * ABORT, back to idle. Same floor as a_pm, as soon as a downlink task (d_task_d, word 0) is reported. */
     for (int pg = 0; pg < 2; pg++) {
         uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
-        /* [2026-10-22 00:58] + les taches de synchro (d_task_md : SB2, SBCONF...) : la L1 TI lit aussi leur PM dans
-         * a_serv_demod[D_PM] (l1_cmplx.c, l1s_read_mon_result) ; mot 9 laisse a 0 -> 4 « > PM » (tache 8) a chaque
-         * relecture SB de la cellule en veille, compteur cumule -> RECOVERY au bout de quelques minutes. */
+        /* + the sync tasks (d_task_md: SB2, SBCONF...): the TI L1 also reads their PM in
+         * a_serv_demod[D_PM] (l1_cmplx.c, l1s_read_mon_result); word 9 left at 0 -> 4 "> PM" (task 8) at
+         * every SB re-read of the idle cell, cumulative counter -> RECOVERY after a few minutes. */
         if (((r[0] & 0x7fff) || (r[4] & 0xff)) && (r[9] >> 5) == 0) r[9] = calypso_bsp_rssi_apm();
     }
     for (int pg = 0; pg < 2; pg++) {
@@ -1089,10 +1084,10 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
         int n = md & 0xff; if (n > 8) n = 8;
         uint16_t avant[8];
         for (int k = 0; k < n; k++) avant[k] = r[12 + k];
-        for (int k = 3; k < n; k++)      /* 15..19 : pas ecrits par le DSP sur ce chemin, suite de la file */
+        for (int k = 3; k < n; k++)      /* 15..19: not written by the DSP on this path, rest of the queue */
             if ((r[12 + k] >> 5) == 0) r[12 + k] = calypso_bsp_rssi_apm_suivante(NULL);
-        /* [2026-10-21 23:55] SONDE [apm] : en veille (Magnetite) la mesure BA de l'ARFCN 1 tombe au plancher
-         * meme avec un MAV par fenetre. PM rendues par le DSP (avant) et apres le modele, MAV des fenetres. */
+        /* PROBE [apm]: in idle (Magnetite) the BA measurement of ARFCN 1 can fall to the floor even
+         * with one MAV per window. PMs returned by the DSP (before) and after the model, MAV of the windows. */
         static unsigned long n_apm;
         if (++n_apm <= 60 || n_apm % 200 == 0) {
             char t[256]; calypso_bsp_pm_mav_texte(t, sizeof t);
@@ -1118,11 +1113,11 @@ static void apm_trace_done(const uint16_t *api_ram, uint16_t avant[2][4])
     printf("\n");
 }
 
-/* [2026-10-22 14:25] LE RACH DATE PAR SON EMISSION. Run de 14:21 : RA_C = tick ou la ROM EMET le burst (script TSP,
- * [rom-tx] 1304/1549/1761) + l'offset de livraison (762) : 2066/2311/2523, exact les trois fois. Le tick ou la tache
- * est POSEE (montant.c) precede l'emission de 0 ou 1 trame selon l'acces : c'etait toute la gigue (RACH datés fn-1,
- * IMM ASS ignorees, SDCCH en Timeout a la BSC). Le burst attend donc l'emission de la ROM (tx_tsp_publier) ; sans
- * emission sous 3 ticks, il part au tick de pose + 1. CALYPSO_RACH_EMISSION=0 : ancienne voie. */
+/* THE RACH DATED BY ITS TRANSMISSION. RA_C = tick where the ROM TRANSMITS the burst (TSP script) + the
+ * delivery offset. The tick where the task is POSTED (montant.c) precedes the transmission by 0 or 1
+ * frame depending on the access: that is the whole jitter. The burst therefore waits for the ROM's
+ * transmission (tx_tsp_publier); without a transmission within 3 ticks, it leaves at the posting
+ * tick + 1. CALYPSO_RACH_EMISSION=0: date by the posting tick. */
 static int rach_emission_on(void)
 {
     static int on = -1;
@@ -1135,7 +1130,7 @@ static void rach_pend_publier(uint32_t tick_emis, const char *quoi)
     g_rach_pend.actif = false;
     uint32_t f; int src = 3;
     if (!calypso_bsp_fn_bts_du_tick(tick_emis, &f)) { f = tx_tsp_fn(tick_emis, &src); }
-    rach_corr(g_rach_pend.tick);   /* file des RACH (lecture RA_C) */
+    rach_corr(g_rach_pend.tick);   /* RACH queue (RA_C reading) */
     if (!ring_publier(TSP_TX_RACH, g_rach_pend.bits, -1, 8, (uint8_t)src, f)) return;
     static unsigned n;
     if (++n <= 40 || n % 100 == 0)
@@ -1152,10 +1147,9 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
     static int actif = -1;
     if (actif < 0) { const char *e = calypso_getenv("CALYPSO_RACH_VERS_AIR"); actif = (e && *e == '1'); }
     if (!actif) return;
-    /* [2026-10-21 20:55] le BURST D'ACCES ENTIER (05.02 5.2.7), comme le chemin ROM (tsp_tx.c, offset 8) :
-     * 8 bits de queue etendue, 41 de synchro, les 36 codes, 3 de queue. gsm0503_rach_ext_encode ne rend que
-     * les 36 bits codes : publies seuls en tete, le TRX n'avait aucune synchro a correler (transceiver :
-     * aucun « TOA : », osmo-bts rach:rcvd 0). */
+    /* the WHOLE ACCESS BURST (05.02 5.2.7), like the ROM path (tsp_tx.c, offset 8): 8 extended tail
+     * bits, 41 of sync, the 36 coded ones, 3 of tail. gsm0503_rach_ext_encode only returns the 36
+     * coded bits: published alone at the head, the TRX would have no sync to correlate. */
     static const char queue[] = "00111010", sync[] = "01001011011111111001100110101010001111000";
     uint8_t code[36], bits[148] = {0};
     if (gsm0503_rach_ext_encode(code, ra, bsic, false) < 0) return;
@@ -1165,7 +1159,7 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
     if (rach_emission_on()) {
         if (g_rach_pend.actif) rach_pend_publier(g_rach_pend.tick + 1, "remplace");
         g_rach_pend.actif = true; g_rach_pend.tick = tick; memcpy(g_rach_pend.bits, bits, 148);
-        if (g_rom_emis_tick == tick) rach_pend_publier(tick, "emission ROM, meme tick");   /* deja emis (14:25, RACH #1) */
+        if (g_rom_emis_tick == tick) rach_pend_publier(tick, "emission ROM, meme tick");   /* already transmitted */
         return;
     }
     int src = 0;
@@ -1178,14 +1172,14 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
                ra, bsic, tick, fn_gsm, src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : src == 3 ? "calage BSP" : src == 4 ? "fn du mobile (SB)" : "TICK NU", n);
 }
 
-/* [2026-10-20] MODE TRX : PUBLICATION DEPUIS LA PAGE DE L'EXTCODE. Le firmware trx remplit tx[p] (cmd,
- * pointeur de donnees) pour chaque slot p de sa fenetre TX (prim_bts.c patche : slot p = TS (tx_start + p)),
- * et l'extcode du DSP les module ; la ROM emulee ne joue qu'un burst par trame (le script TSP) et le
- * codeur SCH de l'extcode est faux sur ce coeur. On n'a pas besoin de la ROM : les bits se deduisent de
- * la page (FB = 148 zeros, dummy = 05.02 5.2.6, SB = gsm0503_sch_encode(sch[0..1]), NB = 8 mots de
- * donnees + TSC du NDB). Appele a la phase A du tick T+1 avec la page que le DSP a traitee au tick T
- * (index d_dsp_page) : les bursts publies portent fn = T. Le SB cale le BSP montant (calypso_bsp_trx_calage).
- * CALYPSO_TRX_TX_SLOTS (1) : nombre de slots publies ; CALYPSO_TRX_TX_START (0) : TS du slot 0. */
+/* TRX MODE: PUBLICATION FROM THE EXTCODE PAGE. The trx firmware fills tx[p] (cmd, data pointer) for
+ * each slot p of its TX window (patched prim_bts.c: slot p = TS (tx_start + p)), and the DSP extcode
+ * modulates them; the emulated ROM only plays one burst per frame (the TSP script) and the extcode's
+ * SCH coder is wrong on this core. The ROM is not needed: the bits follow from the page (FB = 148
+ * zeros, dummy = 05.02 5.2.6, SB = gsm0503_sch_encode(sch[0..1]), NB = 8 data words + TSC of the NDB).
+ * Called at phase A of tick T+1 with the page the DSP processed at tick T (index d_dsp_page): the
+ * published bursts carry fn = T. The SB aligns the uplink BSP (calypso_bsp_trx_calage).
+ * CALYPSO_TRX_TX_SLOTS (1): number of slots published; CALYPSO_TRX_TX_START (0): TS of slot 0. */
 static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
 {
     static int nslots = -1, tx_start = 0; static unsigned n_pub, n_cal; static int32_t ecart_prec = INT32_MIN;
@@ -1202,7 +1196,7 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
         printf("  [rom-tx] publication depuis la page de l'extcode : %d slot(s) TX a partir du TS%d\n", nslots, tx_start);
     }
     const uint16_t *db = &dsp->data[w_page ? 0x2200 : 0x2000];
-    uint32_t fn_tag = tick - 1;                       /* la trame DSP ou ces bursts sont partis */
+    uint32_t fn_tag = tick - 1;                       /* the DSP frame where these bursts left */
     int tsc = dsp->data[0x2401] & 7;
     for (int p = 0; p < nslots; p++) {
         unsigned cmd = db[2 * p], ptr = db[2 * p + 1];
@@ -1219,19 +1213,19 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
             for (int k = 0; k < 39; k++) { bits[3 + k] = code[k]; bits[106 + k] = code[39 + k]; }
             for (int k = 0; k < 64; k++) bits[42 + k] = (uint8_t)(SYNC_SB[k] - '0');
             type = TSP_TX_SB;
-            /* calage du montant : ce SB (fn GSM) est parti au tick fn_tag ; applique quand deux SB d'affilee concordent */
+            /* uplink alignment: this SB (GSM fn) left at tick fn_tag; applied when two SBs in a row agree */
             uint32_t t1 = ((sch >> 23) & 1) | ((sch >> 7) & 0x1fe) | ((sch & 3) << 9);
             uint32_t t2 = (sch >> 18) & 0x1f, t3 = (((sch >> 24) & 1) | (((sch >> 16) & 3) << 1)) * 10 + 1;
             uint32_t fnsb = 51 * 26 * t1 + 51 * ((t3 + 26 - t2) % 26) + t3;
             int32_t ecart = (int32_t)(fnsb - fn_tag);
-            /* le calage garde la relation mesuree au script TSP (fn du SB = tick d'emission - 1) : on passe
-             * le tick de la phase A (T + 1), pas fn_tag, pour que CALYPSO_BSP_TRX_DELTA garde son sens */
+            /* the alignment keeps the relation measured at the TSP script (fn of the SB = transmit tick - 1):
+             * the phase A tick (T + 1) is passed, not fn_tag, so that CALYPSO_BSP_TRX_DELTA keeps its meaning */
             if (ecart == ecart_prec && calypso_bsp_trx_calage(fnsb, tick) && (++n_cal <= 3 || n_cal % 500 == 0))
                 printf("  [rom-tx] calage TRX (page) : SB fn=%u emis au tick %u (fn - tick = %d) -> BSP montant cale (%u)\n", fnsb, fn_tag, ecart, n_cal);
             ecart_prec = ecart;
             break; }
         case 3: for (int k = 0; k < 148; k++) bits[k] = (uint8_t)(DUMMY_148[k] - '0'); type = TSP_TX_DUMMY; break;
-        case 5: {                                                                  /* NB : 116 bits + TSC */
+        case 5: {                                                                  /* NB: 116 bits + TSC */
             if (ptr + 8 > 0x200) continue;
             const uint16_t *w = &db[ptr];
             uint8_t pb[15];
@@ -1242,7 +1236,7 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
             for (int k = 0; k < 26; k++) bits[61 + k] = (uint8_t)(TSC8[tsc][k] - '0');
             type = TSP_TX_NB; tscp = tsc;
             break; }
-        default: continue;                                                         /* 0 (rien) ou AB */
+        default: continue;                                                         /* 0 (nothing) or AB */
         }
         uint8_t src = (uint8_t)(((tx_start + p) & 7) << 4);
         ring_publier(type, bits, tscp, offset, src, fn_tag);
@@ -1274,9 +1268,9 @@ static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
     if (b == 0) { masque = 0; memcpy(l2, g_romul_l2_pose, 23); fn0 = fn; }
     uint8_t *o = &bits[b * 116], *x = &flux[b * 116];
     for (int i = 0; i < 116; i++) {
-        /* 57 donnees, hl, hu, 57 donnees. Les 114 bits de donnees occupent les mots 0..7 MSB d'abord
-         * (bits 0..113) ; hl/hu sont les 2 bits BAS du mot 7 (releve : 0x3f91 = 0x?003 sur SDCCH, ou
-         * hl = hu = 1), soit k = 126 et 127 -- pas 114/115 (bits 13/12, toujours 0 : revue 2026-10-03). */
+        /* 57 data, hl, hu, 57 data. The 114 data bits occupy words 0..7 MSB first (bits 0..113);
+         * hl/hu are the 2 LOW bits of word 7 (0x3f91 = 0x?003 on SDCCH, where hl = hu = 1), i.e.
+         * k = 126 and 127 -- not 114/115 (bits 13/12, always 0). */
         int k = i < 57 ? i : (i < 59 ? 126 + (i - 57) : i - 2);
         o[i] = (dsp->data[ROM_UL_BURST + k / 16] >> (15 - k % 16)) & 1;
         x[i] = (dsp->data[ROM_UL_FLUX + k / 16] >> (15 - k % 16)) & 1;
@@ -1368,7 +1362,7 @@ static void profil_publier(void)
  * starved, TOA = 1251 for an FCCH four frames away. The replay bench delivers
  * after a short slice of the frame, once the ISR has armed; the bridge now does
  * the same: budget/8, inject (synthetic cell and UDP bursts), then the rest. */
-static bool g_tick_irq_trame = true;   /* TICK.b bit 16 : l'ARM a arme l'interruption trame du DSP */
+static bool g_tick_irq_trame = true;   /* TICK.b bit 16: the ARM armed the DSP frame interrupt */
 static struct { bool actif; const char *iq_mode; int amp; uint32_t fn; unsigned long *injectes; bool udp; char dernier_type; int dernier_n_iq; } g_inj;
 static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_t fn, unsigned long *injectes);
 
@@ -1382,13 +1376,13 @@ static uint16_t g_daram_apres_dma[384]; static uint16_t g_daram_aad;
 /* phase : 0 = whole frame ; 1 = frame ISR only, up to the arming of the RX
  * window (then DONE|PHASE_A and wait for PONT_GO) ; 2 = burst delivery and
  * the rest of the frame. See CALYPSO_PONT_TICK_DEUX_PHASES. */
-/* [2026-09-23] ENREGISTREUR DU TCH (cote ARM). Les ecritures de l ARM dans
- * l API RAM, par difference avec l instantane pris quand le DSP a rendu la
- * main : 'A', tick BE32, fenetre (0 = avant le TICK, 1 = entre phase A et GO),
- * nombre BE16, puis (mot BE16, valeur BE16). Et a chaque TICK : 'T', tick BE32,
- * drapeaux (bit0 irq trame, bit1 deux phases), budget BE32. Meme fichier que
- * les livraisons d I/Q du BSP (calypso_bsp_enreg_fichier), meme garde : TCH
- * actif, CALYPSO_REJEU_ENREG=0 coupe. Rejoue par tools/rejeu_banc.c. */
+/* TCH RECORDER (ARM side). The ARM writes into the API RAM, by difference
+ * with the snapshot taken when the DSP handed over: 'A', tick BE32, window
+ * (0 = before the TICK, 1 = between phase A and GO), count BE16, then
+ * (word BE16, value BE16). And at every TICK: 'T', tick BE32, flags (bit0
+ * frame irq, bit1 two phases), budget BE32. Same file as the BSP's I/Q
+ * deliveries (calypso_bsp_enreg_fichier), same guard: TCH active,
+ * CALYPSO_REJEU_ENREG=0 turns it off. Replayed by tools/rejeu_banc.c. */
 static uint16_t g_enreg_api[CALYPSO_API_WORDS];
 static bool g_enreg_api_ok;
 static void enreg_api_prendre(const uint16_t *api_ram)
@@ -1412,8 +1406,8 @@ static void enreg_api_diff(const uint16_t *api_ram, uint32_t tick, int fenetre)
     fwrite(buf, 1, 8 + 4 * n, f);
     fflush(f);
 }
-/* Etat de depart, une fois, au premier TICK enregistre (DSP rendu, au repos) :
- * 'S' API RAM complete, 'D' registres puis memoire de donnees du C54x. */
+/* Starting state, once, at the first recorded TICK (DSP handed over, at rest):
+ * 'S' whole API RAM, 'D' registers then data memory of the C54x. */
 typedef struct {
     int64_t a, b; uint16_t ar[8], t, trn, sp, bk, brc, rsa, rea, st0, st1, pmst, imr, ifr, xpc;
     uint32_t pc; uint8_t idle, running;
@@ -1432,9 +1426,9 @@ static void enreg_base(FILE *f, const C54xState *dsp, const uint16_t *api_ram, u
     fwrite(h, 1, 5, f);
     fwrite(&r, sizeof r, 1, f);
     fwrite(dsp->data, sizeof(uint16_t), C54X_DATA_SIZE, f);
-    /* [2026-10-22 14:45] 'P' : la memoire PROGRAMME basse 0x0000-0x7FFF. La ROM y ecrit du code a l'execution
-     * (prog_write : 0x2800-0x7FFF ne va que dans prog[]) ; sans lui le rejeu appelait 0x2EC5 vide a la 1re
-     * tache TCH (« trou-prog ... depuis pc=0xbc43 »), pile perdue, DSP mort : aucun TCH rejouable. */
+    /* 'P': the low PROGRAM memory 0x0000-0x7FFF. The ROM writes code there at run time
+     * (prog_write: 0x2800-0x7FFF only goes into prog[]); without it the replay would call an empty
+     * 0x2EC5 at the 1st TCH task, losing the stack. */
     h[0] = 'P';
     fwrite(h, 1, 5, f);
     fwrite(dsp->prog, sizeof(uint16_t), 0x8000, f);
@@ -1450,33 +1444,33 @@ static void enreg_tick(const C54xState *dsp, const uint16_t *api_ram, uint32_t t
     fwrite(h, 1, sizeof h, f);
 }
 
-/* [2026-09-23] LE DSP ET L'ARM EN PARALLELE (PONT_DONE_TOT, 1 par defaut).
- * En pas-a-pas, une trame coutait la SOMME de QEMU (l'ARM) et du C54x : sur un
- * TCH le DSP monte a ~4 ms par trame (demodulation, Viterbi, parole), QEMU en
- * prend ~2, et le banc tombait a 174 trames/s au lieu de 216,7 -- la parole
- * arrivait a 40 trames/s pour un ALSA a 50 : echo test qui « part en live ».
- * Sur silicium l'ARM et le DSP tournent en meme temps et l'ARM ne relit les
- * resultats qu'a la trame suivante. On renvoie donc PONT_DONE des le burst
- * depose, et on finit la trame (reste du budget, pompe DMA, montant, sondes)
- * pendant que QEMU avance ; le TICK suivant attend dans la socket. Une trame
- * coute alors le plus long des deux, pas leur somme. Seul effet de bord :
- * PONT_DONE_API_IRQ n'est plus connu au moment du DONE (jamais leve sur ce
- * banc : irq=0 dans tous les bilans). PONT_DONE_TOT=0 retablit l'ancien ordre. */
+/* THE DSP AND THE ARM IN PARALLEL (PONT_DONE_TOT, 1 by default).
+ * In lockstep a frame would cost the SUM of QEMU (the ARM) and the C54x: on a
+ * TCH the DSP reaches ~4 ms per frame (demodulation, Viterbi, speech), QEMU
+ * takes ~2, and the bench would fall below the 216.7 frames/s the speech path
+ * needs. On silicon the ARM and the DSP run at the same time and the ARM only
+ * reads the results back at the next frame. PONT_DONE is therefore returned
+ * as soon as the burst is deposited, and the frame is finished (rest of the
+ * budget, DMA pump, uplink, probes) while QEMU advances; the next TICK waits
+ * in the socket. A frame then costs the longer of the two, not their sum.
+ * Only side effect: PONT_DONE_API_IRQ is not known at the time of the DONE
+ * (never raised on this bench: irq=0 in every summary). PONT_DONE_TOT=0
+ * finishes the frame before the DONE. */
 static int g_done_tot = -1;
 static int g_reste_b;
 
-/* [2026-09-23] CHRONO PAR TRAME : ou passe une trame du banc, en ms moyennes,
- * imprime toutes les 1000 trames (« [chrono] »). qemu = attente du TICK apres
- * le DONE (l'ARM), A = phase A DSP, go = attente du GO (l1_sync de l'ARM),
- * B = phase B jusqu'au DONE, apres = fin de trame DSP apres le DONE. */
+/* PER-FRAME TIMER: where a bench frame goes, in average ms, printed every
+ * 1000 frames ("[chrono]"). qemu = wait for the TICK after the DONE (the ARM),
+ * A = DSP phase A, go = wait for the GO (the ARM's l1_sync), B = phase B up
+ * to the DONE, apres = end of the DSP frame after the DONE. */
 #include <time.h>
 static double chrono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
-/* [2026-10-15] + PIRE TRAME : la moyenne ne peut pas depasser 4.62 (la trame est
- * cadencee par le TICK de QEMU, l'attente comble le reste) ; seuls le max et le
- * nombre de trames hors budget disent si la marge tient. dt = fin de trame a fin de
- * trame ; trop = dt > 5.54 ms (+20 % : la trame est cadencee sur 4.615, la moitie des
- * trames la depassent par simple gigue) ; dsp_trop = TICK -> fin de trame > 4.615 ms
- * (le DSP seul ne tient pas une trame). */
+/* + WORST FRAME: the average cannot exceed 4.62 (the frame is paced by the
+ * QEMU TICK, the wait fills the rest); only the max and the number of frames
+ * over budget say whether the margin holds. dt = end of frame to end of
+ * frame; trop = dt > 5.54 ms (+20 %: the frame is paced at 4.615, half the
+ * frames exceed it by plain jitter); dsp_trop = TICK -> end of frame > 4.615 ms
+ * (the DSP alone does not keep up with a frame). */
 static struct { double t_fin, qemu, a, go, b, apres, dt_max, travail_max; unsigned n, trop, dsp_trop; } g_chrono;
 static void chrono_trame(double t_tick, double t_done_a, double t_go, double t_done, double t_fin, uint32_t fn)
 {
@@ -1549,7 +1543,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
         static int irq_chaque = -1;
         if (irq_chaque < 0) { const char *e = calypso_getenv("PONT_IRQ_TRAME"); irq_chaque = (e && *e == '1') ? 1 : 0; }
         if ((dsp->imr & (1u << C54X_IT_TPU_FRAME_BIT)) && (irq_chaque || g_tick_irq_trame)) {
-            tx_tsp_dater(dsp, g_c54x_exe_fn);     /* le fn GSM de la page que la ROM va lire */
+            tx_tsp_dater(dsp, g_c54x_exe_fn);     /* the GSM fn of the page the ROM is about to read */
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         }
         if (calypso_getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
@@ -1567,26 +1561,24 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
              * missing (b0 absent in 23 of 97 BCCH blocks), read by the firmware
              * as EMPTY / BURST ID n!=m. Keep running, in slices, until DMA2 is
              * armed or the DSP idles, half the budget at most. */
-            /* [2026-09-23] SUR LE TCH, ALLER JUSQU'A L'IDLE AVANT LE DEPOT.
-             * Pour une tache TCHA (SACCH/TF), la ROM arme la fenetre de la trame
-             * N+1 PUIS demodule, au debut de N+1, le burst SACCH de N qu'elle
-             * a laisse dans 0x0cce ; sur silicium le burst de N+1 n'arrive qu'au
-             * passage de TS2, plus tard. Deposer des l'armement l'ecrasait : la
-             * SACCH se decodait sur un burst de trafic (a_cd FIRE KO a chaque
-             * bloc, 113-118 bits faux, LOS au 32e bloc). Reproducteur
-             * tch_rejeu (scratchpad 2026-09-23) : depot apres l'IDLE -> SACCH
-             * FIRE=0 « 07 00 03 », FACCH 10/10 bonnes (contre 6/12). Hors TCH
-             * (FB, SB, SDCCH) on garde l'arret a l'armement.
-             * PONT_TCH_DEPOT_IDLE=0 retablit l'ancien comportement. */
-            int tch_idle = calypso_reglage("PONT_TCH_DEPOT_IDLE", 1);   /* [2026-10-22] a chaud */
+            /* ON THE TCH, RUN TO THE IDLE BEFORE THE DEPOSIT.
+             * For a TCHA task (SACCH/TF), the ROM arms the window of frame N+1
+             * THEN demodulates, at the start of N+1, the SACCH burst of N it
+             * left in 0x0cce; on silicon the burst of N+1 only arrives when
+             * TS2 comes round, later. Depositing as soon as the window is
+             * armed would overwrite it and the SACCH would be decoded on a
+             * traffic burst (a_cd FIRE KO on every block). Outside the TCH
+             * (FB, SB, SDCCH) the stop at the arming is kept.
+             * PONT_TCH_DEPOT_IDLE=0 deposits at the arming on the TCH too. */
+            int tch_idle = calypso_reglage("PONT_TCH_DEPOT_IDLE", 1);   /* read live */
             bool jusqua_idle = tch_idle && montant_sur_tch();
             while (!dsp->idle && (jusqua_idle || !calypso_rhea_dma_rx_armed()) && fait < (int)budget / 2)
                 fait += c54x_run_profile(dsp, 256);
             if (jusqua_idle) {
                 static unsigned n_tch;
-                /* [2026-10-21 23:40] + irq_trame/IMR/IFR/INTM/pc : Magnetite sur TCH TS1, 3 trames puis
-                 * « 0 insn, idle=1 » et L1 TI « > COM » (d_debug=0) : IT trame non levee (QEMU) ou
-                 * bit TPU frame absent de l'IMR (ROM) ? 200 lignes pour couvrir plusieurs appels. */
+                /* + irq_trame/IMR/IFR/INTM/pc: tells a frame IT not raised (QEMU) from a TPU frame
+                 * bit missing from the IMR (ROM) when the DSP sits at "0 insn, idle=1" on a TCH.
+                 * 200 lines to cover several calls. */
                 if (n_tch++ < 200)
                     printf("  [depot_tch] fn=%u phase A : %d insn, idle=%d, fenetre armee=%d irq_trame=%d "
                            "IMR=%04x IFR=%04x INTM=%d pc=%04x%s\n",
@@ -1606,7 +1598,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
             }
 phase_b:
             fait = fait_a;
-            if (dsp->api_ram) montant_capter_fu(dsp->api_ram, g_c54x_exe_fn);   /* avant que la ROM lise a_fu */
+            if (dsp->api_ram) montant_capter_fu(dsp->api_ram, g_c54x_exe_fn);   /* before the ROM reads a_fu */
             /* PONT_NB_DEBUG: flags at the burst's entry, and a snapshot of the
              * data memory to list what the demod writes (regions), see
              * sonde_bits(). */
@@ -1626,7 +1618,7 @@ phase_b:
              * scorecard (isa_test). Single-stepped: prog_fetch() before each. */
             static const char *hist_dir = NULL; static int hist_init = 0; static unsigned hist_n;
             if (!hist_init) { hist_init = 1; hist_dir = calypso_getenv("PONT_NB_HIST"); }
-            /* PONT_NB_HIST_SB=1 : trace the SCH bursts (SB task, d_task_md = 6) instead */
+            /* PONT_NB_HIST_SB=1: trace the SCH bursts (SB task, d_task_md = 6) instead */
             static int hist_sb = -1; if (hist_sb < 0) hist_sb = calypso_getenv("PONT_NB_HIST_SB") ? 1 : 0;
             bool tache_nb = dsp->api_ram && (dsp->api_ram[API_R_PAGE(0) / 2] == 24 || dsp->api_ram[API_R_PAGE(1) / 2] == 24);
             bool tache_sb = dsp->api_ram && ((dsp->api_ram[API_W_PAGE(0) / 2 + 4] & 0xff) == 6 || (dsp->api_ram[API_W_PAGE(1) / 2 + 4] & 0xff) == 6);
@@ -1669,9 +1661,8 @@ phase_b:
                 if (f) { for (unsigned w = 0; w < 65536; w++) if (hist[w]) fprintf(f, "%04x %u\n", w, hist[w]); fclose(f); }
                 hist_n++;
             }
-            /* [2026-09-23] PONT_DONE_TOT : le reste de la trame (phase B) est joue
-             * APRES le PONT_DONE, pendant que QEMU fait tourner l'ARM -- voir
-             * servir(). */
+            /* PONT_DONE_TOT: the rest of the frame (phase B) is played AFTER the
+             * PONT_DONE, while QEMU runs the ARM -- see servir(). */
             if (g_done_tot && phase == 2) g_reste_b = (int)budget - fait;
             else if (!dsp->idle) c54x_run_profile(dsp, (int)budget - fait);
         } else if (!dsp->idle) {
@@ -2004,26 +1995,22 @@ static uint32_t pont_encode_sb(uint8_t bsic, uint16_t t1, uint8_t t2, uint8_t t3
     return sb;
 }
 
-/* [2026-09-21] CADENCEMENT, PAS BEQUILLE.
+/* PACING, NOT A CRUTCH.
  *
- * STREAM et LOCKSTEP figuraient parmi les bequilles ; ils n'y ont pas leur
- * place. Aucun des deux ne falsifie une mesure : ils font cohabiter un DSP
- * emule, qui coute ~6,7 ms par trame, avec une BTS en temps reel dont la trame
- * dure 4,615 ms.
- *   - sans LOCKSTEP, QEMU avance a l'horloge murale et saute les trames que le
- *     DSP n'a pas finies : releve du 2026-09-21, « 2170 sauts, 3440 trames
- *     jouees », soit 39 % de perte ;
- *   - sans STREAM, chaque burst part vers le RIF des son arrivee : 217 bursts
- *     par seconde pour ~89 ticks, la ROM compte ~1526 symboles par trame au
- *     lieu de 1250, son TOA ne se stabilise jamais (2967, 3735, 4215, 48,
- *     13536 sur un meme run) et le pipeline se desaligne (« BURST ID 3!=2 »,
- *     « EMPTY »).
- * La vraie bequille etait ailleurs : le mode cadence ne livrait que TS0 et
- * bourrait les sept autres intervalles a zero. C'est corrige (calypso_bsp.c,
- * bsp_autres_stocker/bsp_autres_bits) : la trame remise au DSP porte
- * maintenant ce que la BTS a reellement emis sur les huit intervalles.
+ * STREAM and LOCKSTEP are not listed among the crutches. Neither falsifies a
+ * measurement: they let an emulated DSP, which costs ~6.7 ms per frame,
+ * coexist with a real-time BTS whose frame lasts 4.615 ms.
+ *   - without LOCKSTEP, QEMU advances on the wall clock and skips the frames
+ *     the DSP has not finished (about 39 % loss);
+ *   - without STREAM, every burst goes to the RIF as soon as it arrives: 217
+ *     bursts per second for ~89 ticks, the ROM counts ~1526 symbols per frame
+ *     instead of 1250, its TOA never settles and the pipeline misaligns
+ *     ("BURST ID 3!=2", "EMPTY").
+ * The paced mode delivers what the BTS actually sent on all eight timeslots
+ * (calypso_bsp.c, bsp_autres_stocker/bsp_autres_bits), not just TS0 with the
+ * other seven padded with zeros.
  *
- * Ils restent affiches, mais sur leur propre ligne. */
+ * They are still displayed, but on their own line. */
 static const char *cadencement_actif(void)
 {
     static char buf[128]; buf[0] = 0;
@@ -2292,10 +2279,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     printf("pont : ARM connecte, API RAM %u mots, %ld insn/trame\n", CALYPSO_API_WORDS, insns);
     fflush(stdout);
 
-    /* [2026-10-21 18:35] PONT_RESET arrive pendant l'attente du PONT_GO (trame en deux phases) : il
-     * etait JETE (« message 1 recu en attente de GO, ignore »). Le firmware TI relance le DSP en cours
-     * de route (fn ~290) et attend alors LEAD_READY sans fin : l'ARM restait dans dsp_power_on+0x34.
-     * Le reset est desormais garde et applique des la fin de la trame. */
+    /* PONT_RESET arriving while waiting for the PONT_GO (two-phase frame): the TI firmware
+     * restarts the DSP mid-way (fn ~290) and then waits for LEAD_READY; the reset is kept and
+     * applied at the end of the frame. */
     unsigned reset_differe = 0;
     uint32_t reset_differe_dl = 0;
     while (!g_stop) {
@@ -2319,25 +2305,25 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
         }
         switch (m.type) {
         case PONT_RESET: {
-            /* [2026-10-21 18:30] LE bootCode TI. Sur le Calypso C035 l'API est aussi l'espace PROGRAMME
-             * 0xE000-0xFFFF du DSP (leadapi.h BASE_API_LEAD 0xE000). Le firmware TI (Magnetite,
-             * LA_InitialLeadBoot, leadboot.c) y pose avant de relacher le reset un chargeur (0xf800), une
-             * init (0xfe00) et le VECTEUR DE RESET (0xff80 : F073 FE00 = b 0xfe00) : chaque reset passe
-             * par ce chargeur, qui affiche LEAD_READY. Ici 0xE000-0xFFFF etait la « PDROM » figee, et
-             * c54x_reset recopie une image ROM dans la fenetre API des donnees : la ROM partait a chaud
-             * (0xb3e7) au 2e reset, sans LEAD_READY, et l'ARM restait dans dsp_power_on+0x34 (attente sans
-             * fin, NO_DWNLD). Signature presente : l'API est gardee telle que l'ARM l'a ecrite (un reset du
-             * DSP ne touche pas la RAM partagee) et le DSP repart dans le chargeur, comme avec le bootCode.
-             * Firmware osmocom (pas de signature) : inchange. */
+            /* THE TI bootCode. On the Calypso C035 the API is also the DSP's PROGRAM space
+             * 0xE000-0xFFFF (leadapi.h BASE_API_LEAD 0xE000). The TI firmware (Magnetite,
+             * LA_InitialLeadBoot, leadboot.c) places there, before releasing the reset, a loader
+             * (0xf800), an init (0xfe00) and the RESET VECTOR (0xff80: F073 FE00 = b 0xfe00): every
+             * reset goes through this loader, which reports LEAD_READY. Here 0xE000-0xFFFF is the
+             * fixed "PDROM", and c54x_reset copies a ROM image into the API window of the data
+             * memory, which would restart the ROM hot (0xb3e7) at the 2nd reset, without LEAD_READY,
+             * leaving the ARM in dsp_power_on+0x34 (NO_DWNLD). Signature present: the API is kept as
+             * the ARM wrote it (a DSP reset does not touch the shared RAM) and the DSP restarts in
+             * the loader, as with the bootCode. osmocom firmware (no signature): unchanged. */
             static uint16_t api_avant[0x2000];
             const bool boot_ti = api_ram[0xff80 - 0xe000] == 0xF073 && api_ram[0xff81 - 0xe000] == 0xFE00;
             if (boot_ti) memcpy(api_avant, api_ram, sizeof api_avant);
             c54x_reset(dsp);
             if (boot_ti) {
-                /* [18:30] Executer le bootCode lui-meme (fenetre programme 0xE000) faisait planter le DSP
-                 * (SP-CORRUPT a PC 0 : modes memoire du C035 non emules). On en garde la FONCTION : DSP
-                 * pose dans le chargeur de la ROM (0xb410 : st #1,*(0xfff) puis attente du 2 et saut),
-                 * avec les registres que la ROM y met (0xb3ff-0xb403). API gardee telle que l'ARM l'a ecrite. */
+                /* Executing the bootCode itself (program window 0xE000) crashes the DSP (SP-CORRUPT
+                 * at PC 0: C035 memory modes not emulated). Its FUNCTION is kept: DSP placed in the
+                 * ROM's loader (0xb410: st #1,*(0xfff) then wait for 2 and jump), with the registers
+                 * the ROM sets there (0xb3ff-0xb403). API kept as the ARM wrote it. */
                 memcpy(api_ram, api_avant, sizeof api_avant);
                 for (int i = 0; i < 0x2000; i++) dsp->data[0x0800 + i] = api_avant[i];
                 dsp->st1 = 0x2900; dsp->st0 = 0x1800; dsp->sp = 0x5AC8;
@@ -2436,9 +2422,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 sonde_pages("A", m.a, dsp, api_ram);
                 enreg_api_prendre(api_ram);
                 ombre_descendante(api_ram, m.a);
-                /* [2026-10-20] mode TRX : les bits exacts du burst montant joue a la trame precedente,
-                 * dans la page de resultat que l'ARM lit apres ce DONE (calypso_bsp.c), et les bursts
-                 * descendants de tous les slots TX de cette page, publies dans l'anneau */
+                /* TRX mode: the exact bits of the uplink burst played at the previous frame, in
+                 * the result page the ARM reads after this DONE (calypso_bsp.c), and the downlink
+                 * bursts of all the TX slots of this page, published in the ring */
                 {
                     int w_page = (api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2] & B_GSM_PAGE) ? 1 : 0;
                     if (trx_page_mode()) tx_page_publier(dsp, m.a, w_page);
@@ -2455,7 +2441,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     ssize_t ng = recv(fd, &g, sizeof(g), 0);
                     if (ng != (ssize_t)sizeof(g)) { printf("pont : ARM deconnecte en attente de GO (%zd)\n", ng); g_stop = 1; break; }
                     if (g.type == PONT_GO) { go = true; t_go = chrono_ms(); }
-                    else if (g.type == PONT_RESET) { reset_differe = 1; reset_differe_dl = g.a; }   /* voir reset_differe */
+                    else if (g.type == PONT_RESET) { reset_differe = 1; reset_differe_dl = g.a; }   /* see reset_differe */
                     else { static unsigned nx; if (nx++ < 3) printf("pont : message %u recu en attente de GO, ignore\n", g.type); }
                 }
                 if (!go) break;
@@ -2495,7 +2481,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 drapeaux = jouer_trame(dsp, insns, &init_done, &n2, 2);
                 ninsn += n2; g_insn_b = n2;
                 if (g_done_tot) {
-                    /* DONE tout de suite : QEMU repart, le DSP finit la trame ici. */
+                    /* DONE right away: QEMU resumes, the DSP finishes the frame here. */
                     ombre_descendante(api_ram, m.a);
                     envoyer(fd, PONT_DONE, drapeaux & ~PONT_DONE_API_IRQ, ninsn);
                     done_envoye = true;
@@ -2548,11 +2534,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * pair is handed over, until the receiver holds less than a pair. A
              * 156.25-symbol frame is 3.25 pages, so this runs 1 or 2 times. */
             for (int k = 0; k < 40 && dsp->running; k++) {   /* 13 page pairs per 1250-symbol frame */
-                /* [2026-09-29] un SCH garde parce que la DMA n'etait pas armee au
-                 * depot est relivre ici, des que la ROM (phase B) l'a armee. */
+                /* an SCH held back because the DMA was not armed at the deposit
+                 * is delivered again here, as soon as the ROM (phase B) has armed it. */
                 int relivre = calypso_bsp_sb_retenter();
-                /* [2026-10-21 22:45] dedie TI : fenetre de mesure servie / NB garde relivre (calypso_bsp.c) ;
-                 * on laisse alors tourner le DSP (fin de DMA -> ISR -> fenetre suivante) dans le meme tick */
+                /* TI dedicated mode: measurement window served / held NB delivered again (calypso_bsp.c);
+                 * the DSP is then left running (end of DMA -> ISR -> next window) within the same tick */
                 relivre |= calypso_bsp_nb_retenter();
                 if (!calypso_rhea_dma_pump(dsp) && !relivre) break;
                 if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
@@ -2561,8 +2547,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 ninsn += dsp->insn_count - av2;
                 drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
             }
-            /* [2026-10-15] PORT VOIX (VSP, calypso_vsp.c, CALYPSO_VSP=1) : les 36 ou 37
-             * echantillons PCM de la trame, chacun par l'ISR 0xc14a de la ROM (IT 20). */
+            /* VOICE PORT (VSP, calypso_vsp.c, CALYPSO_VSP=1): the 36 or 37 PCM samples
+             * of the frame, each through the ROM's ISR 0xc14a (IT 20). */
             if (init_done && dsp->running)
                 ninsn += calypso_vsp_trame(dsp, c54x_run_profile, m.a);
             drapeaux = (drapeaux & ~PONT_DONE_IDLE) | (dsp->idle ? PONT_DONE_IDLE : 0);
@@ -2575,9 +2561,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             {
                 static int nbdbg = -1; static unsigned nbn;
                 if (nbdbg < 0) nbdbg = calypso_getenv("PONT_NB_DEBUG") ? 1 : 0;
-                /* [2026-09-22] Plafond porte de 400 a 20000 : les 400 etaient
-                 * consommees par le campement avant toute connexion dediee,
-                 * et la sonde etait donc muette quand on en avait besoin. */
+                /* Ceiling of 20000 lines: a smaller one would be used up by
+                 * camping before any dedicated connection, leaving the probe
+                 * silent when it is needed. */
                 if (nbdbg && nbn < 20000) {
                     static uint16_t prev[2][4];
                     for (int pg = 0; pg < 2; pg++) {
@@ -2615,15 +2601,15 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 /* SB: the firmware reads a_serv_demod[D_TOA] from the read page
                  * and expects about 4. PONT_CAN_SB_TOA=4 pins it on both R
                  * pages, which frames the SCH correctly. */
-                /* [2026-10-21] PONT_CAN_NB_TOA=<v> (Magnetite : 3) : la L1 TI ne converge pas sur le TOA
-                 * des bursts normaux (l1ctl_toa_update : ISH = (TOA+1)*4 - 16 qbits, le banc ne deplace
-                 * pas le burst quand tpu_offset bouge) ; on le fixe sur les pages R portant une tache NB
-                 * (d_task_d != 0). Le TOA du SB (a_sch, 23) reste natif : la synchro en depend. */
+                /* PONT_CAN_NB_TOA=<v> (Magnetite: 3): the TI L1 does not converge on the TOA of the
+                 * normal bursts (l1ctl_toa_update: ISH = (TOA+1)*4 - 16 qbits, the bench does not
+                 * move the burst when tpu_offset moves); it is pinned on the R pages carrying an NB
+                 * task (d_task_d != 0). The TOA of the SB (a_sch, 23) stays native: sync depends on it. */
                 static int can_nb = -2;
                 if (can_nb == -2) { const char *e = calypso_getenv("PONT_CAN_NB_TOA"); can_nb = (e && *e) ? atoi(e) : -1;
                                     if (can_nb >= 0) printf("  [pont] PONT_CAN_NB_TOA=%d : TOA des NB fixe\n", can_nb); }
-                /* init_done : pendant le boot ces mots de l'API RAM portent le code DSP que l'ARM
-                 * telecharge ; y ecrire cassait le telechargement (« occupe boot », 21/10 17:01). */
+                /* init_done: during the boot these API RAM words carry the DSP code the ARM
+                 * downloads; writing there would break the download. */
                 if (can_nb >= 0 && init_done) {
                     for (int pg = 0; pg < 2; pg++) {
                         uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
@@ -2673,13 +2659,12 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 }
             }
             if (*d_fb_det) calypso_bsp_toa_feedback((int)(int16_t)a_sync[0]);  /* native TOA tracking loop */
-            /* [2026-09-21] LIEN MONTANT. Sous CALYPSO_DSP_EXTERN=1 la couche 1
-             * gr-gsm est desactivee, donc les hooks qui publiaient le montant
-             * (calypso_l1_do_rach_written / _page_written) sont des no-op et le
-             * RACH du mobile ne quittait jamais l'API RAM : pont.py comptait
-             * « UL bursts=0 rach=0 », aucune IMM ASS, aucun LU ACCEPT. On
-             * scrute ici la page W que l'ARM vient de remplir (m.b = d_dsp_page)
-             * et on alimente les memes side-bands /dev/shm qu'en montage grgsm. */
+            /* UPLINK. Under CALYPSO_DSP_EXTERN=1 the gr-gsm layer 1 is disabled,
+             * so the hooks that published the uplink (calypso_l1_do_rach_written /
+             * _page_written) are no-ops and the mobile's RACH would never leave
+             * the API RAM. The W page the ARM has just filled (m.b = d_dsp_page)
+             * is polled here and the same /dev/shm side-bands as in the grgsm
+             * setup are fed. */
             tx_inject_sortie(dsp, m.a);
             tx_ombre_compare(dsp, m.a);
             tx_rom_publier(dsp, m.a);
@@ -2707,10 +2692,10 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache FB postee par l'ARM\n", m.a); ncmd++; }
               { static int ncmd6; if (has6 && prev6 != 1 && ncmd6 < 60) { printf("  [cmd] fn=%u tache SB postee par l'ARM (W0 md=%d W1 md=%d)\n", m.a, md0, md1); ncmd6++; } }
               if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
-              if (has6 && prev6 != 1) calypso_bsp_sb_trace(8);   /* [2026-09-29] et autour de chaque tache SB */
+              if (has6 && prev6 != 1) calypso_bsp_sb_trace(8);   /* and around every SB task */
               prev5 = has5; prev6 = has6; }
             { static int fb_prev = 0; if (*d_fb_det && !fb_prev) { printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs());
-                                                                  calypso_bsp_sb_trace(60); }   /* [2026-09-29] chaque SCH trace jusqu'aux tentatives SB */
+                                                                  calypso_bsp_sb_trace(60); }   /* every SCH traced up to the SB attempts */
               fb_prev = *d_fb_det != 0; }
             /* [2026-09-19] ONE LINE PER SB ATTEMPT. Everything upstream of the SB
              * task is now measured correct — right frame, right window, right
@@ -2776,8 +2761,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             { static uint16_t prev[2][5]; static int first = 1; static unsigned nch;
               for (int pg = 0; pg < 2; pg++) {
                   const uint16_t *a = a_sch_pg[pg];
-                  /* [2026-09-29] plafond 60 -> 600 et TOA de la page R : c'est la
-                   * mesure du cadrage SB (un SCH bien pose lit TOA=23). */
+                  /* ceiling 600 and TOA of the R page: this is the SB framing
+                   * measurement (a well-placed SCH reads TOA=23). */
                   if (!first && nch < 600 &&
                       (a[0] != prev[pg][0] || a[3] != prev[pg][3] || a[4] != prev[pg][4])) {
                       const uint16_t *rp = &api_ram[API_R_PAGE(pg) / 2];
@@ -2840,11 +2825,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             break;
         }
         case PONT_DCCH:
-            /* [2026-09-21] QEMU a lu le canal dedie dans le flux L1CTL du
-             * firmware (calypso_dcch_tap.c) : a = TN, b = genre, c = sous-voie.
-             * Le BSP en a besoin pour savoir quel intervalle de temps livrer :
-             * le pont lui envoie les huit, il n'en joue qu'un par tick, et sans
-             * ca c'est toujours TS0 - donc rien du SDCCH du mobile. */
+            /* QEMU read the dedicated channel in the firmware's L1CTL stream
+             * (calypso_dcch_tap.c): a = TN, b = kind, c = subchannel. The BSP
+             * needs it to know which timeslot to deliver: the bridge sends it
+             * all eight, it only plays one per tick, and without this it is
+             * always TS0 - hence nothing of the mobile's SDCCH. */
             if (m.b == 4)
                 printf("pont : canal dedie arme : TS%u PDCH (GPRS)\n", m.a);
             else

@@ -1,22 +1,23 @@
 #!/bin/sh
-# harvard.sh - shell « Harvard » pour le DSP TMS320C54x du Calypso (sh POSIX, dash suffit).
+# harvard.sh - "Harvard" shell for the Calypso's TMS320C54x DSP (POSIX sh, dash is enough).
 #
-# Le C54x est une machine Harvard : l'espace P (programme, les opcodes) et l'espace D (donnees,
-# registres, API RAM) sont separes. Ce shell garde les deux de front :
-#   - cote P : on tape une instruction (mnemonique assemble par gas tic54x, ou des mots hex),
-#              on desassemble la ROM TI (PROM0 a 0x7000, PDROM a 0xE000, pages 1..3 via XPC) ;
-#   - cote D : un etat (registres + mots de memoire donnees) qu'on lit, qu'on pose, et que
-#              chaque instruction executee fait avancer ; la DROM (0x9000) et la PDROM se lisent.
-# L'execution d'une instruction passe par ./isa_test (le vrai coeur C54x de qosmo, pcb-minimal) :
-# on lui donne l'etat « avant » et les mots, il rend l'etat « apres ». Rien n'est simule ici.
-# Les commandes « run » lancent les outils du banc tels quels (c54x_exe, dsp_tester, isa_test, run.sh).
+# The C54x is a Harvard machine: the P space (program, the opcodes) and the D space (data,
+# registers, API RAM) are separate. This shell keeps both side by side:
+#   - P side: type an instruction (mnemonic assembled by gas tic54x, or hex words),
+#             disassemble the TI ROM (PROM0 at 0x7000, PDROM at 0xE000, pages 1..3 via XPC);
+#   - D side: a state (registers + data memory words) that is read, set, and that every
+#             executed instruction advances; the DROM (0x9000) and the PDROM can be read.
+# Executing an instruction goes through ./isa_test (the real qosmo C54x core, pcb-minimal):
+# it is given the "before" state and the words, it returns the "after" state. Nothing is
+# simulated here. The "run" commands launch the bench tools as they are (c54x_exe,
+# dsp_tester, isa_test, run.sh).
 #
-#   ./harvard.sh                menu interactif
-#   ./harvard.sh repl           invite de commandes directe
-#   ./harvard.sh pas 'LD #0x1234, A'    une commande puis sortie (toutes celles du REPL)
+#   ./harvard.sh                interactive menu
+#   ./harvard.sh repl           direct command prompt
+#   ./harvard.sh pas 'LD #0x1234, A'    one command then exit (any REPL command)
 #   ./harvard.sh aide
-# Variables : HARVARD_DIR (etat, defaut ~/.local/state/harvard-c54x), ROM_DIR (defaut ./rom),
-#             ISA_TEST, OBJDUMP, GAS (chemins des outils).
+# Variables: HARVARD_DIR (state, default ~/.local/state/harvard-c54x), ROM_DIR (default ./rom),
+#            ISA_TEST, OBJDUMP, GAS (tool paths).
 
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,26 +26,26 @@ ROM_DIR=${ROM_DIR:-$HERE/rom}
 ISA_TEST=${ISA_TEST:-$HERE/isa_test}
 OBJDUMP=${OBJDUMP:-$HERE/build-tic54x/binutils/objdump}
 GAS=${GAS:-$HERE/build-tic54x/gas/as-new}
-ETAT=$DIR/etat.txt          # une ligne par element : "REG hex" | "M addr hex" | "P addr hex"
+ETAT=$DIR/etat.txt          # one line per item: "REG hex" | "M addr hex" | "P addr hex"
 JOURNAL=$DIR/journal.txt
-LOG=$DIR/coeur.log          # stderr du coeur (avertissements [c54x] ...)
+LOG=$DIR/coeur.log          # stderr of the core ([c54x] warnings ...)
 REGS="A B T SP PC ST0 ST1 PMST AR0 AR1 AR2 AR3 AR4 AR5 AR6 AR7 BK BRC RSA REA TRN IMR IFR XPC"
-SENT_REG=deadbeef1          # sentinelle 36 bits : jamais egale a un registre -> isa_test affiche « obtenu »
-SENT_MEM=1ffff              # sentinelle 17 bits : jamais egale a un mot de 16 bits
+SENT_REG=deadbeef1          # 36-bit sentinel: never equal to a register -> isa_test prints "obtenu"
+SENT_MEM=1ffff              # 17-bit sentinel: never equal to a 16-bit word
 mkdir -p "$DIR"; : >> "$ETAT"; : >> "$JOURNAL"
 
-# ---------------------------------------------------------------- utilitaires
+# ---------------------------------------------------------------- helpers
 rouge() { if [ -t 1 ]; then printf '\033[31m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
 vert()  { if [ -t 1 ]; then printf '\033[32m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
 gras()  { if [ -t 1 ]; then printf '\033[1m%s\033[0m\n' "$*"; else printf '%s\n' "$*"; fi; }
-hex() { # hex <texte> : accepte 0x1234, 1234, 1:8000 (page:adresse) ; rend l'entier
+hex() { # hex <text>: accepts 0x1234, 1234, 1:8000 (page:address); returns the integer
     case $1 in
         *:*) printf '%d' $(( ( ${1%%:*} << 16 ) | 0x${1#*:} )) ;;
         0x*|0X*) printf '%d' $(( $1 )) ;;
         *) printf '%d' $(( 0x$1 )) ;;
     esac 2>/dev/null
 }
-est_hex_mots() { # vrai si tous les arguments sont des mots hex de 1 a 4 chiffres
+est_hex_mots() { # true if every argument is a hex word of 1 to 4 digits
     for m in "$@"; do case $m in ''|*[!0-9a-fA-F]*|?????*) return 1;; esac; done; return 0
 }
 verifier_outils() {
@@ -53,15 +54,15 @@ verifier_outils() {
     [ -x "$GAS" ]      || rouge "gas tic54x absent ($GAS) : seuls les mots hex sont acceptes"
 }
 
-# ---------------------------------------------------------------- etat (cote D)
+# ---------------------------------------------------------------- state (D side)
 etat_reg() { awk -v r="$1" '$1==r {v=$2} END {print v}' "$ETAT"; }
-etat_fixe() { # etat_fixe <cle...> <val> : remplace ou ajoute la ligne "<cles> <val>"
+etat_fixe() { # etat_fixe <key...> <val>: replaces or adds the line "<keys> <val>"
     cle=$1; shift
     [ $# -gt 1 ] && { cle="$cle $1"; shift; }
     { grep -v "^$cle " "$ETAT"; echo "$cle $1"; } > "$ETAT.new" && mv "$ETAT.new" "$ETAT"
 }
 etat_mem() { awk -v a="$1" '$1=="M" && $2==a {v=$3} END {print v}' "$ETAT"; }
-drapeaux() { # drapeaux <st0> <st1> : noms des bits a 1
+drapeaux() { # drapeaux <st0> <st1>: names of the bits set to 1
     st0=$(( 0x${1:-0} )); st1=$(( 0x${2:-0} )); d=""
     [ $(( st0 >> 12 & 1 )) = 1 ] && d="$d TC";  [ $(( st0 >> 11 & 1 )) = 1 ] && d="$d C"
     [ $(( st0 >> 10 & 1 )) = 1 ] && d="$d OVA"; [ $(( st0 >> 9 & 1 )) = 1 ]  && d="$d OVB"
@@ -96,8 +97,8 @@ cmd_reg() {
     etat_fixe "$r" "$(printf '%x' "$v")"; echo "$r <- $(printf '%x' "$v")"
 }
 
-# ---------------------------------------------------------------- assemblage / desassemblage (cote P)
-asm() { # asm <instruction> -> mots hex sur stdout, 1 si echec
+# ---------------------------------------------------------------- assembly / disassembly (P side)
+asm() { # asm <instruction> -> hex words on stdout, 1 on failure
     if est_hex_mots $1; then printf '%s\n' "$*" | tr A-F a-f; return 0; fi
     [ -x "$GAS" ] || { rouge "pas d'assembleur : donnez les mots hex"; return 1; }
     printf '\t.text\n\t%s\n' "$*" > "$DIR/a.s"
@@ -106,12 +107,12 @@ asm() { # asm <instruction> -> mots hex sur stdout, 1 si echec
     fi
     "$OBJDUMP" -d "$DIR/a.o" | sed -n 's/^ *[0-9a-f]*:[[:space:]]*\([0-9a-f]\{4\}\).*/\1/p' | tr '\n' ' ' | sed 's/ $/\n/'
 }
-dis_mots() { # dis_mots <adresse> <mots hex...> : desassemble des mots
+dis_mots() { # dis_mots <address> <hex words...>: disassembles words
     a=$1; shift; : > "$DIR/d.bin"
     for m in "$@"; do v=$(( 0x$m )); printf "\\$(printf '%03o' $(( v & 255 )))\\$(printf '%03o' $(( v >> 8 )))" >> "$DIR/d.bin"; done
     "$OBJDUMP" -D -b binary -m tms320c54x --adjust-vma="0x${a:-9000}" "$DIR/d.bin" | sed -n 's/^ *\([0-9a-f]*:.*\)/    \1/p'
 }
-rom_fichier() { # rom_fichier <adr lineaire P ou D> <P|D> -> "fichier base_mots"
+rom_fichier() { # rom_fichier <linear P or D addr> <P|D> -> "file base_words"
     a=$1
     if [ "$2" = P ]; then
         page=$(( a >> 16 )); off=$(( a & 0xffff ))
@@ -126,7 +127,7 @@ rom_fichier() { # rom_fichier <adr lineaire P ou D> <P|D> -> "fichier base_mots"
         elif [ $a -ge $(( 0x9000 )) ]; then echo "$ROM_DIR/calypso_dsp.DROM.bin $(( 0x9000 ))"; else return 1; fi
     fi
 }
-cmd_p() { # p <adresse> [n mots] : desassembler la ROM programme
+cmd_p() { # p <address> [n words]: disassemble the program ROM
     [ $# -ge 1 ] || { echo "usage : p <adresse> [n]   (0x7000.., 0xe000.., 1:8000 = page 1)"; return 1; }
     a=$(hex "$1") || { rouge "adresse invalide"; return 1; }; n=${2:-16}
     set -- $(rom_fichier "$a" P) || { rouge "$(printf '%x' "$a") : hors ROM programme (PROM0 7000-dfff, PDROM e000-ffff, pages 1-3 : 8000-ffff)"; return 1; }
@@ -136,7 +137,7 @@ cmd_p() { # p <adresse> [n mots] : desassembler la ROM programme
     "$OBJDUMP" -D -b binary -m tms320c54x --adjust-vma=$vma --start-address=$off --stop-address=$(( off + n )) "$f" \
         | sed -n 's/^ *\([0-9a-f]*:.*\)/    \1/p'
 }
-cmd_drom() { # drom <adresse> [n] : lire la ROM donnees
+cmd_drom() { # drom <address> [n]: read the data ROM
     [ $# -ge 1 ] || { echo "usage : drom <adresse> [n]   (DROM 9000-dfff, PDROM e000-ffff)"; return 1; }
     a=$(hex "$1") || { rouge "adresse invalide"; return 1; }; n=${2:-16}
     set -- $(rom_fichier "$a" D) || { rouge "$(printf '%x' "$a") : hors ROM donnees"; return 1; }
@@ -146,18 +147,18 @@ cmd_drom() { # drom <adresse> [n] : lire la ROM donnees
 cmd_asm() { m=$(asm "$@") || return 1; printf '    mots : %s\n' "$m"; dis_mots "$(etat_reg PC)" $m; }
 cmd_dis() { est_hex_mots "$@" || { echo "usage : dis <mots hex>"; return 1; }; dis_mots "$(etat_reg PC)" "$@"; }
 
-# ---------------------------------------------------------------- execution d'une instruction (P -> D)
-surveiller() { # surveiller <mot1> [mot2] : adresses D a lire a chaque pas (celles qu'une instruction isolee peut toucher)
+# ---------------------------------------------------------------- execution of one instruction (P -> D)
+surveiller() { # surveiller <word1> [word2]: D addresses to read at each step (those a single instruction can touch)
     w1=$(( 0x$1 )); st0=$(etat_reg ST0); sp=$(etat_reg SP)
     {
         for rg in AR0 AR1 AR2 AR3 AR4 AR5 AR6 AR7; do v=$(etat_reg $rg); [ -n "$v" ] || continue
             v=$(( 0x$v )); printf '%04x\n%04x\n%04x\n' $(( (v - 1) & 0xffff )) $v $(( (v + 1) & 0xffff )); done
         [ -n "$sp" ] && { v=$(( 0x$sp )); printf '%04x\n%04x\n%04x\n' $(( (v - 1) & 0xffff )) $v $(( (v + 1) & 0xffff )); }
-        printf '%04x\n' $(( ((0x${st0:-0} & 0x1ff) << 7) | (w1 & 0x7f) ))      # adressage direct DP:dma
-        [ $# -ge 2 ] && printf '%04x\n' $(( 0x$2 & 0xffff ))                     # adresse longue lk
+        printf '%04x\n' $(( ((0x${st0:-0} & 0x1ff) << 7) | (w1 & 0x7f) ))      # direct addressing DP:dma
+        [ $# -ge 2 ] && printf '%04x\n' $(( 0x$2 & 0xffff ))                     # long address lk
     } | sort -u > "$DIR/cand.txt"; awk '$1=="M" {print $2}' "$ETAT" > "$DIR/connu.txt"; grep -v -F -x -f "$DIR/connu.txt" "$DIR/cand.txt" 2>/dev/null || cat "$DIR/cand.txt"
 }
-executer() { # executer <garder 0|1> <titre> <mots hex...> [adresses D a lire...]  ->  $DIR/pas.apres : lignes "NOM valeur"
+executer() { # executer <keep 0|1> <title> <hex words...> [D addresses to read...]  ->  $DIR/pas.apres: lines "NAME value"
     garder=$1; titre=$2; mots=$3; shift 3
     t=$DIR/pas.txt; nm=$(grep -c '^M ' "$ETAT"); place=$(( 28 - nm )); [ $place -lt 0 ] && place=0
     {
@@ -177,7 +178,7 @@ executer() { # executer <garder 0|1> <titre> <mots hex...> [adresses D a lire...
          s/^prog\[\([0-9a-f]*\)\]: attendu [0-9a-f]*, obtenu \([0-9a-f]*\)$/P \1 \2/p;
          s/^\([A-Z][A-Z0-9]*\): attendu [0-9a-f]*, obtenu \([0-9a-f]*\)$/\1 \2/p' > "$DIR/pas.apres"
     if [ "$garder" = 1 ]; then
-        # on garde : les registres, les mots P poses, les mots D deja dans l'etat, et tout mot D devenu non nul
+        # kept: the registers, the P words set, the D words already in the state, and any D word that became non-zero
         { grep '^P ' "$ETAT"
           awk 'FILENAME==ARGV[1] { if ($1=="M") connu[$2]=1; next }
                $1=="P" { next } $1!="M" { print; next } ($2 in connu) || ($3 != "0000" && $2 >= "0060") { print }' "$ETAT" "$DIR/pas.apres"
@@ -185,14 +186,14 @@ executer() { # executer <garder 0|1> <titre> <mots hex...> [adresses D a lire...
         printf '%s  %s  | %s\n' "$(date +%H:%M:%S)" "$mots" "$titre" >> "$JOURNAL"
     fi
 }
-diff_etat() { # diff_etat <avant> <apres> : ce qui a change
+diff_etat() { # diff_etat <before> <after>: what changed
     awk 'FILENAME==ARGV[1] { if ($1=="M"||$1=="P") av[$1" "$2]=$3; else av[$1]=$2; next }
          { if ($1=="M"||$1=="P") { k=$1" "$2; v=$3 } else { k=$1; v=$2 }
            if (!(k in av)) { if (k !~ /^M |^P /) nouveaux=nouveaux" "k"="v; else if (v != "0000") printf "    %-10s %12s -> %s\n", k, "(nouveau)", v }
            else if (av[k] != v) printf "    %-10s %12s -> %s\n", k, av[k], v }
          END { if (nouveaux != "") print "    (premiere lecture :" nouveaux ")" }' "$1" "$2"
 }
-cmd_pas() { # pas <instruction | mots hex>
+cmd_pas() { # pas <instruction | hex words>
     [ $# -ge 1 ] || { echo "usage : pas <instruction>   ex : pas LD #0x1234, A   |   pas f020 1234"; return 1; }
     mots=$(asm "$@") || return 1
     pc=$(etat_reg PC); printf '  P[%s] %s   <- %s\n' "${pc:-9000}" "$mots" "$*"
@@ -201,13 +202,13 @@ cmd_pas() { # pas <instruction | mots hex>
     gras "  changements :"; diff_etat "$DIR/avant.txt" "$ETAT" | grep . || echo "    (aucun registre ni mot pose n'a change)"
     printf '  PC=%s  A=%s  B=%s  T=%s  %s\n' "$(etat_reg PC)" "$(etat_reg A)" "$(etat_reg B)" "$(etat_reg T)" "$(drapeaux "$(etat_reg ST0)" "$(etat_reg ST1)")"
 }
-cmd_essai() { # essai <instruction> : executer sans garder l'etat
+cmd_essai() { # essai <instruction>: execute without keeping the state
     [ $# -ge 1 ] || { echo "usage : essai <instruction>"; return 1; }
     mots=$(asm "$@") || return 1
     executer 0 "$*" "$mots" || return 1
     gras "  resultat (etat NON garde) :"; diff_etat "$ETAT" "$DIR/pas.apres" | grep . || echo "    (rien ne change)"
 }
-cmd_d() { # d <adresse> [n] : lire la memoire donnees du coeur (via un NOP non garde)
+cmd_d() { # d <address> [n]: read the core's data memory (through a NOP that is not kept)
     [ $# -ge 1 ] || { echo "usage : d <adresse> [n<=24]"; return 1; }
     a=$(hex "$1") || { rouge "adresse invalide"; return 1; }; n=${2:-8}; [ $n -gt 24 ] && n=24
     liste=""; i=0; while [ $i -lt $n ]; do liste="$liste $(printf '%04x' $(( a + i )))"; i=$(( i + 1 )); done
@@ -216,13 +217,13 @@ cmd_d() { # d <adresse> [n] : lire la memoire donnees du coeur (via un NOP non g
          END { for (i=0;i<'"$n"';i++) { k=sprintf("%04x", a+i); printf "    [%s]=%s", k, (k in lu)?lu[k]:"????"; if ((i+1)%8==0) print "" } if (i%8) print "" }' "$DIR/pas.apres"
     st0=$(etat_reg ST0); echo "    (lecture par le coeur avec l'etat courant ; DP=$(printf '%03x' $(( 0x${st0:-0} & 0x1ff ))) ; les mots non poses valent 0 hors registres mappes 0000-005f)"
 }
-cmd_d_pose() { # d! <adresse> <mots...> : poser des mots en D
+cmd_d_pose() { # d! <address> <words...>: set words in D
     [ $# -ge 2 ] || { echo "usage : d! <adresse> <mot> [mot...]"; return 1; }
     a=$(hex "$1") || { rouge "adresse invalide"; return 1; }; shift
     for m in "$@"; do v=$(hex "$m") || { rouge "mot invalide : $m"; return 1; }
         etat_fixe M "$(printf '%04x' $a)" "$(printf '%04x' $(( v & 0xffff )))"; printf '    D[%04x] <- %04x\n' $a $(( v & 0xffff )); a=$(( a + 1 )); done
 }
-cmd_p_pose() { # p! <adresse> <instruction | mots> : poser des mots en P (precharges a chaque pas)
+cmd_p_pose() { # p! <address> <instruction | words>: set words in P (preloaded at each step)
     [ $# -ge 2 ] || { echo "usage : p! <adresse> <instruction|mots hex>   (ex. une sous-routine appelee par CALL)"; return 1; }
     a=$(hex "$1") || { rouge "adresse invalide"; return 1; }; shift
     mots=$(asm "$@") || return 1
@@ -233,16 +234,16 @@ cmd_log() { gras "--- avertissements du coeur (dernieres lignes)"; tail -n ${1:-
 cmd_sauve() { [ $# -ge 1 ] || { echo "usage : sauve <fichier>"; return 1; }; cp "$ETAT" "$1" && echo "etat -> $1"; }
 cmd_charge() { [ $# -ge 1 ] && [ -r "$1" ] || { echo "usage : charge <fichier>"; return 1; }; cp "$1" "$ETAT" && echo "etat <- $1" && montrer_regs; }
 
-# ---------------------------------------------------------------- cours / arret : courir dans la ROM (etat du shell)
-# « arret » pose des points d'arret (adresses P lineaires, 1:8000 = page 1) ; « cours » part du PC courant
-# (ff80 = vecteur de reset si l'etat est vide), lit chaque instruction dans la ROM (ou dans les mots P
-# poses, qui ont priorite), l'execute par isa_test comme « pas », et s'arrete sur : un point d'arret,
-# IDLE, une adresse hors ROM (RAM sans mot pose), un PC qui ne bouge pas, ou le budget de pas.
-# Tout ceci agit sur l'ETAT DU SHELL, jamais sur le c54x_exe en marche (pour lui : stop / go / dsp).
-# Limites (le coeur repart d'un etat « registres + mots » a chaque pas) : le creux d'un branchement
-# retarde (BD, CALLD, RETD...) et le compteur d'un RPT ne survivent pas d'un pas a l'autre.
+# ---------------------------------------------------------------- cours / arret: run inside the ROM (shell state)
+# "arret" sets breakpoints (linear P addresses, 1:8000 = page 1); "cours" starts from the current PC
+# (ff80 = reset vector if the state is empty), reads each instruction from the ROM (or from the P words
+# set, which take priority), executes it through isa_test like "pas", and stops on: a breakpoint,
+# IDLE, an address outside the ROM (RAM without a word set), a PC that does not move, or the step budget.
+# All of this acts on the SHELL STATE, never on the running c54x_exe (for that: stop / go / dsp).
+# Limits (the core restarts from a "registers + words" state at each step): the delay slot of a
+# delayed branch (BD, CALLD, RETD...) and the counter of an RPT do not survive from one step to the next.
 ARRETS=$DIR/arrets.txt; : >> "$ARRETS"
-cmd_arret() { # arret [adr...] | arret - : poser / lister / effacer les points d'arret
+cmd_arret() { # arret [addr...] | arret -: set / list / clear the breakpoints
     if [ $# -eq 0 ]; then
         [ -s "$ARRETS" ] && { gras "--- points d'arret (adresses P)"; sed 's/^/    /' "$ARRETS"; } || echo "  aucun point d'arret (arret <adr> [adr...])"; return
     fi
@@ -250,7 +251,7 @@ cmd_arret() { # arret [adr...] | arret - : poser / lister / effacer les points d
     for s in "$@"; do a=$(hex "$s") || { rouge "adresse invalide : $s"; return 1; }
         a=$(printf '%x:%04x' $(( a >> 16 )) $(( a & 0xffff ))); grep -q -x -F "$a" "$ARRETS" || echo "$a" >> "$ARRETS"; echo "    arret a $a"; done
 }
-rom_insn() { # rom_insn <lineaire P> -> "mots hex|mnemonique" ; priorite aux mots P poses ; 1 si hors ROM
+rom_insn() { # rom_insn <linear P> -> "hex words|mnemonic"; P words set take priority; 1 if outside the ROM
     a=$1; page=$(( a >> 16 )); off=$(( a & 0xffff )); : > "$DIR/i.bin"
     i=0; while [ $i -lt 3 ]; do
         lin=$(( (page << 16) | ((off + i) & 0xffff) )); ad=$(printf '%04x' $(( lin & 0xffff )))
@@ -264,7 +265,7 @@ rom_insn() { # rom_insn <lineaire P> -> "mots hex|mnemonique" ; priorite aux mot
     "$OBJDUMP" -D -b binary -m tms320c54x --adjust-vma="0x$(printf '%04x' $off)" "$DIR/i.bin" | sed -n 's/^ *[0-9a-f]*:[[:space:]]*//p' \
       | awk 'NR==1 { w=$1; $1=""; sub(/^ +/,""); m=$0; next } NF>1 { exit } { w=w" "$1 } END { print w "|" m }'
 }
-cmd_cours() { # cours [N pas] : courir depuis le PC courant jusqu'a un arret
+cmd_cours() { # cours [N steps]: run from the current PC until a stop
     n=${1:-200}; case $n in ''|*[!0-9]*) echo "usage : cours [nombre de pas max]"; return 1;; esac
     pc=$(etat_reg PC); xpc=$(etat_reg XPC)
     [ -n "$pc" ] || { etat_fixe PC ff80; etat_fixe XPC 0; pc=ff80; xpc=0; echo "  (etat vide : depart au vecteur de reset ff80)"; }
@@ -289,36 +290,36 @@ cmd_cours() { # cours [N pas] : courir depuis le PC courant jusqu'a un arret
     printf '  PC=%s  A=%s  B=%s  T=%s  %s\n' "$(etat_reg PC)" "$(etat_reg A)" "$(etat_reg B)" "$(etat_reg T)" "$(drapeaux "$(etat_reg ST0)" "$(etat_reg ST1)")"
 }
 
-# ---------------------------------------------------------------- DSP EN MARCHE : stop / go / dsp sur le c54x_exe --arm
-# Ici on agit sur le PROCESSUS VIVANT (celui que run.sh a lance), jamais sur l'etat du shell :
-#   stop   pause du DSP. Binaire recent (src/pont.c SIGUSR1) : pause cooperative a la frontiere de trame
-#          suivante (DONE rendu, DSP en IDLE, l'ARM attend son DONE suivant) ; binaire ancien : SIGSTOP.
-#          Dans les deux cas rien n'est ecrit dans l'API RAM ni dans le coeur : le firmware ne voit qu'une
-#          trame plus longue. Les registres sont lus dans la memoire du processus (/proc/PID/mem, decalages
-#          de C54xState donnes par gdb sur l'executable), et on affiche LES ADRESSES : PC (ou le DSP s'est
-#          arrete, IDLE) et les vecteurs armes (ou il repartira : IPTR de PMST, IT trame vec 28 = bit 12).
-#   go     reprise (SIGUSR2 ou SIGCONT), puis un instantane 0,3 s plus tard pour voir qu'il a repris.
-#   dsp    instantane sans arreter (lecture pendant qu'il tourne : coherente a une instruction pres).
+# ---------------------------------------------------------------- RUNNING DSP: stop / go / dsp on the c54x_exe --arm
+# Here the LIVE PROCESS (the one run.sh launched) is acted upon, never the shell state:
+#   stop   pauses the DSP. Binary with src/pont.c SIGUSR1 support: cooperative pause at the next frame
+#          boundary (DONE returned, DSP in IDLE, the ARM waits for its next DONE); otherwise: SIGSTOP.
+#          In both cases nothing is written into the API RAM or the core: the firmware only sees a
+#          longer frame. The registers are read from the process memory (/proc/PID/mem, C54xState
+#          offsets given by gdb on the executable), and THE ADDRESSES are shown: PC (where the DSP
+#          stopped, IDLE) and the armed vectors (where it will resume: IPTR of PMST, frame IT vec 28 = bit 12).
+#   go     resumes (SIGUSR2 or SIGCONT), then a snapshot 0.3 s later to see that it resumed.
+#   dsp    snapshot without stopping (read while it runs: consistent to within one instruction).
 PAUSE_FICHIER=${PAUSE_FICHIER:-/dev/shm/calypso_dsp_pause}
 VIVANT=$DIR/vivant.txt
-IRQ_NOMS="12=IT_trame_TPU(vec28) 14=DMA_INT10n(vec30)"   # c54x_irq.c:44-60 ; les autres bits : non nommes ici
-vivant_pid() { # le c54x_exe --arm : comm == c54x_exe (lisible par tous, meme si le process est a root) + cmdline --arm
+IRQ_NOMS="12=IT_trame_TPU(vec28) 14=DMA_INT10n(vec30)"   # c54x_irq.c:44-60; the other bits: not named here
+vivant_pid() { # the c54x_exe --arm: comm == c54x_exe (readable by all, even if the process is root's) + cmdline --arm
     for p in $(pgrep -x c54x_exe 2>/dev/null); do
         [ "$(cat /proc/$p/comm 2>/dev/null)" = c54x_exe ] || continue
         grep -qa -- --arm /proc/$p/cmdline 2>/dev/null && { echo $p; return 0; }
     done; return 1
 }
-vivant_accessible() { # vivant_accessible <pid> : ce compte peut-il piloter ce process (signal + /proc/mem) ?
+vivant_accessible() { # vivant_accessible <pid>: can this account drive this process (signal + /proc/mem)?
     kill -0 "$1" 2>/dev/null && [ -r "/proc/$1/mem" ]
 }
-vivant_diag() { # message clair quand le banc tourne sous un autre compte
+vivant_diag() { # clear message when the bench runs under another account
     pid=$1; u=$(stat -c %U /proc/$pid 2>/dev/null); moi=$(id -un)
     rouge "le banc c54x_exe (pid $pid) tourne sous « ${u:-?} », toi tu es « $moi »."
     rouge "  -> stop/go/dsp exigent le meme compte. Lance harvard ainsi :  sudo ./harvard.sh"
     rouge "     (ou relance le banc sous ton compte). Lecture seule (d@) possible, ecriture (d@!) non."
 }
 vivant_coop() { grep -q -a calypso_dsp_pause /proc/$1/exe 2>/dev/null; }
-vivant_decalages() { # vivant_decalages <pid> -> fichier "champ decalage" (gdb sur l'executable, une fois par pid)
+vivant_decalages() { # vivant_decalages <pid> -> file "field offset" (gdb on the executable, once per pid)
     f=$DIR/decalages.$1.txt
     if ! [ -s "$f" ]; then
         command -v gdb > /dev/null || { rouge "gdb absent : impossible de situer C54xState dans le processus" >&2; return 1; }
@@ -330,14 +331,14 @@ vivant_decalages() { # vivant_decalages <pid> -> fichier "champ decalage" (gdb s
     fi
     echo "$f"
 }
-vivant_lire() { # vivant_lire <pid> <etiquette> : registres du coeur du processus -> $VIVANT (lignes "CLE val")
+vivant_lire() { # vivant_lire <pid> <label>: core registers of the process -> $VIVANT (lines "KEY val")
     pid=$1; d=$(vivant_decalages $pid) || return 1
     shm=$(awk '/calypso_api_ram/ {print $1; exit}' /proc/$pid/maps); [ -n "$shm" ] || { rouge "pas de fenetre API RAM dans le processus $pid"; return 1; }
-    base=$(( 0x${shm%%-*} - 0x1000 - $(awk '$1=="data" {print $2}' "$d") ))      # data[0x0800] est mappe sur /dev/shm
+    base=$(( 0x${shm%%-*} - 0x1000 - $(awk '$1=="data" {print $2}' "$d") ))      # data[0x0800] is mapped on /dev/shm
     exe=$(awk '$6 ~ /c54x_exe/ && $3=="00000000" {print $1; exit}' /proc/$pid/maps); exe=$(( 0x${exe%%-*} ))
     dec() { awk -v k="$1" '$1==k {print $2}' "$d"; }
-    lire() { dd if=/proc/$pid/mem bs=1 skip=$1 count=$2 2>/dev/null | od -An -v -tx$2 | tr -d ' \n'; }   # petit-boutiste -> hex
-    echo "$pid $base $(dec prog) $(dec data) $(( 0x$(lire $(( base + $(dec pmst) )) 2) ))" > "$DIR/vivant_prog.txt"   # pour vivant_prog
+    lire() { dd if=/proc/$pid/mem bs=1 skip=$1 count=$2 2>/dev/null | od -An -v -tx$2 | tr -d ' \n'; }   # little-endian -> hex
+    echo "$pid $base $(dec prog) $(dec data) $(( 0x$(lire $(( base + $(dec pmst) )) 2) ))" > "$DIR/vivant_prog.txt"   # for vivant_prog
     pc=$(lire $(( base + $(dec pc) )) 4) || return 1
     [ -n "$pc" ] || { rouge "lecture de /proc/$pid/mem refusee (ptrace)"; return 1; }
     {
@@ -350,13 +351,13 @@ vivant_lire() { # vivant_lire <pid> <etiquette> : registres du coeur du processu
         i=0; for v in $(dd if=/proc/$pid/mem bs=1 skip=$(( base + $(dec ar) )) count=16 2>/dev/null | od -An -v -tx2); do printf 'AR%d %x\n' $i 0x$v; i=$(( i + 1 )); done
     } > "$VIVANT"
 }
-vivant_prog() { # vivant_prog <adr> <n> : n mots de la memoire programme du processus vivant, comme prog_fetch
+vivant_prog() { # vivant_prog <addr> <n>: n words of the live process's program memory, like prog_fetch
     set -- $(cat "$DIR/vivant_prog.txt") "$1" "$2"      # pid base prog data pmst adr n
-    # c54x_mem.c prog_fetch : PMST.OVLY (bit 5) et 0x60 <= adr < 0x2800 -> data[adr] (DARAM recouverte), sinon prog[adr]
+    # c54x_mem.c prog_fetch: PMST.OVLY (bit 5) and 0x60 <= adr < 0x2800 -> data[adr] (overlaid DARAM), else prog[adr]
     if [ $(( $5 & 0x20 )) != 0 ] && [ $6 -ge 96 ] && [ $6 -lt 10240 ]; then o=$4; else o=$3; fi
     dd if=/proc/$1/mem bs=1 skip=$(( $2 + o + $6 * 2 )) count=$(( $7 * 2 )) 2>/dev/null | od -An -v -tx2 | tr -s ' \n' ' '
 }
-montrer_vivant() { # montrer_vivant <pid> : $VIVANT a l'ecran, avec les adresses du stop / go
+montrer_vivant() { # montrer_vivant <pid>: $VIVANT on screen, with the stop / go addresses
     v() { awk -v k="$1" '$1==k {print substr($0, length($1) + 2)}' "$VIVANT"; }
     pc=$(v PC); xpc=$(v XPC); idle=$(v IDLE); pmst=$(v PMST); imr=$(v IMR); ifr=$(v IFR)
     gras "  DSP vivant (pid $1, $(vivant_coop $1 && echo 'pause cooperative SIGUSR1 disponible' || echo 'binaire ancien : SIGSTOP/SIGCONT')) : $(v ETAT)"
@@ -376,12 +377,12 @@ montrer_vivant() { # montrer_vivant <pid> : $VIVANT a l'ecran, avec les adresses
     lin=$(( (0x$xpc << 16) | 0x$pc ))
     if rom_fichier $lin P > /dev/null 2>&1; then gras "  ROM a PC :"; cmd_p "$(printf '%x:%04x' $(( lin >> 16 )) $(( lin & 0xffff )))" 4; fi
 }
-cmd_dsp() { # dsp : instantane du DSP en marche, sans l'arreter
+cmd_dsp() { # dsp: snapshot of the running DSP, without stopping it
     pid=$(vivant_pid) || { rouge "aucun c54x_exe --arm en marche (./run.sh)"; return 1; }
     vivant_accessible "$pid" || { vivant_diag "$pid"; return 1; }
     vivant_lire $pid "instantane sans arret$([ -f "$DIR/pause.$pid" ] && echo ' (en pause : go pour reprendre)')" || return 1; montrer_vivant $pid
 }
-cmd_stop() { # stop : pause du DSP en marche
+cmd_stop() { # stop: pause the running DSP
     pid=$(vivant_pid) || { rouge "aucun c54x_exe --arm en marche (./run.sh)"; return 1; }
     vivant_accessible "$pid" || { vivant_diag "$pid"; return 1; }
     [ -f "$DIR/pause.$pid" ] && { echo "  deja en pause ($(cat "$DIR/pause.$pid")) : go pour reprendre"; cmd_dsp; return; }
@@ -397,7 +398,7 @@ cmd_stop() { # stop : pause du DSP en marche
     vivant_lire $pid "EN PAUSE par $mode" || return 1; montrer_vivant $pid
     echo "  (l'ARM/QEMU attend le DONE du DSP : toute la chaine est suspendue ; « go » pour reprendre)"
 }
-cmd_go() { # go : reprise du DSP en marche
+cmd_go() { # go: resume the running DSP
     pid=$(vivant_pid) || { rouge "aucun c54x_exe --arm en marche"; rm -f "$DIR"/pause.*; return 1; }
     [ -f "$DIR/pause.$pid" ] || { echo "  pas de pause en cours (stop d'abord)"; return 1; }
     mode=$(cat "$DIR/pause.$pid"); rm -f "$DIR/pause.$pid"
@@ -410,14 +411,14 @@ cmd_go() { # go : reprise du DSP en marche
     printf '  0,3 s apres : fn=%s (+%d trames)  PC=%x:%s idle=%s  insn=%s (+%d)\n' "$(v FN)" $(( $(v FN) - ${avant_fn:-0} )) $(( 0x$(v XPC) )) "$(v PC)" "$(v IDLE)" "$(v INSN)" $(( $(v INSN) - ${avant_insn:-0} ))
 }
 
-# ---------------------------------------------------------------- ARM : le firmware layer1 sous gdb (telnet 44444)
-# run.sh lance QEMU avec -gdb tcp::1234 et la console tools/gdb-telnet.py sur le port 44444 : un
-# gdb-multiarch attache au firmware (symboles layer1.highram.elf), panneau cmd.gdb + « demo ».
-# Une seule session a la fois (le gdbstub n'accepte qu'un client) : si un telnet est deja ouvert,
-# on ne force rien, on dit quoi y taper.
+# ---------------------------------------------------------------- ARM: the layer1 firmware under gdb (telnet 44444)
+# run.sh launches QEMU with -gdb tcp::1234 and the console tools/gdb-telnet.py on port 44444: a
+# gdb-multiarch attached to the firmware (layer1.highram.elf symbols), cmd.gdb panel + "demo".
+# One session at a time (the gdbstub only accepts one client): if a telnet is already open,
+# nothing is forced, the command to type there is shown.
 GDB_TELNET=${GDB_TELNET:-44444}
 telnet_occupe() { ss -Htn state established "( sport = :$GDB_TELNET )" 2>/dev/null | grep -q . ; }
-cmd_gdb() { # gdb <commande...> : envoyer une commande au gdb de l'ARM via le telnet, montrer la sortie
+cmd_gdb() { # gdb <command...>: send a command to the ARM's gdb through the telnet, show the output
     [ $# -ge 1 ] || { echo "usage : gdb <commande du panneau osmocom>   ex : gdb fn | gdb l1 | gdb help_osmo | gdb demo etat"; return 1; }
     ss -Hltn "( sport = :$GDB_TELNET )" 2>/dev/null | grep -q . || { rouge "rien n'ecoute sur le port $GDB_TELNET (run.sh avec GDB=1)"; return 1; }
     if telnet_occupe; then rouge "une session telnet est deja ouverte sur le port $GDB_TELNET (une seule a la fois) : tape dans ce telnet :   $*"; return 1; fi
@@ -436,28 +437,28 @@ def lire(jusqua, t):
         buf += d
         if jusqua in buf: break
     return buf
-lire(b"(gdb) ", 20)                                   # gdb attache, cible relancee (continue &)
-s.sendall(b"\x03"); lire(b"(gdb) ", 5); time.sleep(0.5)   # Ctrl-C : la cible s'arrete, le prompt revient
+lire(b"(gdb) ", 20)                                   # gdb attached, target resumed (continue &)
+s.sendall(b"\x03"); lire(b"(gdb) ", 5); time.sleep(0.5)   # Ctrl-C: the target stops, the prompt comes back
 s.sendall(cmd.encode() + b"\necho __FIN__\\n\n")
 out = lire(b"__FIN__", attente)
-s.sendall(b"quit\n"); time.sleep(0.3); s.close()      # a la fermeture, la console detache gdb : l'ARM repart
+s.sendall(b"quit\n"); time.sleep(0.3); s.close()      # on close, the console detaches gdb: the ARM resumes
 txt = re.sub(rb"\xff[\xfb-\xfe].|\xff\xfa.*?\xff\xf0", b"", out).decode("utf-8", "replace").replace("\r", "")
 txt = txt.split("__FIN__")[0]
 print("\n".join("    " + l for l in txt.split("\n") if not l.startswith("echo __FIN__") and l.strip() != "(gdb)"))
 PY
     echo "  (session fermee : gdb detache, l'ARM tourne)"
 }
-# ---------------------------------------------------------------- demo : la main sur le DSP vivant, puis sur l'ARM
-DEMO_PAUSE=${DEMO_PAUSE:-4}    # secondes entre deux etapes de la demo, le temps de lire (0 = enchainer)
-DEMO_STOP=${DEMO_STOP:-1.5}    # duree de la pause reelle du DSP : assez pour que la voix se coupe a l'oreille, pas plus
+# ---------------------------------------------------------------- demo: hands on the live DSP, then on the ARM
+DEMO_PAUSE=${DEMO_PAUSE:-4}    # seconds between two demo steps, time to read (0 = chain)
+DEMO_STOP=${DEMO_STOP:-1.5}    # duration of the real DSP pause: enough for the voice to cut out audibly, no more
 demo_pause() { [ "$DEMO_PAUSE" != 0 ] && { echo "    ... (suite dans $DEMO_PAUSE s)"; sleep "$DEMO_PAUSE"; }; }
-A_CD=09d2       # a_cd[0] (flag FIRE) ; a_cd[3]=0x09d5 debut du bloc L2 de 23 octets (dsp_memcpy_from_api be=0)
-# Dans le bloc descendant CCCH/BCCH : octet2 (type) = 0x09d6 bas ; cell_identity = 0x09d6 haut (MSB) | 0x09d7 bas (LSB).
-shm_lire() { od -An -v -tx2 -j $(( (0x$1 - API_BASE) * 2 )) -N 2 "$API_SHM" 2>/dev/null | tr -d ' \n'; }  # 1 mot hex
+A_CD=09d2       # a_cd[0] (FIRE flag); a_cd[3]=0x09d5 start of the 23-byte L2 block (dsp_memcpy_from_api be=0)
+# In the downlink CCCH/BCCH block: byte2 (type) = 0x09d6 low; cell_identity = 0x09d6 high (MSB) | 0x09d7 low (LSB).
+shm_lire() { od -An -v -tx2 -j $(( (0x$1 - API_BASE) * 2 )) -N 2 "$API_SHM" 2>/dev/null | tr -d ' \n'; }  # 1 hex word
 shm_ecrire() { local v=$(( 0x$2 & 0xffff )); printf "\\$(printf '%03o' $(( v & 255 )))\\$(printf '%03o' $(( v >> 8 )))" \
     | dd of="$API_SHM" bs=1 seek=$(( (0x$1 - API_BASE) * 2 )) conv=notrunc status=none 2>/dev/null; }
-api_mot() { cmd_d_chaud "$1" 1 2>/dev/null | sed -n 's/.*\]=\([0-9a-fA-F]\{4\}\).*/\1/p' | head -1; }  # EXACTEMENT 4 hex, sinon vide
-demo_si3() { # cell_id -> CELL_ID (defaut 777) dans SI3 : boucle vive, on reecrit a chaque bloc SI3 qui passe
+api_mot() { cmd_d_chaud "$1" 1 2>/dev/null | sed -n 's/.*\]=\([0-9a-fA-F]\{4\}\).*/\1/p' | head -1; }  # EXACTLY 4 hex digits, else empty
+demo_si3() { # cell_id -> CELL_ID (default 777) in SI3: live loop, rewritten on every SI3 block that passes
     cible=${1:-777}
     [ -r "$API_SHM" ] || { rouge "    SI3 : pas de segment API RAM ; ./run.sh"; return 1; }
     [ -w "$API_SHM" ] || { rouge "    SI3 : segment en lecture seule ; chmod 0666 $API_SHM (ou sudo)"; return 1; }
@@ -465,28 +466,28 @@ demo_si3() { # cell_id -> CELL_ID (defaut 777) dans SI3 : boucle vive, on reecri
     fin=$(( $(date +%s%3N) + ${DEMO_HOLD_MS:-1500} )); n=0; av=""
     while [ $(date +%s%3N) -lt $fin ]; do
         w4=$(shm_lire 09d6); case $w4 in ''|*[!0-9a-fA-F]*) continue ;; esac
-        [ $(( 0x$w4 & 0xff )) = $(( 0x1b )) ] || continue             # pas un SI3 a cet instant
+        [ $(( 0x$w4 & 0xff )) = $(( 0x1b )) ] || continue             # not an SI3 at this instant
         w5=$(shm_lire 09d7); case $w5 in ''|*[!0-9a-fA-F]*) continue ;; esac
         [ -z "$av" ] && { av=$(( (0x$w4 >> 8 & 0xff) << 8 | (0x$w5 & 0xff) )); echo "       1er SI3 vu : cell_id = $av (0x$(printf %04x $av))"; }
-        shm_ecrire 09d6 $(printf '%04x' $(( (0x$w4 & 0x00ff) | ((cible >> 8 & 0xff) << 8) )))   # garde le type 0x1b
-        shm_ecrire 09d7 $(printf '%04x' $(( (0x$w5 & 0xff00) | (cible & 0xff) )))               # garde l'octet LAI
+        shm_ecrire 09d6 $(printf '%04x' $(( (0x$w4 & 0x00ff) | ((cible >> 8 & 0xff) << 8) )))   # keeps the 0x1b type
+        shm_ecrire 09d7 $(printf '%04x' $(( (0x$w5 & 0xff00) | (cible & 0xff) )))               # keeps the LAI byte
         n=$(( n + 1 ))
     done
     if [ "$n" = 0 ]; then echo "       (aucun SI3 vu en ${DEMO_HOLD_MS:-1500} ms ; le mobile doit lire la BCCH/CCCH -- reessaie quand il campe)"; return 1; fi
     vert "       $n blocs SI3 relabellises en $cible pendant ${DEMO_HOLD_MS:-1500} ms (le flag FIRE reste valide, pas de CRC L3)"
     echo "       -> a chaque SI3 que le firmware lit maintenant, le cell_id vaut $cible"
 }
-LAC_W=09d9      # a_cd[7] : les 2 octets du LAC du SI3 (octet-echanges : a_cd[7] = LAC_LSB<<8 | LAC_MSB)
-demo_lac() { # lac [valeur] : forcer le LAC du SI3 a valeur (defaut 777) EN VIF via le shm, sans relance ni rebuild
+LAC_W=09d9      # a_cd[7]: the 2 LAC bytes of the SI3 (byte-swapped: a_cd[7] = LAC_LSB<<8 | LAC_MSB)
+demo_lac() { # lac [value]: force the SI3 LAC to value (default 777) LIVE through the shm, without restart or rebuild
     cible=${1:-777}
     [ -r "$API_SHM" ] || { rouge "    LAC : pas de segment API RAM ; ./run.sh"; return 1; }
     [ -w "$API_SHM" ] || { rouge "    LAC : segment en lecture seule ; chmod 0666 $API_SHM (ou sudo)"; return 1; }
-    sw=$(printf '%04x' $(( ((cible & 0xff) << 8) | ((cible >> 8) & 0xff) )))   # octet-echange pour a_cd[7]
+    sw=$(printf '%04x' $(( ((cible & 0xff) << 8) | ((cible >> 8) & 0xff) )))   # byte-swapped for a_cd[7]
     gras "    LAC : force a $cible (0x$(printf %04x $cible)) dans a_cd[7]=0x$sw, EN VIF, a chaque bloc SI3 (sans relance)"
     fin=$(( $(date +%s%3N) + ${DEMO_HOLD_MS:-3000} )); n=0; av=""
     while [ $(date +%s%3N) -lt $fin ]; do
         w4=$(shm_lire 09d6); case $w4 in ''|*[!0-9a-fA-F]*) continue ;; esac
-        [ $(( 0x$w4 & 0xff )) = $(( 0x1b )) ] || continue              # SI3 seulement
+        [ $(( 0x$w4 & 0xff )) = $(( 0x1b )) ] || continue              # SI3 only
         w7=$(shm_lire $LAC_W); case $w7 in ''|*[!0-9a-fA-F]*) continue ;; esac
         [ -z "$av" ] && { av=$(( ((0x$w7 & 0xff) << 8) | ((0x$w7 >> 8) & 0xff) )); echo "       1er SI3 vu : LAC = $av (0x$(printf %04x $av))"; }
         shm_ecrire $LAC_W $sw; n=$(( n + 1 ))
@@ -495,10 +496,10 @@ demo_lac() { # lac [valeur] : forcer le LAC du SI3 a valeur (defaut 777) EN VIF 
     vert "       $n ecritures LAC=$cible pendant ${DEMO_HOLD_MS:-3000} ms, en vif (course avec le DSP : le mobile le voit si on gagne)"
     echo "       -> verifie : grep -ao 'CGI=[0-9-]*' /tmp/c54x-pont/mobile.log | tail  (champ LAC = 3e groupe)"
 }
-demo_sb() { # DEAD BEEF dans a_sch (le SB decode que l'ARM lit), en vif : on reecrit en boucle courte, on relit
+demo_sb() { # DEAD BEEF into a_sch (the decoded SB the ARM reads), live: rewritten in a short loop, read back
     [ -r "$API_SHM" ] || { rouge "    SB : pas de segment API RAM ($API_SHM) ; ./run.sh"; return 1; }
     [ -w "$API_SHM" ] || { rouge "    SB : segment en lecture seule pour ce compte ; chmod 0666 $API_SHM (ou sudo)"; return 1; }
-    a=0837   # a_sch[0], page R0 (voir d@ noms a_sch)
+    a=0837   # a_sch[0], page R0 (see d@ noms a_sch)
     gras "    SB : a_sch a $a (le SCH decode que le firmware lit en 0xffd00000), ecriture vive"
     echo "       avant : a_sch[0..1] = $(shm_lire $a) $(shm_lire 0838)"
     fin=$(( $(date +%s%3N) + ${DEMO_HOLD_MS:-1200} ))
@@ -506,7 +507,7 @@ demo_sb() { # DEAD BEEF dans a_sch (le SB decode que l'ARM lit), en vif : on ree
     echo "       pendant : a_sch[0..1] = $(shm_lire $a) $(shm_lire 0838)   <- 40C3 2026 (CCC 2026) impose au SB que lit le firmware"
     vert "       (reecrit en boucle ${DEMO_HOLD_MS:-1200} ms ; le DSP reprend la main a la prochaine tache SB)"
 }
-demo_si3_preuve() { # attend le camping et montre le CGI vu par le mobile (doit finir par <cible>)
+demo_si3_preuve() { # waits for camping and shows the CGI seen by the mobile (must end with <cible>)
     cible=$1; log=${RUNDIR_OMBRE:-/tmp/c54x-pont}/mobile.log; dlog=${RUNDIR_OMBRE:-/tmp/c54x-pont}/dsp.log
     gras "    SI3 : preuve cote mobile -- cell_id force a $cible a la source (ombre descendante dans c54x_exe)"
     echo "       injections SI3 (DSP) : $(grep -ac 'ombre-dl.*SI3 cell_id' "$dlog" 2>/dev/null)   (0 si le mobile ne lit pas encore la BCCH)"
@@ -522,7 +523,7 @@ demo_si3_preuve() { # attend le camping et montre le CGI vu par le mobile (doit 
         *) echo "       mobile.log : $cgi (pas encore $cible ; injections=$(grep -ac 'ombre-dl.*SI3 cell_id' "$dlog" 2>/dev/null), laisse camper puis grep CGI $log)" ;;
     esac
 }
-demo_dsp() { # DSP vivant, SANS relance : force le LAC du SI3 en vif (shm), preuve CGI, stop/go
+demo_dsp() { # live DSP, WITHOUT restart: forces the SI3 LAC live (shm), CGI proof, stop/go
     pid=$(vivant_pid) || { rouge "demo dsp : aucun c54x_exe --arm en marche (./run.sh)"; return 1; }
     gras "===== DEMO DSP (c54x_exe --arm pid $pid, le vrai coeur C54x qui sert l'ARM) ====="
     log=${RUNDIR_OMBRE:-/tmp/c54x-pont}/mobile.log
@@ -536,7 +537,7 @@ demo_dsp() { # DSP vivant, SANS relance : force le LAC du SI3 en vif (shm), preu
     while [ $i -lt ${DEMO_CGI_ESSAIS:-20} ]; do
         cgi=$(grep -ao 'CGI=[0-9-]*' "$log" 2>/dev/null | tail -1)
         case $cgi in CGI=*-*-$cible-*) break ;; esac
-        DEMO_HOLD_MS=1500 demo_lac "$cible" >/dev/null 2>&1   # re-hammer pendant que le mobile relit la BCCH
+        DEMO_HOLD_MS=1500 demo_lac "$cible" >/dev/null 2>&1   # hammer again while the mobile re-reads the BCCH
         sleep 1; i=$(( i + 1 ))
     done
     case $cgi in
@@ -554,7 +555,7 @@ demo_dsp() { # DSP vivant, SANS relance : force le LAC du SI3 en vif (shm), preu
         gras "===== FIN DEMO DSP : LAC force en vif. stop/go : harvard sous le compte du banc ====="
     fi
 }
-cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp] : d'abord l'ARM sous gdb (hello world from ram), puis le DSP vivant
+cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp]: first the ARM under gdb (hello world from ram), then the live DSP
     quoi=${1:-tout}; [ $# -gt 0 ] && shift
     case $quoi in
         dsp) demo_dsp ;;
@@ -567,29 +568,29 @@ cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp] : d'abord l'ARM sous gd
     esac
 }
 
-# ---------------------------------------------------------------- API RAM a chaud (le DSP en marche, --arm)
-API_SHM=${API_SHM:-/dev/shm/calypso_api_ram}   # = data[0x0800..0x27ff] du c54x_exe --arm, partage avec l'ARM (MAP_SHARED)
+# ---------------------------------------------------------------- live API RAM (the running DSP, --arm)
+API_SHM=${API_SHM:-/dev/shm/calypso_api_ram}   # = data[0x0800..0x27ff] of the c54x_exe --arm, shared with the ARM (MAP_SHARED)
 API_BASE=$(( 0x0800 )); API_MOTS=8192
-CARTE=${CARTE:-$HERE/docs/carte-memoire.md}    # table « API RAM — tous les champs » (generee depuis l'ELF : scalaires seulement)
-# Pages doubles (osmocom-bb include/calypso/dsp_api.h:18-23) : mot DSP = 0x0800 + (adresse ARM - 0xFFD00000)/2
-#   W0 0x0800..0x0813  W1 0x0814..0x0827  (T_DB_MCU_TO_DSP, 17 mots utiles + 3 de bourrage, dsp_api.h:32-80)
-#   R0 0x0828..0x083b  R1 0x083c..0x084f  (T_DB_DSP_TO_MCU, 20 mots, dsp_api.h:82-107)   NDB 0x08d4.. (268)  PARAM 0x0c31.. (57)
+CARTE=${CARTE:-$HERE/docs/carte-memoire.md}    # "API RAM — tous les champs" table (generated from the ELF: scalars only)
+# Double pages (osmocom-bb include/calypso/dsp_api.h:18-23): DSP word = 0x0800 + (ARM address - 0xFFD00000)/2
+#   W0 0x0800..0x0813  W1 0x0814..0x0827  (T_DB_MCU_TO_DSP, 17 useful words + 3 padding, dsp_api.h:32-80)
+#   R0 0x0828..0x083b  R1 0x083c..0x084f  (T_DB_DSP_TO_MCU, 20 words, dsp_api.h:82-107)   NDB 0x08d4.. (268)  PARAM 0x0c31.. (57)
 api_page() { # api_page <mot DSP> -> W0|W1|R0|R1|NDB|PARAM|API
     a=$1; if [ $a -lt $(( 0x0814 )) ]; then echo W0; elif [ $a -lt $(( 0x0828 )) ]; then echo W1
     elif [ $a -lt $(( 0x083c )) ]; then echo R0; elif [ $a -lt $(( 0x0850 )) ]; then echo R1
     elif [ $a -ge $(( 0x08d4 )) ] && [ $a -lt $(( 0x08d4 + 268 )) ]; then echo NDB
     elif [ $a -ge $(( 0x0c31 )) ] && [ $a -lt $(( 0x0c31 + 57 )) ]; then echo PARAM; else echo API; fi
 }
-api_table() { # "nom 0xADDR page" : la carte generee + les tableaux que l'ELF ne nomme pas (dsp_api.h, API 36xx)
+api_table() { # "name 0xADDR page": the generated map + the arrays the ELF does not name (dsp_api.h, API 36xx)
     grep '^| [^|]* | [a-z][a-z0-9_]* | 0x[0-9a-fA-F]* | 0xFFD[0-9A-F]* | 0x[0-9a-f]*' "$CARTE" 2>/dev/null | awk -F'|' '{gsub(/ /,"",$2); gsub(/ /,"",$3); gsub(/ /,"",$6); print $3, $6, $2}'
-    for pp in 0x0800:W0 0x0814:W1; do pb=$(( ${pp%%:*} )); ppg=${pp#*:}                                  # dsp_api.h:67-70, bourrage 17..19
+    for pp in 0x0800:W0 0x0814:W1; do pb=$(( ${pp%%:*} )); ppg=${pp#*:}                                  # dsp_api.h:67-70, padding 17..19
         printf 'a_a5fn[0] 0x%04x %s\na_a5fn[1] 0x%04x %s\n' $(( pb + 12 )) "$ppg" $(( pb + 13 )) "$ppg"
         printf '(bourrage) 0x%04x %s\n(bourrage) 0x%04x %s\n(bourrage) 0x%04x %s\n' $(( pb + 17 )) "$ppg" $(( pb + 18 )) "$ppg" $(( pb + 19 )) "$ppg"; done
     for pp in 0x0828:R0 0x083c:R1; do pb=$(( ${pp%%:*} )); ppg=${pp#*:}; pi=0                           # dsp_api.h:97-99 (DSP 33..36)
         for nm in 'a_serv_demod[0]=D_TOA' 'a_serv_demod[1]=D_PM' 'a_serv_demod[2]=D_ANGLE' 'a_serv_demod[3]=D_SNR' 'a_pm[0]' 'a_pm[1]' 'a_pm[2]' 'a_sch[0]' 'a_sch[1]' 'a_sch[2]' 'a_sch[3]' 'a_sch[4]'; do
             printf '%s 0x%04x %s\n' "$nm" $(( pb + 8 + pi )) "$ppg"; pi=$(( pi + 1 )); done; done
 }
-api_adr() { # api_adr <nom|adresse> -> entier (mot DSP), 1 si inconnu / hors fenetre
+api_adr() { # api_adr <name|address> -> integer (DSP word), 1 if unknown / outside the window
     case $1 in
         [a-z]*) v=$(api_table | awk -v n="$1" '$1==n || (n !~ /\[/ && $1 ~ ("^" n "(\\[0\\])?(=|$)")) {print $2; exit}'); [ -n "$v" ] || { rouge "champ inconnu ($CARTE + dsp_api.h) : $1   -> d@ noms <motif>" >&2; return 1; }; v=$(( v )) ;;
         *) v=$(hex "$1") || { rouge "adresse invalide : $1" >&2; return 1; } ;;
@@ -600,12 +601,12 @@ api_adr() { # api_adr <nom|adresse> -> entier (mot DSP), 1 si inconnu / hors fen
 api_nom() { api_table | awk -v a="$(printf '0x%04x' $1)" '$2==a {print $3 " " $1; exit}'; }
 api_vivant() { [ -r "$API_SHM" ] || { rouge "pas de segment $API_SHM (lancer ./run.sh ou ./c54x_exe --arm)"; return 1; }
     pgrep -f 'c54x_exe.*--arm' > /dev/null || echo "  (aucun c54x_exe --arm en marche : contenu fige du dernier run)"; }
-# Decodage des champs (sources : dsp_api.h:46-79 pour les bits, l1_environment.h:36-80 pour les taches,
-# :339-353 et :370-386 pour d_ctrl_tch, :355-367 pour d_ctrl_abb / d_ctrl_system). Rien n'est devine.
+# Field decoding (sources: dsp_api.h:46-79 for the bits, l1_environment.h:36-80 for the tasks,
+# :339-353 and :370-386 for d_ctrl_tch, :355-367 for d_ctrl_abb / d_ctrl_system). Nothing is guessed.
 TACHES="0=NO 1=IDLE1 5=FB 6=SB 8=TCH_FB 9=TCH_SB 10=RACH 11=AUL 12=DUL 13=TCHT 14=TCHA 15=TCH_DTX_UL 17=NBN 18=EBN 19=NBS 20=EBS 21=NP 22=EP 24=ALLC 25=CB 26=DDL 27=ADL 28=TCHD 30=PNP 31=PEP 32=PALLC 33=CHECKSUM/PBS 35=TST_NDB 36=TST_DB 37=INIT_VEGA 38=DSP_LOOP_C"
 MODES="0=SIG_ONLY 1=TCH_FS 2=TCH_HS 3=TCH_96 4=TCH_48F 5=TCH_48H 6=TCH_24F 7=TCH_24H 8=TCH_EFR 9=TCH_144"
 TYPES="0=INVALID 1=TCH_F 2=TCH_H 3=SDCCH_4 4=SDCCH_8"
-decoder() { # decoder <nom> <hex16> -> texte (vide si rien a dire)
+decoder() { # decoder <name> <hex16> -> text (empty if nothing to say)
     n=${1%%=*}; v=$(( 0x$2 ))
     case $n in
         d_task_d|d_task_u|d_task_md|d_task_ra) t=$(printf '%s\n' $TACHES | awk -F= -v k=$v '$1==k {print $2}'); printf 'tache %d%s' $v "${t:+ = $t}" ;;
@@ -626,7 +627,7 @@ decoder() { # decoder <nom> <hex16> -> texte (vide si rien a dire)
         'a_serv_demod[2]') [ $v -ge 32768 ] && v=$(( v - 65536 )); printf 'angle %d (signe)' $v ;;
     esac
 }
-cmd_d_chaud() { # d@ <adr|nom> [n] : lire l'API RAM du DSP en marche, etiquetee par adresse absolue et decodee
+cmd_d_chaud() { # d@ <addr|name> [n]: read the API RAM of the running DSP, labelled by absolute address and decoded
     [ $# -ge 1 ] || { echo "usage : d@ <adresse|nom> [n]   ex : d@ 0800 20 | d@ d_task_d | d@ W1 | d@ noms d_task"; return 1; }
     case $1 in
         noms) api_table | grep "${2:-.}" | awk '{printf "    %-5s %s  %s\n", $3, $2, $1}'; return ;;
@@ -643,7 +644,7 @@ cmd_d_chaud() { # d@ <adr|nom> [n] : lire l'API RAM du DSP en marche, etiquetee 
         a=$(( a + 1 ))
     done < "$DIR/mots.txt"
 }
-cmd_d_chaud_ecrire() { # d@! <adr|nom> <mots...> : ecrire dans l'API RAM du DSP en marche (vu par le DSP et par l'ARM)
+cmd_d_chaud_ecrire() { # d@! <addr|name> <words...>: write into the API RAM of the running DSP (seen by the DSP and the ARM)
     [ $# -ge 2 ] || { echo "usage : d@! <adresse|nom> <mot> [mot...]"; return 1; }
     api_vivant || return 1; a=$(api_adr "$1") || return 1; shift
     [ -w "$API_SHM" ] || { rouge "segment en lecture seule pour cet utilisateur"; return 1; }
@@ -654,33 +655,33 @@ cmd_d_chaud_ecrire() { # d@! <adr|nom> <mots...> : ecrire dans l'API RAM du DSP 
         printf '    [%04x] <- %04x  %s\n' $a $v "$(api_nom $a)"; a=$(( a + 1 )); done
     echo "  (ecrit dans le DSP en marche ; l'ARM voit le meme segment)"
 }
-# ---------------------------------------------------------------- « run » : les outils du banc tels quels
-lancer() { # lancer <cmd...> : execute, journalise, montre la fin
+# ---------------------------------------------------------------- "run": the bench tools as they are
+lancer() { # lancer <cmd...>: run, log, show the tail
     gras "  \$ $*"; "$@" > "$DIR/dernier_run.log" 2>&1; rc=$?
     n=$(wc -l < "$DIR/dernier_run.log")
     [ $n -gt 60 ] && echo "  ... ($n lignes, tout dans $DIR/dernier_run.log)"
     tail -n 60 "$DIR/dernier_run.log"; echo "  (code de retour $rc)"; return $rc
 }
-cmd_rejeu() { # rejeu [trames] [-v..] : c54x_exe --rejouer, acquisition FB/SB deterministe
+cmd_rejeu() { # rejeu [frames] [-v..]: c54x_exe --rejouer, deterministic FB/SB acquisition
     t=${1:-200}; shift 2>/dev/null; (cd "$HERE" && lancer ./c54x_exe --rejouer --trames "$t" --verbeux "$@"); }
 cmd_banc() { # banc [test|--all|--list] [options dsp_tester]
     [ $# -ge 1 ] || set -- --list; (cd "$HERE" && lancer ./dsp_tester "$@"); }
-cmd_isa() { # isa [-k MOT] : les exemples SPRU172C contre le coeur
+cmd_isa() { # isa [-k WORD]: the SPRU172C examples against the core
     (cd "$HERE" && lancer ./isa_test tools/isa_tests.txt "$@"); }
 RUNDIR_OMBRE=${RUNDIR_OMBRE:-/tmp/c54x-pont}
-cmd_ombre() { # ombre [cell_id|off] : relance la chaine COMPLETE (run_si.sh : BTS + echafaudage + pont) avec l'ombre SI3
+cmd_ombre() { # ombre [cell_id|off]: restart the WHOLE chain (run_si.sh: BTS + scaffolding + bridge) with the SI3 shadow
     n=${1:-${DEMO_CELL_ID:-777}}
     case $n in off|OFF) sv=""; lib="desactivee" ;; *[!0-9]*) rouge "usage : ombre [cell_id|off]  (defaut 777)"; return 1 ;; *) sv="$n"; lib="LAC SI3 = $n" ;; esac
-    # run_si.sh amene le mobile a decoder la BCCH (corrrelateur natif non verrouille -> echafaudage CAN_TOA/CAN_SB/AFC/LOCKSTEP).
-    # run.sh nu (PONT=0) ne fait arriver AUCUN burst du BTS : pas de camp, pas de SI3, l'ombre ne se declenche jamais.
+    # run_si.sh brings the mobile to decode the BCCH (native correlator not locked -> CAN_TOA/CAN_SB/AFC/LOCKSTEP scaffolding).
+    # bare run.sh (PONT=0) delivers NO burst from the BTS: no camping, no SI3, the shadow never triggers.
     lanceur="$HERE/run_si.sh"; mode_full=1
     [ -x "$lanceur" ] || { lanceur="$HERE/run.sh"; mode_full=0; rouge "  run_si.sh absent : run.sh nu (sans pont, le mobile ne campera pas)"; }
     gras "  ombre : relance de la chaine complete ($(basename "$lanceur")) avec CALYPSO_SHADOW_LAC=${sv:-<off>} ($lib)"
     logdir=${RUNDIR_OMBRE:-/tmp/c54x-pont}
     : > "$DIR/run_ombre.log"
-    # [2026-10-06] eviter l'empilement : tuer tout lanceur fantome (run_si.sh/run.sh) AVANT de relancer,
-    # sinon plusieurs chaines se disputent le socket DSP/le shm/le BTS et le mobile n'acquiert jamais
-    # (FBSB result=255). On ne tue QUE les lanceurs, pas ce shell.
+    # avoid stacking: kill any ghost launcher (run_si.sh/run.sh) BEFORE restarting, otherwise
+    # several chains fight over the DSP socket/the shm/the BTS and the mobile never acquires
+    # (FBSB result=255). ONLY the launchers are killed, not this shell.
     for q in $(pgrep -f 'run_si\.sh|c54x_exe/run\.sh' 2>/dev/null); do [ "$q" = "$$" ] || kill "$q" 2>/dev/null; done
     ( cd "$HERE" && ./run.sh --stop ) >/dev/null 2>&1; sleep 1
     if [ "$mode_full" = 1 ]; then
@@ -730,7 +731,7 @@ aide() {
   adresses : 1234, 0x1234, 1:8000 (page 1).  insn : mnemonique TI (LD #0x1234, A) ou mots hex (f020 1234).
 FIN
 }
-dispatch() { # dispatch <ligne de commande>
+dispatch() { # dispatch <command line>
     c=$1; shift
     case $c in
         pas) cmd_pas "$@" ;;      essai) cmd_essai "$@" ;;
@@ -763,9 +764,9 @@ repl() {
     done
 }
 
-# ---------------------------------------------------------------- menu interactif
+# ---------------------------------------------------------------- interactive menu
 pause() { printf '\n  [Entree pour continuer] '; read -r _; }
-demander() { # demander <invite> [defaut] -> REP
+demander() { # demander <prompt> [default] -> REP
     printf '  %s' "$1"; [ -n "${2:-}" ] && printf ' [%s]' "$2"; printf ' : '
     read -r REP; [ -z "$REP" ] && REP=${2:-}
 }
@@ -830,7 +831,7 @@ FIN
     done
 }
 
-# ---------------------------------------------------------------- point d'entree
+# ---------------------------------------------------------------- entry point
 case ${1:-menu} in
     menu) menu ;;
     repl) repl ;;

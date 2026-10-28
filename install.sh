@@ -1,57 +1,57 @@
 #!/bin/bash
 # =============================================================================
-#  install.sh - construit c54x_exe (le DSP Calypso hors QEMU) et pose sa ROM
+#  install.sh - builds c54x_exe (the Calypso DSP outside QEMU) and installs its ROM
 # =============================================================================
 #
-#  Autonome : il faut les SOURCES de qosmo (clonees, pas construites :
-#  c54x_exe compile hw/arm/calypso/l1-dsp/ de cet arbre) et libosmocore avec
-#  libosmocoding, visibles de pkg-config - ce qu a deja qui a sa pile Osmocom.
-#  C est aussi CE script qu appellent le Dockerfile d osmo-operator (stage l1),
-#  son Dockerfile.run, start-docker.sh, l ISO et l installation native
-#  (install_modules/45-calypso.sh) : une seule liste de commandes.
+#  Standalone: it needs the qosmo SOURCES (cloned, not built: c54x_exe compiles
+#  hw/arm/calypso/l1-dsp/ of that tree) and libosmocore with libosmocoding,
+#  visible to pkg-config - which anyone with an Osmocom stack already has.
+#  This is also THE script called by the osmo-operator Dockerfile (stage l1),
+#  its Dockerfile.run, start-docker.sh, the ISO and the native installation
+#  (install_modules/45-calypso.sh): a single list of commands.
 #
-#      ./install.sh                 tout : build, rom, verify
-#      ./install.sh --check         prerequis et etat, NE MODIFIE RIEN
-#      ./install.sh --list          les etapes et les valeurs retenues
-#      ./install.sh --print-deps    les paquets apt, sur une ligne
-#      sudo ./install.sh --deps     installe les paquets apt manquants, rien d autre
-#      sudo ./install.sh --with-deps   les paquets manquants, puis tout
-#      ./install.sh --only rom      une ou des etapes (liste a virgules)
-#      ./install.sh --skip verify   toutes sauf celles-la
-#      ./install.sh --reinstall     rejoue meme ce qui est deja fait
-#      ./install.sh -v              la sortie des commandes a l ecran (sinon : journal)
+#      ./install.sh                 everything: build, rom, verify
+#      ./install.sh --check         prerequisites and state, MODIFIES NOTHING
+#      ./install.sh --list          the steps and the values retained
+#      ./install.sh --print-deps    the apt packages, on one line
+#      sudo ./install.sh --deps     installs the missing apt packages, nothing else
+#      sudo ./install.sh --with-deps   the missing packages, then everything
+#      ./install.sh --only rom      one or more steps (comma-separated list)
+#      ./install.sh --skip verify   all but those
+#      ./install.sh --reinstall     replays even what is already done
+#      ./install.sh -v              command output on screen (otherwise: log)
 #
-#  Options, et la variable qui fait la meme chose (l option l emporte) :
-#      --qosmo DIR      QOSMO        $GSM_ROOT/qosmo     les sources compilees
-#      --rom-dir DIR    ROM_DIR      $GSM_ROOT           ou poser la ROM (repetable) ; sans
-#                                                        l option : ROM_DIR ET rom/ de ce depot
-#                                                        (Dockerfile:736). c54x_exe la lit dans
-#                                                        --rom-dir, /opt/GSM par defaut (src/main.c:79)
-#      --portable       PORTABLE=1   0                   CFLAGS du Dockerfile:735, sans -march=native :
-#                                                        pour un binaire qui tournera sur un autre CPU
-#      --dest DIR                                        copie ce depot dans DIR (sans .git ni binaires)
-#                                                        et y construit : l arbre courant n est pas touche
+#  Options, and the variable that does the same (the option wins):
+#      --qosmo DIR      QOSMO        $GSM_ROOT/qosmo     the compiled sources
+#      --rom-dir DIR    ROM_DIR      $GSM_ROOT           where to put the ROM (repeatable); without
+#                                                        the option: ROM_DIR AND rom/ of this repo
+#                                                        (Dockerfile:736). c54x_exe reads it from
+#                                                        --rom-dir, /opt/GSM by default (src/main.c:79)
+#      --portable       PORTABLE=1   0                   CFLAGS of Dockerfile:735, without -march=native:
+#                                                        for a binary that will run on another CPU
+#      --dest DIR                                        copies this repo into DIR (without .git or binaries)
+#                                                        and builds there: the current tree is untouched
 #                       GSM_ROOT     /opt/GSM     ROM_VERSION 3606     LOG_DIR /tmp/c54x_exe-install
-#                       FREECALYPSO_URL : miroir de la ROM (rom/fetch-rom.sh)
+#                       FREECALYPSO_URL: ROM mirror (rom/fetch-rom.sh)
 #
-#  Correspondance avec osmo-operator/Dockerfile : chaque etape cite ses lignes,
-#  celles du Dockerfile au commit 4266c8b, quand il portait encore ces commandes
-#  (stage l1, 723-741 ; paquets 156-205). Il appelle desormais ce script.
+#  Correspondence with osmo-operator/Dockerfile: each step cites its lines,
+#  those of the Dockerfile at commit 4266c8b, when it still carried these
+#  commands (stage l1, 723-741; packages 156-205). It now calls this script.
 # -----------------------------------------------------------------------------
 set -uo pipefail
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE CONTRAT - celui de osmo-operator/install_modules/_lib/inst.sh
+#  THE CONTRACT - that of osmo-operator/install_modules/_lib/inst.sh
 # ═════════════════════════════════════════════════════════════════════════════
-#  Copie IDENTIQUE dans qosmo/install.sh, c54x_exe/install.sh et
-#  grgsm_exe/install.sh : chaque depot doit pouvoir s installer seul, sans
-#  osmo-operator. Une correction ici se reporte dans les deux autres.
+#  IDENTICAL copy in qosmo/install.sh, c54x_exe/install.sh and
+#  grgsm_exe/install.sh: each repo must be able to install on its own, without
+#  osmo-operator. A fix here is carried over to the other two.
 #
-#  Quatre fonctions par etape, `run` seule obligatoire :
-#     inst_<etape>_check    prerequis, LECTURE SEULE        0 ok · 1 manque · 4 sans objet
-#     inst_<etape>_done     deja fait ?                     0 oui · 1 non
-#     inst_<etape>_run      fait le travail                 0 ok · 1 echec · 3 deja fait
-#     inst_<etape>_verify   controle APRES coup             0 ok · 1 echec
+#  Four functions per step, only `run` is mandatory:
+#     inst_<step>_check     prerequisites, READ ONLY        0 ok · 1 missing · 4 not applicable
+#     inst_<step>_done      already done?                   0 yes · 1 no
+#     inst_<step>_run       does the work                   0 ok · 1 failure · 3 already done
+#     inst_<step>_verify    check AFTER the fact            0 ok · 1 failure
 # -----------------------------------------------------------------------------
 readonly INST_RC_OK=0 INST_RC_FAIL=1 INST_RC_DONE=3 INST_RC_NA=4
 declare -a INST_ORDER=()
@@ -70,16 +70,16 @@ inst_say()  { printf '%s\n' "$*"; }
 have_cmd()  { command -v "$1" >/dev/null 2>&1; }
 have_file() { [ -f "$1" ]; }
 have_pkg()  { dpkg -s "$1" >/dev/null 2>&1; }
-# Un chemin est inscriptible s il l est, ou si son plus proche parent existant
-# l est (on pourra le creer).
+# A path is writable if it is, or if its closest existing parent is (it can
+# then be created).
 ecrivable() { local d="$1"; while [ ! -e "$d" ] && [ "$d" != / ]; do d="$(dirname "$d")"; done; [ -w "$d" ]; }
-# Chemin absolu sans exiger qu il existe (configure, make -C et les --dest
-# changent de dossier : un chemin relatif n y voudrait plus rien dire).
+# Absolute path without requiring it to exist (configure, make -C and the
+# --dest change directory: a relative path would mean nothing there).
 absolu() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$PWD/$1" ;; esac; }
 
-# exige "ce qu il faut" "conseil si absent" commande... : une condition de
-# prerequis. En --check elle est imprimee (ok / MANQUE + conseil) ; sinon elle
-# est memorisee, et la premiere qui manque donne la raison de l echec.
+# exige "what is needed" "advice if absent" command...: a prerequisite
+# condition. Under --check it is printed (ok / MANQUE + advice); otherwise it
+# is remembered, and the first missing one gives the reason for the failure.
 _MANQUE=()
 exige() {
     local quoi="$1" conseil="$2"; shift 2
@@ -95,14 +95,14 @@ exige() {
     _MANQUE+=("$quoi")
     return 1
 }
-# Verdict d une fonction check qui a appele exige.
+# Verdict of a check function that called exige.
 bilan_exige() {
     [ ${#_MANQUE[@]} -eq 0 ] && { inst_ok; return $INST_RC_OK; }
     local plus=""; [ ${#_MANQUE[@]} -gt 1 ] && plus=" (+$(( ${#_MANQUE[@]} - 1 )) autre(s), --check)"
     inst_fail "manque : ${_MANQUE[0]}$plus"
 }
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE COMPOSANT - c54x_exe
+#  THE COMPONENT - c54x_exe
 # ═════════════════════════════════════════════════════════════════════════════
 COMPOSANT=c54x_exe
 : "${GSM_ROOT:=/opt/GSM}"
@@ -113,16 +113,16 @@ COMPOSANT=c54x_exe
 : "${LOG_DIR:=/tmp/c54x_exe-install}"
 ROM_DIRS=()
 DEST=""
-# Dockerfile:735 - les drapeaux du Makefile, sans -march=native : un binaire
-# -march=native construit ailleurs meurt en SIGILL au demarrage (Dockerfile:726-728).
+# Dockerfile:735 - the Makefile flags, without -march=native: a -march=native
+# binary built elsewhere dies with SIGILL at startup (Dockerfile:726-728).
 CFLAGS_PORTABLE="-O3 -g -Wall -Werror=format -Werror=format-extra-args -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-sign-compare"
 ROMS="DROM PDROM PROM0 PROM1 PROM2 PROM3"
 
-# Paquets apt, repris de la liste unique d osmo-operator/Dockerfile :
-#   :159      build-essential pkg-config curl       compilation ; curl pour rom/fetch-rom.sh
-#   :166      python3                               tools/dsp_txt2bin.py (conversion de la ROM)
-# libosmocore / libosmocoding ne sont PAS des paquets apt dans l image : elle les
-# compile (Dockerfile:260-311). Ici on les exige seulement, par pkg-config.
+# apt packages, taken from the single list of osmo-operator/Dockerfile:
+#   :159      build-essential pkg-config curl       compilation; curl for rom/fetch-rom.sh
+#   :166      python3                               tools/dsp_txt2bin.py (ROM conversion)
+# libosmocore / libosmocoding are NOT apt packages in the image: it compiles
+# them (Dockerfile:260-311). Here they are only required, through pkg-config.
 PAQUETS=(build-essential pkg-config python3 curl)
 
 options_composant() {
@@ -141,8 +141,8 @@ apres_options() {
         d="$(absolu "${d%/}")"; in_liste "$d" "${l[@]+"${l[@]}"}" || l+=("$d")
     done
     ROM_DIRS=("${l[@]}")
-    # --dest : on construit une COPIE. Le binaire en service (un banc qui tourne
-    # sur $ICI/c54x_exe) n est pas reecrit sous ses pieds.
+    # --dest: a COPY is built. The binary in service (a bench running on
+    # $ICI/c54x_exe) is not rewritten under its feet.
     if [ -n "$DEST" ] && [ "$ACTION" = install ]; then
         DEST="$(absolu "$DEST")"
         if [ "$DEST" != "$ICI" ]; then
@@ -157,7 +157,7 @@ apres_options() {
                 [ "$a" = --dest ] && { sauter=1; continue; }
                 args+=("$a")
             done
-            # sans --rom-dir, la ROM va dans ROM_DIR et rom/ de la COPIE
+            # without --rom-dir, the ROM goes into ROM_DIR and rom/ of the COPY
             exec bash "$DEST/install.sh" "${args[@]+"${args[@]}"}"
         fi
     fi
@@ -176,23 +176,23 @@ apres_etapes() {
     printf '  lancer  : PONT=1 %s/run.sh   (wiki osmo-operator, Installer-c54x_exe)\n' "$ICI"
 }
 
-# La ROM d un dossier est-elle complete et conforme a rom/SHA256SUMS.<version> ?
-# (le meme test que bon() de rom/fetch-rom.sh, plus l instantane de registres)
+# Is the ROM of a directory complete and matching rom/SHA256SUMS.<version>?
+# (the same test as bon() of rom/fetch-rom.sh, plus the register snapshot)
 rom_valide() {
     local s="$ICI/rom/SHA256SUMS.$ROM_VERSION" r
     [ -f "$s" ] || return 1
     for r in $ROMS Registers; do [ -f "$1/calypso_dsp.$r.bin" ] || return 1; done
     ( cd "$1" && sha256sum -c --quiet "$s" ) >/dev/null 2>&1
 }
-# Une copie deja verifiee sur cette machine, parmi les destinations et rom/.
+# A copy already verified on this machine, among the destinations and rom/.
 rom_source_locale() {
     local d; for d in "${ROM_DIRS[@]}" "$ICI/rom"; do rom_valide "$d" && { printf '%s\n' "$d"; return 0; }; done
     return 1
 }
 
 # ── build ─────────────────────────────────────────────────────────────────────
-# Pas de « deja fait » : le Makefile recompile a CHAQUE appel, c est voulu
-# (Makefile:46-52, les sources viennent d un autre depot).
+# No "already done": the Makefile recompiles on EVERY call, by design
+# (Makefile:46-52, the sources come from another repo).
 INST_REGISTER build "Compilation de c54x_exe (sources de qosmo)"
 _conseil_osmo() {
     if [ -f /usr/local/lib/pkgconfig/libosmocoding.pc ]; then
@@ -211,15 +211,15 @@ inst_build_check() {
     exige "compilateur C (${CC:-gcc})" "apt-get install build-essential" have_cmd "${CC:-gcc}"
     exige "make" "apt-get install build-essential" have_cmd make
     exige "pkg-config" "apt-get install pkg-config" have_cmd pkg-config
-    # Le Makefile (ligne 14) avale l erreur de pkg-config (2>/dev/null) : sans
-    # ce controle, l echec n arrive qu au link, sur des gsm0503_* introuvables.
+    # The Makefile (line 14) swallows the pkg-config error (2>/dev/null): without
+    # this check, the failure only shows at link time, on missing gsm0503_*.
     exige "libosmocoding + libosmocore vus de pkg-config" "$(_conseil_osmo)" \
         pkg-config --exists libosmocoding libosmocore
     exige "$ICI inscriptible (le binaire y est ecrit)" "--dest DIR pour construire une copie ailleurs" test -w "$ICI"
     bilan_exige
 }
 inst_build_run() {
-    # Dockerfile:733-735 : cd c54x_exe && make QOSMO=/opt/GSM/qosmo CFLAGS="<sans -march=native>"
+    # Dockerfile:733-735: cd c54x_exe && make QOSMO=/opt/GSM/qosmo CFLAGS="<without -march=native>"
     local args=("QOSMO=$QOSMO")
     [ "$PORTABLE" = 1 ] && args+=("CFLAGS=$CFLAGS_PORTABLE")
     make -C "$ICI" "${args[@]}" || { inst_fail "echec de compilation"; return $INST_RC_FAIL; }
@@ -233,7 +233,7 @@ inst_build_verify() {
     inst_ok
 }
 
-# ── rom : la mask-ROM TI, telechargee (pas dans le depot) ─────────────────────
+# ── rom: the TI mask-ROM, downloaded (not in the repo) ────────────────────────
 INST_REGISTER rom "ROM DSP $ROM_VERSION (FreeCalypso, somme verifiee)"
 inst_rom_done() { local d; for d in "${ROM_DIRS[@]}"; do rom_valide "$d" || return 1; done; }
 inst_rom_check() {
@@ -243,7 +243,7 @@ inst_rom_check() {
     local d; for d in "${ROM_DIRS[@]}"; do
         exige "$d inscriptible (ROM)" "sudo, ou --rom-dir DIR" ecrivable "$d"
     done
-    # Le reseau, python3 et curl ne servent que s il n y a nulle part de copie valide.
+    # The network, python3 and curl are only needed if no valid copy exists anywhere.
     if ! rom_source_locale >/dev/null; then
         exige "python3 (tools/dsp_txt2bin.py)" "apt-get install python3" have_cmd python3
         exige "curl ou wget (telechargement FreeCalypso)" "apt-get install curl" sh -c 'command -v curl || command -v wget'
@@ -251,8 +251,8 @@ inst_rom_check() {
     bilan_exige
 }
 inst_rom_run() {
-    # 1. Une copie deja verifiee sur cette machine ? on la recopie, sans reseau.
-    #    (Dockerfile.run:188 et start-docker.sh faisaient cp c54x_exe/rom/*.bin /opt/GSM/.)
+    # 1. A copy already verified on this machine? copy it over, without network.
+    #    (the equivalent of cp c54x_exe/rom/*.bin /opt/GSM/ in Dockerfile.run:188 and start-docker.sh)
     local src d r args=()
     if src="$(rom_source_locale)"; then
         for d in "${ROM_DIRS[@]}"; do
@@ -266,8 +266,8 @@ inst_rom_run() {
             inst_say "ROM DSP $ROM_VERSION recopiee de $src vers $d (somme verifiee)"
         done
     fi
-    # 2. rom/fetch-rom.sh fait le reste : telecharge, convertit, verifie, depose
-    #    (Dockerfile:736). Tout deja en place : il le dit et ne telecharge rien.
+    # 2. rom/fetch-rom.sh does the rest: downloads, converts, verifies, installs
+    #    (Dockerfile:736). Everything already in place: it says so and downloads nothing.
     for d in "${ROM_DIRS[@]}"; do args+=(--dest "$d"); done
     bash "$ICI/rom/fetch-rom.sh" --version "$ROM_VERSION" "${args[@]}" \
         || { inst_hint "reseau ? un miroir : FREECALYPSO_URL=..."; inst_fail "rom/fetch-rom.sh en echec"; return $INST_RC_FAIL; }
@@ -275,11 +275,11 @@ inst_rom_run() {
 }
 inst_rom_verify() { inst_rom_done && inst_ok || inst_fail "ROM incomplete ou somme differente dans ${ROM_DIRS[*]}"; }
 
-# ── verify : le DSP seul ──────────────────────────────────────────────────────
-# README.md:66 : « la ROM seule, sans ARM : boote-t-elle ? ». Hors --arm,
-# c54x_exe travaille sur une API RAM PRIVEE : ni /dev/shm, ni socket, ni
-# /tmp/c54x-pont - un banc en marche a cote n en voit rien. Les CALYPSO_* de
-# l appelant (sondes, traces) sont retires pour que ca le reste.
+# ── verify: the DSP alone ─────────────────────────────────────────────────────
+# README.md:66: "the ROM alone, without ARM: does it boot?". Outside --arm,
+# c54x_exe works on a PRIVATE API RAM: no /dev/shm, no socket, no
+# /tmp/c54x-pont - a bench running alongside sees nothing of it. The caller's
+# CALYPSO_* (probes, traces) are removed so that it stays that way.
 INST_REGISTER verify "Controle : c54x_exe --trames 200 (la ROM seule)"
 sans_calypso_env() {
     local v u=(); for v in $(compgen -e); do case "$v" in CALYPSO_*) u+=(-u "$v") ;; esac; done
@@ -301,19 +301,19 @@ inst_verify_run() {
     inst_ok
 }
 # ═════════════════════════════════════════════════════════════════════════════
-#  LE MOTEUR - copie IDENTIQUE dans les trois depots (voir LE CONTRAT)
+#  THE ENGINE - IDENTICAL copy in the three repos (see THE CONTRACT)
 # ═════════════════════════════════════════════════════════════════════════════
-#  Meme deroule que osmo-operator/install.sh : pour chaque etape retenue,
-#  « deja fait ? » (sauf --reinstall), prerequis, travail, controle. Le premier
-#  echec arrete tout, dit pourquoi et montre la fin du journal de l etape.
-#  Le composant fournit : COMPOSANT, PAQUETS, LOG_DIR, les etapes, et les
-#  crochets options_composant / apres_options / resume_composant /
+#  Same flow as osmo-operator/install.sh: for each retained step,
+#  "already done?" (except --reinstall), prerequisites, work, check. The first
+#  failure stops everything, says why and shows the tail of the step's log.
+#  The component provides: COMPOSANT, PAQUETS, LOG_DIR, the steps, and the
+#  hooks options_composant / apres_options / resume_composant /
 #  avant_etapes / apres_etapes.
 # -----------------------------------------------------------------------------
 ACTION=install ONLY="" SKIP="" WITH_DEPS=0
 : "${REINSTALL:=0}" "${VERBOSE:=0}"
 _ARGS_ORIG=("$@")
-# _val OPTION [VALEUR] : une option qui attend une valeur doit l avoir.
+# _val OPTION [VALUE]: an option that expects a value must have one.
 _val() { [ $# -ge 2 ] && [ -n "$2" ] || { printf '%s : valeur attendue   (--help)\n' "$1" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -350,7 +350,7 @@ end()   { [ $TTY -eq 1 ] && [ "$VERBOSE" != 1 ] && printf '\r\033[K'
           printf '[%s%s%s] %s' "$2" "$1" "$C_Z" "$3"
           [ -n "${4:-}" ] && printf ' %s(%s)%s' "$C_DIM" "$4" "$C_Z"; printf '\n'; }
 
-# --- selection des etapes (--only / --skip, listes a virgules) ---------------
+# --- step selection (--only / --skip, comma-separated lists) -----------------
 in_csv() { case ",$1," in *",$2,"*) return 0;; esac; return 1; }
 for _s in ${ONLY//,/ } ${SKIP//,/ }; do
     [ -n "${INST_DESC[$_s]+x}" ] || { printf 'etape inconnue : %s   (etapes : %s)\n' "$_s" "${INST_ORDER[*]}" >&2; exit 2; }
@@ -361,12 +361,12 @@ for _s in "${INST_ORDER[@]}"; do
     [ -n "$SKIP" ] && in_csv "$SKIP" "$_s" && continue
     SELECTED+=("$_s")
 done
-# Une etape qui produit ce qu une autre exige : en --check, on ne reproche pas
-# a la seconde l absence de ce que la premiere va justement fabriquer.
+# A step that produces what another requires: under --check, the second one
+# is not blamed for the absence of what the first one is about to build.
 etape_retenue() { in_csv "$(IFS=,; echo "${SELECTED[*]}")" "$1"; }
 
-# --- paquets apt --------------------------------------------------------------
-# rend la liste des absents ; code 2 sans dpkg (pas une Debian/Ubuntu)
+# --- apt packages -------------------------------------------------------------
+# returns the list of missing ones; code 2 without dpkg (not a Debian/Ubuntu)
 paquets_absents() {
     have_cmd dpkg || return 2
     local p; for p in "${PAQUETS[@]}"; do have_pkg "$p" || printf '%s ' "$p"; done
@@ -437,13 +437,13 @@ fi
 if [ "$VERBOSE" != 1 ]; then
     mkdir -p "$LOG_DIR" || { printf 'journal impossible : %s (LOG_DIR=...)\n' "$LOG_DIR" >&2; exit 1; }
 fi
-# _jouer FONCTION : la sortie va au journal de l etape, ou a l ecran en -v.
-# Pas de tube : la fonction tourne dans CE shell (sa raison d echec survit).
+# _jouer FUNCTION: the output goes to the step's log, or to the screen with -v.
+# No pipe: the function runs in THIS shell (its failure reason survives).
 _jouer() { if [ "$VERBOSE" = 1 ]; then "$1"; else "$1" >>"$_log" 2>&1; fi; }
-_echec() {   # _echec ETAPE RAISON [journal] : dit tout ce qu on sait, et s arrete
+_echec() {   # _echec STEP REASON [log]: says everything known, and stops
     end FAIL "$C_KO" "${INST_DESC[$1]}" "$2"
     [ -n "$_INST_HINT" ] && printf '       → %s\n' "$_INST_HINT"
-    # la fin du journal, quand c est le travail (run, verify) qui a echoue
+    # the tail of the log, when it is the work (run, verify) that failed
     if [ -n "${3:-}" ] && [ "$VERBOSE" != 1 ] && [ -s "$_log" ]; then
         printf '       %sjournal : %s (fin ci-dessous)%s\n' "$C_DIM" "$_log" "$C_Z"
         tail -n 25 "$_log" | sed 's/^/       | /'
@@ -478,7 +478,7 @@ for _s in "${SELECTED[@]}"; do
                          _nb_skip=$((_nb_skip + 1)); continue ;;
         *)               _echec "$_s" "${_INST_REASON:-echec}" journal ;;
     esac
-    # installer n est pas avoir installe : on controle apres coup
+    # installing is not having installed: checked after the fact
     if declare -F "${_p}_verify" >/dev/null && ! _jouer "${_p}_verify"; then
         _echec "$_s" "faite, mais le controle echoue : ${_INST_REASON:-}" journal
     fi

@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * dsp_banc_commun.c - le DSP Calypso pilote comme par l'ARM osmocom-bb.
- * Voir dsp_banc_commun.h. Les sequences sont recopiees du firmware
- * (osmocom-bb src/target/firmware : calypso/dsp.c, layer1/sync.c,
- * layer1/tdma_sched.c, layer1/mframe_sched.c) et du banc (src/pont.c :
- * jouer_trame, servir ; qosmo calypso_bsp.c : bsp_ts0_livrer, sb_moduler).
- * Chaque ecart est dit a l'endroit ou il est fait.
+ * dsp_banc_commun.c - the Calypso DSP driven as by the osmocom-bb ARM.
+ * See dsp_banc_commun.h. The sequences are copied from the firmware
+ * (osmocom-bb src/target/firmware: calypso/dsp.c, layer1/sync.c,
+ * layer1/tdma_sched.c, layer1/mframe_sched.c) and from the bench (src/pont.c:
+ * jouer_trame, servir; qosmo calypso_bsp.c: bsp_ts0_livrer, sb_moduler).
+ * Every deviation is stated where it is made.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +22,7 @@
 #include <osmocom/core/bits.h>
 #include <osmocom/coding/gsm0503_coding.h>
 
-/* ---- ce que main.c de c54x_exe fournit d'ordinaire ------------------------ */
+/* ---- what main.c of c54x_exe normally provides ---------------------------- */
 uint32_t g_c54x_exe_fn;
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 void calypso_inth_arm_ack(void) { }
@@ -31,7 +31,7 @@ void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 { (void)addr; if (!wr) memset(buf, 0, len); }
 extern int c54x_rapide;
 
-/* ---- etat ----------------------------------------------------------------- */
+/* ---- state ---------------------------------------------------------------- */
 struct banc_dsp_api dsp_api;
 C54xState *banc_dsp;
 uint16_t *banc_api;
@@ -51,11 +51,11 @@ int banc_n_tsp;
 static uint16_t g_tsp_prec[16];
 int banc_n_ul;
 
-static int g_irq_armee;            /* dsp_end_scenario() a la derniere l1_sync */
+static int g_irq_armee;            /* dsp_end_scenario() at the last l1_sync */
 static uint16_t g_ul_prec;
-static uint16_t g_ul_prec_ptr[6];   /* derniers pointeurs des anneaux TX : 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b */
+static uint16_t g_ul_prec_ptr[6];   /* last pointers of the TX rings: 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b */
 
-/* API RAM, en mots depuis data[0x0800] (dsp_api.h : BASE_API_*) */
+/* API RAM, in words from data[0x0800] (dsp_api.h: BASE_API_*) */
 #define W_PAGE_MOT(p)   ((p) ? 0x14u : 0x00u)
 #define R_PAGE_MOT(p)   ((p) ? 0x3Cu : 0x28u)
 #define NDB_MOT         0xD4u
@@ -68,8 +68,8 @@ static uint16_t g_ul_prec_ptr[6];   /* derniers pointeurs des anneaux TX : 0x3d9
 #define BL_CMD_COPY_BLOCK 2
 #define DSP_START       0x7000
 
-/* Registres du TWL3025 (osmocom-bb include/abb/twl3025.h ; ABB_VAL n'en garde
- * que les 5 bits bas, la page tombe). */
+/* TWL3025 registers (osmocom-bb include/abb/twl3025.h; ABB_VAL only keeps
+ * the 5 low bits, the page is dropped). */
 #define PAGE(n) ((n) << 7)
 enum { R_AFCCTLADD = PAGE(1) | 21, R_APCDEL1 = PAGE(0) | 2, R_APCDEL2 = PAGE(1) | 26,
        R_APCRAM = PAGE(0) | 10, R_APCOFF = PAGE(0) | 11, R_AUXDAC = PAGE(0) | 12,
@@ -78,8 +78,8 @@ enum { R_AFCCTLADD = PAGE(1) | 21, R_APCDEL1 = PAGE(0) | 2, R_APCDEL2 = PAGE(1) 
        R_VBUCTRL = PAGE(1) | 7, R_VBDCTRL = PAGE(0) | 6 };
 #define ABB_RAMP_VAL(up, down)  ((((down) & 0x1F) << 5) | ((up) & 0x1F))
 
-/* calypso/dsp_params.c du firmware, inclus tel quel : la table de parametres
- * d'un vrai telephone (ROM 3306/3606) que dsp_set_params() copie en API. */
+/* calypso/dsp_params.c of the firmware, included as is: the parameter table
+ * of a real phone (ROM 3306/3606) that dsp_set_params() copies into the API. */
 #include "dsp_params.c"
 
 void banc_fn2temps(struct banc_temps *t, uint32_t fn)
@@ -103,8 +103,8 @@ long banc_executer(long n)
     return k;
 }
 
-/* Un DSP a l'IDLE est reveille par une interruption pendante (SPRU131) ;
- * INT10n (fin de DMA RHEA, IMR bit 14) est une ligne de niveau. pont.c. */
+/* A DSP at IDLE is woken up by a pending interrupt (SPRU131); INT10n (end of
+ * RHEA DMA, IMR bit 14) is a level line. pont.c. */
 static void reveil(void)
 {
     C54xState *d = banc_dsp;
@@ -122,20 +122,20 @@ static void pages(void)
 
 int banc_init(void)
 {
-    /* Rien vers l'exterieur : pas de socket TRXD (un fichier de rejeu vide
-     * court-circuite l'ecoute UDP de calypso_bsp_init), pas d'horloge publiee,
-     * pas d'enregistreur, pas de moniteur de boite aux lettres. */
+    /* Nothing towards the outside: no TRXD socket (an empty replay file
+     * bypasses the UDP listener of calypso_bsp_init), no published clock,
+     * no recorder, no mailbox monitor. */
     setenv("CALYPSO_BSP_REPLAY_FILE", "/dev/null", 1);
     setenv("CALYPSO_BSP_HORLOGE", "0", 1);
     setenv("CALYPSO_REJEU_ENREG", "0", 1);
     setenv("CALYPSO_MAILBOX", "0", 1);
-    /* Interruption pendante prise des que INTM retombe : comportement C54x
-     * (SPRU131 ch. 6), active sur les deux bancs par main.c. */
+    /* Pending interrupt taken as soon as INTM drops: C54x behaviour
+     * (SPRU131 ch. 6), enabled on both benches by main.c. */
     setenv("CALYPSO_C54X_IRQ_LEVEL", "1", 0);
-    /* Le modele du coprocesseur A5 recale le COUNT des trames SACCH/TF quand il
-     * vise la trame deja deposee (calypso_a5.c, CALYPSO_A5_RECALE) : c'est un
-     * contournement d'un defaut de cadencement du banc. Le testeur le coupe
-     * pour mesurer la ROM telle quelle (sauf si l'appelant l'a fixe). */
+    /* The A5 coprocessor model realigns the COUNT of SACCH/TF frames when it
+     * targets the frame already deposited (calypso_a5.c, CALYPSO_A5_RECALE): a
+     * workaround for a bench timing defect. The tester turns it off to measure
+     * the ROM as it is (unless the caller has set it). */
     setenv("CALYPSO_A5_RECALE", "0", 0);
     qemu_mutex_init(&calypso_pcb_daram_lock);
     { const char *d = getenv("CALYPSO_DEBUG"), *r = getenv("CALYPSO_C54X_RAPIDE");
@@ -143,7 +143,7 @@ int banc_init(void)
     banc_dsp = c54x_init();
     if (!banc_dsp) { fprintf(stderr, "c54x_init a echoue\n"); return -1; }
     banc_api = &banc_dsp->data[C54X_API_BASE];
-    c54x_set_api_ram(banc_dsp, banc_api);       /* AVANT les ROM (main.c) */
+    c54x_set_api_ram(banc_dsp, banc_api);       /* BEFORE the ROMs (main.c) */
     static const struct { const char *s; uint32_t a; bool p; } R[] = {
         { "PROM0", 0x07000, true }, { "PROM1", 0x18000, true }, { "PROM2", 0x28000, true },
         { "PROM3", 0x38000, true }, { "DROM", 0x09000, false }, { "PDROM", 0x0E000, false },
@@ -256,9 +256,9 @@ int banc_dsp_power_on(struct banc_boot *b)
     memset(b, 0, sizeof *b);
     memset(banc_api, 0, 0x2000u * sizeof(uint16_t));        /* dsp_api_memset(API) */
 
-    /* dsp_pre_boot() : le DSP sort du reset et attend dans son chargeur
-     * (BL_STATUS_IDLE). Ecart : le firmware y televerse d'abord dsp_bootcode
-     * par le miroir 0xe000 ; ici c'est le chargeur de la ROM qui tourne. */
+    /* dsp_pre_boot(): the DSP leaves reset and waits in its loader
+     * (BL_STATUS_IDLE). Deviation: the firmware first uploads dsp_bootcode
+     * there through the 0xe000 mirror; here the ROM's loader runs. */
     long n = 0;
     while (banc_api[BL_STATUS_W] != BL_STATUS_IDLE && n < 8000000) {
         int r = c54x_run(banc_dsp, 256); if (r <= 0) break; n += r;
@@ -306,7 +306,7 @@ int banc_dsp_power_on(struct banc_boot *b)
     memset(&banc_api[R_PAGE_MOT(1)], 0, sizeof(T_DB_DSP_TO_MCU));
     dsp_api.frame_ctr = 0;
     dsp_api.r_page = dsp_api.w_page = dsp_api.r_page_used = 0;
-    /* layer1 init : l1s_reset_hw() */
+    /* layer1 init: l1s_reset_hw() */
     l1s_reset_hw();
     g_ul_prec = banc_dsp->data[0x3d9b];
     { static const uint16_t ptrs[6] = { 0x3d91, 0x3d93, 0x3d95, 0x3d97, 0x3d99, 0x3d9b };
@@ -327,7 +327,7 @@ void dsp_end_scenario(void)
 {
     dsp_api.ndb->d_dsp_page = B_GSM_TASK | dsp_api.w_page;
     dsp_api.w_page ^= 1;
-    g_irq_armee = 1;            /* tpu_dsp_frameirq_enable() : IT trame a la trame suivante */
+    g_irq_armee = 1;            /* tpu_dsp_frameirq_enable(): frame IT at the next frame */
 }
 
 void dsp_load_rx_task(uint16_t task, uint8_t burst_id, uint8_t tsc)
@@ -447,7 +447,7 @@ static void tdma_sched_execute(void)
     int seq[TDMASCHED_NUM_CB];
     __typeof__(g_bucket[0]) *b = &g_bucket[g_cur_bucket];
     for (int i = 0; i < TDMASCHED_NUM_CB; i++) seq[i] = i;
-    for (int i = 0; i < b->num_items; i++) {          /* _tdma_sched_bucket_sort, a l'identique */
+    for (int i = 0; i < b->num_items; i++) {          /* _tdma_sched_bucket_sort, identical */
         struct tdma_sched_item *ii = &b->item[seq[i]];
         for (int j = i + 1; j < b->num_items; j++) {
             struct tdma_sched_item *jj = &b->item[seq[j]];
@@ -516,7 +516,7 @@ static void l1_sync(void)
     g_cur_bucket = wrap_bucket(1);       /* tdma_sched_advance() */
 }
 
-/* ---- le canal radio ------------------------------------------------------------ */
+/* ---- the radio channel --------------------------------------------------------- */
 const uint8_t banc_tsc[8][26] = {      /* 45.002 table 5.2.3a */
     { 0,0,1,0,0,1,0,1,1,1,0,0,0,0,1,0,0,0,1,0,0,1,0,1,1,1 },
     { 0,0,1,0,1,1,0,1,1,1,0,1,1,1,1,0,0,0,1,0,1,1,0,1,1,1 },
@@ -595,14 +595,14 @@ char banc_cellule(uint32_t fn, uint8_t bits[148], int *amp)
     return 'D';
 }
 
-/* SCH : la forme d'onde du BSP (calypso_bsp.c sb_moduler, reglages par defaut :
- * elargissement 1.0, instant 0.35, bruit gaussien sigma 3000 seme par le fn,
- * forme A). Recopiee parce que statique dans calypso_bsp.c. */
+/* SCH: the BSP waveform (calypso_bsp.c sb_moduler, default settings:
+ * spread 1.0, instant 0.35, Gaussian noise sigma 3000 seeded by the fn,
+ * shape A). Copied because it is static in calypso_bsp.c. */
 static int g_sb_propre = -1;
 static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn, int amp)
 {
     if (g_sb_propre < 0) { const char *e = getenv("BANC_SB_PROPRE"); g_sb_propre = (e && *e == '1'); }
-    if (g_sb_propre) {                                    /* GMSK nue, comme un burst normal */
+    if (g_sb_propre) {                                    /* bare GMSK, like a normal burst */
         gmsk_moduler(bits, 148, amp, 0.0, 0.5, dst);
         gmsk_elargir(dst, 148, 0.3);
         return;
@@ -624,7 +624,7 @@ static void sb_moduler(const uint8_t *bits, int16_t *dst, uint32_t fn, int amp)
 
 static struct { uint32_t fn, tick; uint8_t bits[148]; int amp; bool valide, livre_sb; } g_sch;
 
-/* bsp_ts0_livrer() : cadrage du burst selon la fenetre que la ROM a armee. */
+/* bsp_ts0_livrer(): framing of the burst according to the window the ROM armed. */
 static void deposer(uint32_t fn)
 {
     static int16_t iq[2 * 512], iq2[2 * 148];
@@ -635,19 +635,19 @@ static void deposer(uint32_t fn)
     const bool one_shot = calypso_rhea_dma_one_shot();
     const int nwin = one_shot ? calypso_rhea_dma_get_len_words() / 2 : 0;
     int marge = nwin >= 190 ? 21 : nwin >= 150 ? 3 : 0;
-    /* BANC_FB_DECAL=k : en recherche FB (DMA continue), le FCCH est depose k
-     * echantillons apres l'ouverture de la fenetre (mesure TOA = f(k)). */
+    /* BANC_FB_DECAL=k: in FB search (continuous DMA), the FCCH is deposited k
+     * samples after the window opens (TOA measurement = f(k)). */
     static int fb_decal = -1;
     if (fb_decal < 0) { const char *e = getenv("BANC_FB_DECAL"); fb_decal = e ? atoi(e) : 0; }
     if (!one_shot && type == 'F') marge = fb_decal;
-    /* BANC_SB_DECAL=k : en fenetre SB (one-shot), le SCH est depose k echantillons
-     * apres l'ouverture de la fenetre (defaut 21). */
+    /* BANC_SB_DECAL=k: in the SB window (one-shot), the SCH is deposited k samples
+     * after the window opens (default 21). */
     static int sb_decal = -2;
     if (sb_decal == -2) { const char *e = getenv("BANC_SB_DECAL"); sb_decal = e ? atoi(e) : -1; }
     if (type == 'S' && one_shot && nwin >= 190 && sb_decal >= 0) marge = sb_decal;
     static int sb_neg = 0; { const char *e = getenv("BANC_SB_NEG"); sb_neg = e ? atoi(e) : 0; }
     if (type == 'S' && one_shot && nwin >= 190 && sb_neg > 0) marge = 0;
-    /* BANC_NB_DECAL=k : burst normal (fenetre one-shot de 150..189 echantillons), defaut 3. */
+    /* BANC_NB_DECAL=k: normal burst (one-shot window of 150..189 samples), default 3. */
     static int nb_decal = -2;
     if (nb_decal == -2) { const char *e = getenv("BANC_NB_DECAL"); nb_decal = e ? atoi(e) : -1; }
     if (type != 'S' && type != 'F' && type && one_shot && nwin >= 150 && nwin < 190 && nb_decal >= 0) marge = nb_decal;
@@ -660,7 +660,7 @@ static void deposer(uint32_t fn)
         if (g_sch.livre_sb) banc_stats.depots_fenetre_sb++;
         { static int cel = -1; if (cel < 0) cel = getenv("BANC_SB_CELLULE") ? 1 : 0;
           extern char cellule_burst(uint32_t, uint8_t, int, double, int, int16_t *, int *) __attribute__((weak));
-          if (cel && cellule_burst) {   /* meme forme d'onde que le pont : src/cellule.c cellule_burst() */
+          if (cel && cellule_burst) {   /* same waveform as the bridge: src/cellule.c cellule_burst() */
               static int16_t tmp[2 * 512]; int n_iq = 0;
               const char *ed = getenv("BANC_SB_DEC");
               cellule_burst(fn, banc_bsic, amp, ed ? atof(ed) : 0.5, marge, tmp, &n_iq);
@@ -670,7 +670,7 @@ static void deposer(uint32_t fn)
               if (sb_neg > 0) { memmove(iq, iq + 2 * sb_neg, (size_t)(2 * (512 - sb_neg)) * sizeof(int16_t)); marge = 1; }
           } }
     } else if (type) {
-        /* BANC_NB_NEG=n : burst normal en avance de n echantillons (debut coupe) */
+        /* BANC_NB_NEG=n: normal burst n samples early (start cut off) */
         static int nb_neg = -1; if (nb_neg < 0) { const char *e = getenv("BANC_NB_NEG"); nb_neg = e ? atoi(e) : 0; }
         const bool nb_win = type != 'F' && one_shot && nwin >= 150 && nwin < 190;
         if (nb_neg > 0 && nb_win) marge = 0;
@@ -683,7 +683,7 @@ static void deposer(uint32_t fn)
     if (total > 256) total = 256;
     calypso_bsp_rx_burst(0, fn, iq, 2 * total);
     banc_stats.depots++;
-    if (!one_shot) {             /* DMA continue (recherche FB) : la trame entiere */
+    if (!one_shot) {             /* continuous DMA (FB search): the whole frame */
         for (unsigned tn = 1; tn < 8; tn++) {
             const uint8_t *b = banc_source_autre ? banc_source_autre(fn, tn) : NULL;
             if (!b) b = banc_factice;
@@ -695,8 +695,8 @@ static void deposer(uint32_t fn)
     }
 }
 
-/* calypso_bsp_sb_retenter() : un SCH depose avant l'armement de la fenetre SB
- * est relivre dans la fenetre one-shot qui suit, au plus un tick apres. */
+/* calypso_bsp_sb_retenter(): an SCH deposited before the SB window is armed
+ * is delivered again in the following one-shot window, at most one tick later. */
 static void sb_retenter(uint32_t tick)
 {
     static int16_t iq[2 * 512];
@@ -717,22 +717,22 @@ static void sb_retenter(uint32_t tick)
     banc_stats.depots_fenetre_sb++;
 }
 
-/* ---- une trame (src/pont.c : jouer_trame en deux phases + servir) -------------- */
+/* ---- one frame (src/pont.c: jouer_trame in two phases + servir) ---------------- */
 uint32_t banc_fn(void) { return banc_suivant.fn; }
 void banc_set_fn(uint32_t fn) { banc_fn2temps(&banc_suivant, fn); banc_fn2temps(&banc_courant, fn ? fn - 1 : 0); }
 
 void banc_trame(void)
 {
     C54xState *d = banc_dsp;
-    const uint32_t fn = banc_suivant.fn;    /* la l1_sync de cette trame aura current_time = fn */
+    const uint32_t fn = banc_suivant.fn;    /* this frame's l1_sync will have current_time = fn */
     const long budget = banc_cfg.budget;
     uint32_t i0 = d->insn_count;
     long fait = 0;
     g_c54x_exe_fn = fn;
     banc_stats.trames++;
 
-    /* phase A : IT trame (si l'ARM a clos un scenario), la ROM lit la page W
-     * et arme sa fenetre RX */
+    /* phase A: frame IT (if the ARM closed a scenario), the ROM reads the W
+     * page and arms its RX window */
     calypso_dma_tick(d);
     reveil();
     if (g_irq_armee && (d->imr & (1u << C54X_IT_TPU_FRAME_BIT))) {
@@ -745,11 +745,11 @@ void banc_trame(void)
     while (!d->idle && d->running && (banc_sur_tch || !calypso_rhea_dma_rx_armed()) && fait < budget / 2)
         fait += banc_executer(256);
 
-    /* l'ARM : l1_sync() de la trame fn ; le DSP lira sa page a la trame suivante */
+    /* the ARM: l1_sync() of frame fn; the DSP will read its page at the next frame */
     l1_sync();
-    calypso_twl3025_set_afc_dac(banc_cfg.afc_dac);   /* relais de d_afc (pont.c, TICK) */
+    calypso_twl3025_set_afc_dac(banc_cfg.afc_dac);   /* relay of d_afc (pont.c, TICK) */
 
-    /* phase B : le burst de la trame, puis le reste du budget */
+    /* phase B: the frame's burst, then the rest of the budget */
     deposer(fn);
     reveil();
     if (!d->idle && budget - fait > 0) banc_executer(budget - fait);
@@ -771,7 +771,7 @@ void banc_courir(uint32_t n)
     for (uint32_t i = 0; i < n; i++) banc_trame();
 }
 
-/* ---- bursts montants de la ROM (pont.c tx_rom_publier) --------------------------- */
+/* ---- uplink bursts of the ROM (pont.c tx_rom_publier) ---------------------------- */
 static void banc_tsp_capturer(uint32_t fn)
 {
     const uint16_t *m = banc_dsp->data;
@@ -807,8 +807,8 @@ void banc_ul_capturer(uint32_t fn)
     for (int i = 0; i < 8; i++) u->raw[i] = m[0x3f8a + i];
     u->rang = (u->mode == 3 && p >= 0x4280 && p < 0x42a0 && (p - 0x4280) % 8 == 0) ? (int)(((p - 0x4280) / 8 + 3) & 3) : -1;
     for (int i = 0; i < 116; i++) {
-        /* 57 donnees, hl, hu, 57 donnees ; hl/hu = 2 bits BAS du mot 7 (k = 126, 127), comme pont.c tx_rom_publier
-         * (revue 2026-10-03) -- le banc gardait 114/115 et comptait 0/24 bursts justes. */
+        /* 57 data, hl, hu, 57 data; hl/hu = the 2 LOW bits of word 7 (k = 126, 127), like
+         * pont.c tx_rom_publier. */
         int k = i < 57 ? i : (i < 59 ? 126 + (i - 57) : i - 2);
         u->bits[i] = (m[0x3f8a + k / 16] >> (15 - k % 16)) & 1;
         u->flux[i] = (m[0x3f9b + k / 16] >> (15 - k % 16)) & 1;

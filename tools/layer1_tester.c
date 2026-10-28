@@ -1,61 +1,60 @@
-/* layer1_tester.c - qui lit, qui ecrit chaque mot de la memoire de donnees du DSP
- * (partie mesure de tools/layer1_tester.py ; « api_carte » en est l'alias).
+/* layer1_tester.c - who reads, who writes each word of the DSP data memory
+ * (measurement part of tools/layer1_tester.py; "api_carte" is its alias).
  *
- * Rejoue un enregistrement de canal dedie (/dev/shm/calypso_rejeu_tch.bin,
- * format de tools/rejeu_banc.c : 'S' 'D' 'T' 'A' 'B') sur le coeur C54x de
- * qosmo et la ROM TI, dans l'ordre de pont.c, et COMPTE pour chacun des 65536
- * mots de donnees :
- *   - les lectures et les ecritures faites par une instruction de la ROM
- *     (premier PC, premier tick, jusqu'a 6 PC distincts, valeurs typiques) ;
- *   - les ecritures de l'ARM (enregistrements 'A' : mots modifies cote QEMU entre
- *     deux trames, donc des MODIFICATIONS, pas toutes les ecritures) et la
- *     valeur de l'etat de depart ('S' pour l'API RAM, 'D' pour le reste) ;
- *   - les ecritures qui ne passent pas par une instruction : DMA, livraison
- *     d'I/Q du BSP, empilement d'interruption, bequilles du coeur qui ecrivent
- *     s->data[] en direct (difference d'instantanes avant/apres chaque etape).
+ * Replays a dedicated-channel recording (/dev/shm/calypso_rejeu_tch.bin,
+ * format of tools/rejeu_banc.c: 'S' 'D' 'T' 'A' 'B') on the qosmo C54x core
+ * and the TI ROM, in the order of pont.c, and COUNTS for each of the 65536
+ * data words:
+ *   - the reads and writes done by a ROM instruction (first PC, first tick,
+ *     up to 6 distinct PCs, typical values);
+ *   - the ARM writes ('A' records: words modified on the QEMU side between
+ *     two frames, hence MODIFICATIONS, not every write) and the value of the
+ *     starting state ('S' for the API RAM, 'D' for the rest);
+ *   - the writes that do not go through an instruction: DMA, I/Q delivery by
+ *     the BSP, interrupt stacking, core crutches writing s->data[] directly
+ *     (difference of snapshots before/after each step).
  *
- * LE CROCHET. qosmo n'est pas modifie : data_read()/data_write() de c54x_mem.c
- * appellent calypso_mbx() (moniteur de la boite aux lettres) a chaque acces
- * quand c54x_rapide == 0, avec l'adresse, la valeur et le PC. On lie le coeur
- * SANS calypso_mailbox.c et on fournit ici calypso_mbx_actif/_init/_evt : chaque
- * acces DSP de la memoire de donnees arrive dans compter(). Les acces faits hors
- * d'une instruction (DMA, BSP...) sont separes par g_dans_dsp. Une ecriture
- * directe s->data[] (bequille, DMA) echappe au crochet : la difference
- * d'instantanes la rattrape (colonne hc_*). Une LECTURE directe s->data[] du
- * coeur echappe aux deux : limite connue.
+ * THE HOOK. qosmo is not modified: data_read()/data_write() of c54x_mem.c
+ * call calypso_mbx() (mailbox monitor) on every access when c54x_rapide == 0,
+ * with the address, the value and the PC. The core is linked WITHOUT
+ * calypso_mailbox.c and calypso_mbx_actif/_init/_evt are provided here: every
+ * DSP access to data memory lands in compter(). Accesses made outside an
+ * instruction (DMA, BSP...) are separated by g_dans_dsp. A direct s->data[]
+ * write (crutch, DMA) escapes the hook: the snapshot difference catches it
+ * (hc_* column). A direct s->data[] READ by the core escapes both: known
+ * limit.
  *
- * PORTS I/O. PORTR/PORTW (c54x_exec.c) appellent d'abord calypso_a5_portr/_portw
- * pour TOUT port : enveloppes (--wrap) pour compter port, sens, PC, valeur
- * ecrite (lignes « io:xxxx » de la sortie). Seules les instructions 0x74xx/0x75xx
- * passent par la ; l'autre encodage PORTW (0x9Fxx) n'est que journalise par le
- * coeur et n'est pas compte.
+ * I/O PORTS. PORTR/PORTW (c54x_exec.c) first call calypso_a5_portr/_portw for
+ * EVERY port: wrappers (--wrap) to count port, direction, PC, written value
+ * ("io:xxxx" lines of the output). Only the 0x74xx/0x75xx instructions go
+ * through there; the other PORTW encoding (0x9Fxx) is only logged by the core
+ * and is not counted.
  *
- * PC ACTIFS (-p). Nombre d'acces memoire par PC (xpc:pc) : dit si une routine
- * connue de la ROM a tourne pendant le rejeu (une routine sans acces memoire
- * n'y apparait pas).
+ * ACTIVE PCs (-p). Number of memory accesses per PC (xpc:pc): tells whether a
+ * known ROM routine ran during the replay (a routine without memory access
+ * does not show up there).
  *
- * SANS EFFET DE BORD. Les sources du coeur ouvrent des fichiers /dev/shm et une
- * socket UDP (calypso_bsp.c) : l'edition de liens enveloppe fopen/open/socket
- * (-Wl,--wrap=...) ; toute ouverture en ecriture part sur /dev/null, socket()
- * echoue. Seul le fichier de sortie (-o) est ecrit. Rien n'est lance, aucun
- * processus du banc n'est touche.
+ * NO SIDE EFFECT. The core sources open /dev/shm files and a UDP socket
+ * (calypso_bsp.c): the link wraps fopen/open/socket (-Wl,--wrap=...); every
+ * open for writing goes to /dev/null, socket() fails. Only the output file
+ * (-o) is written. Nothing is launched, no bench process is touched.
  *
- * BOUCLE DE BUDGET. c54x_run rend la main de lui-meme toutes les
- * CALYPSO_DSP_YIELD instructions (32768) : courir() boucle jusqu'au budget,
- * comme pont.c et rejeu_banc.c (2026-10-03), sinon le DSP ne finit pas sa trame.
+ * BUDGET LOOP. c54x_run yields by itself every CALYPSO_DSP_YIELD instructions
+ * (32768): courir() loops up to the budget, like pont.c and rejeu_banc.c,
+ * otherwise the DSP does not finish its frame.
  *
- * CONSOMMATION. Pour chaque mot de l'API RAM, une modification ARM ('A') est
- * « en attente » jusqu'a ce qu'une instruction de la ROM lise le mot (consommee,
- * latence en ticks) ou que l'ARM le modifie de nouveau (ecrasee sans lecture).
+ * CONSUMPTION. For each word of the API RAM, an ARM modification ('A') is
+ * "pending" until a ROM instruction reads the word (consumed, latency in
+ * ticks) or the ARM modifies it again (overwritten without a read).
  *
- *   make layer1_tester          (ou make api_carte, alias)
+ *   make layer1_tester          (or make api_carte, alias)
  *   tools/layer1_tester [-o sortie.tsv] [-j journal.tsv] [-n ticks_max] [fichier]
- *   python3 tools/layer1_tester.py --rejeu fichier   (lance ce binaire, juge, fait la carte)
+ *   python3 tools/layer1_tester.py --rejeu fichier   (runs this binary, judges, builds the map)
  *
- * Sortie (-o) : TSV, une ligne par mot touche (voir l'en-tete), lignes '#' = bilan.
- * Journal (-j) : par tick, chaque mot de l'API RAM lu ou ecrit par la ROM :
- *   tick, mot (adresse DSP), lectures, derniere valeur lue, ecritures,
- *   derniere valeur ecrite, PC de la derniere ecriture.
+ * Output (-o): TSV, one line per touched word (see the header), '#' lines = summary.
+ * Journal (-j): per tick, each API RAM word read or written by the ROM:
+ *   tick, word (DSP address), reads, last value read, writes,
+ *   last value written, PC of the last write.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,7 +74,7 @@
 #include "calypso_mailbox.h"
 #include "hw/arm/calypso/calypso_api.h"
 
-/* ce que main.c fournit d'habitude (meme jeu que tools/rejeu_banc.c) */
+/* what main.c usually provides (same set as tools/rejeu_banc.c) */
 uint32_t g_c54x_exe_fn;
 uint32_t calypso_trx_get_fn(void) { return g_c54x_exe_fn; }
 void calypso_inth_arm_ack(void) { }
@@ -83,7 +82,7 @@ QemuMutex calypso_pcb_daram_lock;
 void cpu_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool wr)
 { (void)addr; if (!wr) memset(buf, 0, len); }
 
-/* ---- garde-fous : aucune ecriture de fichier, aucune socket -------------- */
+/* ---- guards: no file write, no socket ------------------------------------ */
 FILE *__real_fopen(const char *path, const char *mode);
 int __real_open(const char *path, int flags, ...);
 static int g_fichiers_detournes;
@@ -102,7 +101,7 @@ int __wrap_open(const char *path, int flags, ...)
 }
 int __wrap_socket(int domain, int type, int protocol)
 { (void)domain; (void)type; (void)protocol; errno = EACCES; return -1; }
-/* ports I/O : voir plus bas, io_noter() */
+/* I/O ports: see io_noter() below */
 static void io_noter(int ecrit, uint16_t pa, uint16_t val);
 bool __real_calypso_a5_portw(C54xState *s, uint16_t pa, uint16_t val);
 bool __real_calypso_a5_portr(C54xState *s, uint16_t pa, uint16_t *val);
@@ -117,16 +116,16 @@ bool __wrap_calypso_a5_portr(C54xState *s, uint16_t pa, uint16_t *val)
 ssize_t __wrap_sendto(int fd, const void *b, size_t n, int fl, const struct sockaddr *a, socklen_t l)
 { (void)fd; (void)b; (void)fl; (void)a; (void)l; return (ssize_t)n; }
 
-/* ---- etat ------------------------------------------------------------------ */
-#define API_WORDS 0x2000u                  /* fenetre API vue du DSP : data 0x0800..0x27ff */
-#define ENREG_API_WORDS CALYPSO_API_WORDS  /* taille de l'API RAM enregistree par pont.c ('S') */
+/* ---- state ----------------------------------------------------------------- */
+#define API_WORDS 0x2000u                  /* API window as seen by the DSP: data 0x0800..0x27ff */
+#define ENREG_API_WORDS CALYPSO_API_WORDS  /* size of the API RAM recorded by pont.c ('S') */
 #define NDB 0xD4u
 #define BL_ADDR_HI_W 0x7FCu
 #define BL_SIZE_W 0x7FDu
 #define BL_ADDR_LO_W 0x7FEu
 #define BL_STATUS_W 0x7FFu
-#define NPC 6                              /* PC distincts retenus par mot et par sens */
-#define NVAL 4                             /* Misra-Gries : exact si <= 4 valeurs distinctes */
+#define NPC 6                              /* distinct PCs kept per word and per direction */
+#define NVAL 4                             /* Misra-Gries: exact if <= 4 distinct values */
 
 typedef struct {
     int64_t a, b; uint16_t ar[8], t, trn, sp, bk, brc, rsa, rea, st0, st1, pmst, imr, ifr, xpc;
@@ -135,8 +134,8 @@ typedef struct {
 
 typedef struct { uint16_t v[NVAL]; uint32_t n[NVAL]; uint8_t plus; } Valeurs;
 typedef struct {
-    uint64_t n;                            /* acces */
-    uint32_t pc1, tick1;                   /* premier acces */
+    uint64_t n;                            /* accesses */
+    uint32_t pc1, tick1;                   /* first access */
     uint32_t pcs[NPC]; uint8_t npc, pcplus;
     Valeurs val;
     uint16_t dernier;
@@ -149,25 +148,25 @@ static C54xState *dsp;
 static uint16_t *api;
 static uint8_t *fichier;
 static size_t taille;
-static int g_dans_dsp;                     /* 1 pendant c54x_run */
+static int g_dans_dsp;                     /* 1 during c54x_run */
 static int g_seg = SEG_BOOT;
-static int g_phase_rejeu;                  /* 0 = boot local, 1 = rejeu */
+static int g_phase_rejeu;                  /* 0 = local boot, 1 = replay */
 
 static Sens *s_rd, *s_wr, *s_arm;          /* [65536] */
-static uint64_t *boot_rd, *boot_wr;        /* acces pendant le boot local */
-static uint64_t *hors_wr;                  /* ecritures par le crochet hors instruction */
+static uint64_t *boot_rd, *boot_wr;        /* accesses during the local boot */
+static uint64_t *hors_wr;                  /* writes through the hook outside an instruction */
 static uint8_t *hors_src;
-static uint64_t *hc_n;                     /* ecritures hors crochet (instantanes) */
+static uint64_t *hc_n;                     /* writes outside the hook (snapshots) */
 static uint32_t *hc_tick1; static uint8_t *hc_src; static uint16_t *hc_der;
 static uint16_t *val_s, *val_d; static uint8_t *a_s, *a_d;
 static uint16_t *snap; static uint32_t *gen; static uint32_t g_gen = 1;
 static uint64_t g_n_evt, g_n_rd, g_n_wr;
 static Sens *io_rd, *io_wr;                /* [65536] ports */
-static uint32_t *pc_acc;                   /* [0x40000] acces memoire par xpc:pc */
-/* consommation des modifications ARM (mots de l'API RAM) */
+static uint32_t *pc_acc;                   /* [0x40000] memory accesses per xpc:pc */
+/* consumption of the ARM modifications (API RAM words) */
 static uint8_t *arm_pend; static uint32_t *arm_pend_tick;
 static uint64_t *conso_n, *conso_lat, *ecrase_n;
-/* journal par tick (mots de l'API RAM) */
+/* per-tick journal (API RAM words) */
 static FILE *g_journal;
 static uint32_t *j_r, *j_w; static uint16_t *j_vr, *j_vw; static uint32_t *j_pcw;
 static uint16_t j_liste[0x2000]; static unsigned j_n;
@@ -211,7 +210,7 @@ static void io_noter(int ecrit, uint16_t pa, uint16_t val)
     noter(ecrit ? &io_wr[pa] : &io_rd[pa], pc_complet(), val);
 }
 
-/* Le crochet : remplace calypso_mailbox.c (seuls symboles exportes). */
+/* The hook: replaces calypso_mailbox.c (only exported symbols). */
 int calypso_mbx_actif = 1;
 void calypso_mbx_init(void) { }
 void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val, uint16_t avant,
@@ -243,7 +242,7 @@ void calypso_mbx_evt(CalypsoMbxSens sens, uint16_t mot, uint16_t val, uint16_t a
     }
 }
 
-/* Ecritures qui n'ont pas pris le crochet depuis le dernier instantane. */
+/* Writes that did not go through the hook since the last snapshot. */
 static void instantane(int seg)
 {
     const uint64_t *a = (const uint64_t *)dsp->data, *b = (const uint64_t *)snap;
@@ -252,7 +251,7 @@ static void instantane(int seg)
         for (unsigned k = 0; k < 4; k++) {
             unsigned m = q * 4 + k;
             if (dsp->data[m] == snap[m]) continue;
-            if (m >= 0x60 && gen[m] != g_gen && g_phase_rejeu) {   /* MMR/peripheriques exclus */
+            if (m >= 0x60 && gen[m] != g_gen && g_phase_rejeu) {   /* MMR/peripherals excluded */
                 if (!hc_n[m]) hc_tick1[m] = g_c54x_exe_fn;
                 hc_n[m]++; hc_src[m] |= (uint8_t)(1u << seg); hc_der[m] = dsp->data[m];
             }
@@ -327,7 +326,7 @@ static void sens_txt(FILE *f, const Sens *s)
     for (int i = 0; i < s->npc; i++) { pc_txt(b, s->pcs[i]); fprintf(f, "%s%s", i ? "," : "", b); }
     if (s->pcplus) fprintf(f, ",+");
     fprintf(f, "\t");
-    /* valeurs, de la plus frequente a la moins frequente */
+    /* values, from the most frequent to the least frequent */
     int ord[NVAL]; for (int i = 0; i < NVAL; i++) ord[i] = i;
     for (int i = 0; i < NVAL; i++) for (int j = i + 1; j < NVAL; j++)
         if (s->val.n[ord[j]] > s->val.n[ord[i]]) { int t = ord[i]; ord[i] = ord[j]; ord[j] = t; }
@@ -384,8 +383,8 @@ int main(int argc, char **argv)
     j_pcw = alloue(0x2000 * 4);
     if (g_journal) fprintf(g_journal, "tick\tmot\tr\tval_r\tw\tval_w\tpc_w\n");
 
-    /* meme environnement que tools/rejeu_banc.c ; les ecritures /dev/shm et la
-     * socket sont de toute facon neutralisees par les enveloppes ci-dessus */
+    /* same environment as tools/rejeu_banc.c; the /dev/shm writes and the
+     * socket are neutralised anyway by the wrappers above */
     setenv("CALYPSO_BSP_PORT", "16703", 1);
     setenv("CALYPSO_BSP_BIND_ADDR", "127.0.0.1", 1);
     setenv("CALYPSO_BSP_HORLOGE", "0", 1);
@@ -413,7 +412,7 @@ int main(int argc, char **argv)
     boot();
     g_phase_rejeu = 1;
 
-    /* Premiere passe : etat de depart et decoupage en ticks. */
+    /* First pass: starting state and split into ticks. */
     Tick *ticks = alloue(sizeof(Tick) * 200000); int nt = 0;
     size_t p = 0;
     while (p < taille) {
@@ -437,7 +436,7 @@ int main(int argc, char **argv)
             uint16_t *sauve = alloue(API_WORDS * 2); memcpy(sauve, api, API_WORDS * 2);
             memcpy(dsp->data, fichier + p + 5 + sizeof r, C54X_DATA_SIZE * 2);
             for (unsigned i = 0; i < C54X_DATA_SIZE; i++) { val_d[i] = dsp->data[i]; a_d[i] = 1; }
-            memcpy(api, sauve, API_WORDS * 2); free(sauve);   /* 'S' fait foi pour l'API RAM */
+            memcpy(api, sauve, API_WORDS * 2); free(sauve);   /* 'S' is authoritative for the API RAM */
             dsp->a = r.a; dsp->b = r.b; memcpy(dsp->ar, r.ar, sizeof r.ar); dsp->t = r.t; dsp->trn = r.trn;
             dsp->sp = r.sp; dsp->bk = r.bk; dsp->brc = r.brc; dsp->rsa = r.rsa; dsp->rea = r.rea;
             dsp->st0 = r.st0; dsp->st1 = r.st1; dsp->pmst = r.pmst; dsp->imr = r.imr; dsp->ifr = r.ifr;
@@ -467,7 +466,7 @@ fini:
         Tick *t = &ticks[it];
         g_c54x_exe_fn = t->tick;
         long budget = t->budget;
-        /* ecritures ARM, fenetre 0 (avant le TICK) */
+        /* ARM writes, window 0 (before the TICK) */
         for (size_t q = t->debut; q < t->fin;) {
             uint8_t k = fichier[q];
             size_t l = k == 'T' ? 10 : k == 'A' ? 8 + 4 * (size_t)be16(fichier + q + 6)
@@ -492,7 +491,7 @@ fini:
         long fait = 0;
         if (!dsp->idle) fait = courir(budget / 8);
         while (!dsp->idle && fait < budget / 2) { long r = courir(256); if (r <= 0) break; fait += r; }
-        /* ecritures ARM, fenetre 1, puis livraisons I/Q dans l'ordre */
+        /* ARM writes, window 1, then I/Q deliveries in order */
         for (size_t q = t->debut; q < t->fin;) {
             uint8_t k = fichier[q];
             size_t l = k == 'T' ? 10 : k == 'A' ? 8 + 4 * (size_t)be16(fichier + q + 6)
@@ -514,7 +513,7 @@ fini:
             }
             q += l;
         }
-        /* phase B : reste du budget, puis la pompe DMA de pont.c */
+        /* phase B: rest of the budget, then the DMA pump of pont.c */
         reveil();
         g_seg = SEG_DSP;
         if (!dsp->idle && budget - fait > 0) fait += courir(budget - fait);
@@ -528,7 +527,7 @@ fini:
             if (!dsp->idle) fait += courir(budget / 4);
         }
         insns += (uint64_t)fait;
-        /* controle de fidelite : memes bilans que tools/rejeu_banc.c */
+        /* fidelity check: same summaries as tools/rejeu_banc.c */
         uint16_t *cd = &api[NDB + 0x1FC / 2], *fd = &api[NDB + 0x21A / 2], *dd = &api[NDB + 0x238 / 2];
         if (cd[0] != prec_cd && (cd[0] & 0x8000)) { if (cd[0] & (1u << 6)) sacch_ko++; else sacch_ok++; }
         if (fd[0] != prec_fd && (fd[0] & 0x8000)) { if (fd[0] & (1u << 6)) facch_ko++; else facch_ok++; }
@@ -581,7 +580,7 @@ fini:
         fprintf(o, "io:%04x", a);
         sens_txt(o, &io_rd[a]); sens_txt(o, &io_wr[a]);
         static const Sens zero;
-        sens_txt(o, &zero);                  /* pas de colonnes ARM pour un port */
+        sens_txt(o, &zero);                  /* no ARM columns for a port */
         for (int k = 0; k < 15; k++) fputc('\t', o);
         fputc('\n', o);
     }
