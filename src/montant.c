@@ -1285,34 +1285,43 @@ static int facchh_decoder(uint8_t b6[6][148], const uint32_t fns[6], int algo,
     return gsm0503_tch_hr_decode2(out, soft, 0, ne, &nb);
 }
 
+/* The Kc of the current TCH/H, for the FACCH/H and SACCH/TH prostheses: the
+ * last one the firmware programmed, kept while it clears d_a5mode at its
+ * DM_REL_REQ (the BTS keeps ciphering). Forgotten outside a TCH/H. */
+static uint8_t g_cle_tchh[8];
+static int g_cle_tchh_algo;
+
+static void suivre_cle_tchh(const uint16_t *api_ram)
+{
+    if (!g.tch_demi) {
+        g_cle_tchh_algo = 0;   /* new connection: a new Kc will come */
+        return;
+    }
+    uint16_t mode = api_ram[(API_NDB + NDB_D_A5MODE) / 2];
+    const uint16_t *kw = &api_ram[(API_NDB + NDB_A_KC) / 2];
+    if (mode < 1 || mode > 3) return;
+    uint8_t k8[8];
+    bool nul = true;
+    for (int i = 0; i < 4; i++) {           /* same layout as publier_kc */
+        k8[6 - 2 * i] = (uint8_t)(kw[i] >> 8);
+        k8[7 - 2 * i] = (uint8_t)(kw[i] & 0xFF);
+    }
+    for (int i = 0; i < 8; i++) {
+        if (k8[i]) nul = false;
+    }
+    if (!nul) {
+        memcpy(g_cle_tchh, k8, sizeof g_cle_tchh);
+        g_cle_tchh_algo = mode;
+    }
+}
+
 static void prothese_facchh_dl(uint16_t *api_ram)
 {
     static uint32_t deja = 0xffffffffu;
     static unsigned n_ok, n_ko;
-    static uint8_t cle[8];
-    static int cle_algo;
-    if (!g.tch_demi) {
-        cle_algo = 0;   /* new connection: a new Kc will come */
-        return;
-    }
-    /* The Kc the firmware programmed, kept while d_a5mode is cleared. */
-    uint16_t mode = api_ram[(API_NDB + NDB_D_A5MODE) / 2];
-    const uint16_t *kw = &api_ram[(API_NDB + NDB_A_KC) / 2];
-    if (mode >= 1 && mode <= 3) {
-        uint8_t k8[8];
-        bool nul = true;
-        for (int i = 0; i < 4; i++) {           /* same layout as publier_kc */
-            k8[6 - 2 * i] = (uint8_t)(kw[i] >> 8);
-            k8[7 - 2 * i] = (uint8_t)(kw[i] & 0xFF);
-        }
-        for (int i = 0; i < 8; i++) {
-            if (k8[i]) nul = false;
-        }
-        if (!nul) {
-            memcpy(cle, k8, sizeof cle);
-            cle_algo = mode;
-        }
-    }
+    const uint8_t *cle = g_cle_tchh;
+    int cle_algo = g_cle_tchh_algo;
+    if (!g.tch_demi) return;
     uint32_t e;
     if (!calypso_reglage("CALYPSO_PROTHESE_FACCHH_DL", 1)) return;
     if (!calypso_bsp_tch_dernier_fn(&e) || e == deja) return;
@@ -1359,6 +1368,66 @@ static void prothese_facchh_dl(uint16_t *api_ram)
     if (n_ok++ < 40 || n_ok % 100 == 0)
         printf("  [facchh-dl] fn=%u SS=%d : FACCH/H de la BTS posee dans a_fd (%02x %02x %02x %02x, %d err, %s) [%u]\n",
                e, g.tch_demi_ss, l2[0], l2[1], l2[2], l2[3], ne, chiffre ? "dechiffree" : "en clair", n_ok);
+    fflush(stdout);
+}
+
+/* DOWNLINK SACCH/TH PROSTHESIS (osmocom firmware, TCH/H). Same failure as the
+ * FACCH/H: the emulated ROM decodes the SACCH of a TCH/H with 60-90 bit errors
+ * per block, the mobile's radio link counter (LOSS counter for ACCH) runs from
+ * 31 to 0 in ~18 s and the call is released locally ("LOS during dedicated
+ * mode"). The 4 bursts of the block, one every 26 frames from
+ * (12 + 26*(TN/2) + 13*ss) % 104 (osmo-bts frame_tchh_ts01..67), are decoded
+ * here from the BTS bursts the BSP delivered (A5 with the Kc of the TCH/H,
+ * then in clear) and posted into a_cd, which layer1 prim_tch.c reads on the
+ * 4th burst. A good block already in a_cd is not overwritten.
+ * CALYPSO_PROTHESE_SACCHTH_DL=0 disables it (live setting). */
+static void prothese_sacchth_dl(uint16_t *api_ram)
+{
+    static uint32_t deja = 0xffffffffu;
+    static unsigned n_ok, n_ko;
+    uint32_t e;
+    if (!g.tch_demi || !calypso_reglage("CALYPSO_PROTHESE_SACCHTH_DL", 1)) return;
+    if (!g.tch_tn || !calypso_bsp_tch_dernier_fn(&e) || e == deja) return;
+    deja = e;
+    unsigned base = (12u + 26u * ((unsigned)g.tch_tn / 2u) + 13u * (unsigned)g.tch_demi_ss) % 104u;
+    if (e % 104u != (base + 78u) % 104u) return;
+    sbit_t soft[4 * 116];
+    for (int k = 0; k < 4; k++) {
+        uint32_t f = e - 26u * (uint32_t)(3 - k);
+        uint8_t b[148];
+        if (!calypso_bsp_tch_burst(f, b)) return;
+        if (g_cle_tchh_algo) {
+            ubit_t ks[114];
+            if (osmo_a5(g_cle_tchh_algo, g_cle_tchh, f, ks, NULL) < 0) return;
+            for (int j = 0; j < 57; j++) {      /* pont/gsm.py a5_xor */
+                b[3 + j]  ^= ks[j];
+                b[88 + j] ^= ks[57 + j];
+            }
+        }
+        for (int j = 0; j < 58; j++) {          /* pont/gsm.py coded_from_burst */
+            soft[k * 116 + j]      = b[3 + j]  ? -127 : 127;
+            soft[k * 116 + 58 + j] = b[87 + j] ? -127 : 127;
+        }
+    }
+    uint8_t l2[GSM_MACBLOCK_LEN];
+    int ne = 0, nb = 0;
+    if (gsm0503_xcch_decode(l2, soft, &ne, &nb) != 0) {
+        if (n_ko++ < 20 || n_ko % 200 == 0) {
+            printf("  [sacchth-dl] fn=%u TS%d SS=%d : SACCH/TH illisible (A5/%d) [%u]\n",
+                   e, g.tch_tn, g.tch_demi_ss, g_cle_tchh_algo, n_ko);
+            fflush(stdout);
+        }
+        return;
+    }
+    uint16_t *cd = &api_ram[(API_NDB + NDB_A_CD) / 2];
+    if ((cd[0] & B_BLUD) && !(cd[0] & 0x0060u)) return;   /* the ROM already posted a good one */
+    cd[0] = B_BLUD;                 /* block present, B_FIRE1/B_FIRE0 at 0: CRC good */
+    cd[2] = (uint16_t)ne;
+    for (int k = 0; k < 12; k++)
+        cd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < GSM_MACBLOCK_LEN ? l2[2 * k + 1] << 8 : 0));
+    if (n_ok++ < 20 || n_ok % 100 == 0)
+        printf("  [sacchth-dl] fn=%u TS%d SS=%d : SACCH/TH de la BTS posee dans a_cd (%02x %02x %02x %02x, %d err) [%u]\n",
+               e, g.tch_tn, g.tch_demi_ss, l2[0], l2[1], l2[2], l2[3], ne, n_ok);
     fflush(stdout);
 }
 
@@ -1457,7 +1526,9 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         }
     }
     prothese_facch_dl(api_ram);   /* see above */
+    suivre_cle_tchh(api_ram);
     prothese_facchh_dl(api_ram);  /* TCH/H, osmocom firmware */
+    prothese_sacchth_dl(api_ram);
 
     /* THE DEDICATED CHANNEL IS ALSO RELEASED WHEN THE ARM SEARCHES FOR SYNC.
      * The QEMU L1CTL tap does not always announce the release; the BSP would
