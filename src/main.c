@@ -33,6 +33,7 @@
 #include "verbosite.h"
 #include "rejouer.h"
 #include "pont.h"
+#include "multi.h"
 
 /* ── what the platform would otherwise provide ─────────────────────────── */
 extern int c54x_rapide;      /* calypso_c54x.h : fast path of the core */
@@ -89,6 +90,14 @@ static void usage(const char *prog)
         "  --arm [SOCKET]    servir l'ARM de QEMU (qosmo, CALYPSO_DSP_EXTERN=1) :\n"
         "                    API RAM partagee dans /dev/shm%s, trame verrouillee\n"
         "                    sur %s\n"
+        "  --plan FICHIER    plusieurs DSP independants a la fois : une tache par\n"
+        "                    ligne (VAR=val ... puis options de c54x_exe), un\n"
+        "                    processus par tache ; '-' = entree standard\n"
+        "  --coeurs N        avec --plan : N taches en parallele (defaut : tous les\n"
+        "                    CPU du masque d'affinite, ou $COEURS), une par CPU\n"
+        "  --sortie DIR      avec --plan : DIR/NNNNN.log (stdout), DIR/NNNNN.err\n"
+        "                    (stderr), DIR/bilan.tsv (defaut c54x_multi)\n"
+        "  --delai S         avec --plan : tuer une tache apres S secondes\n"
         "  -v .. -vvvvvv     traces du coeur C54x (stderr), par niveau :\n"
         "                    (rien)  erreurs seulement\n"
         "                    -v      + avertissements\n"
@@ -110,6 +119,8 @@ int main(int argc, char **argv)
     long trames = -1, insns = -1;
     bool verbeux = false;
     int niveau = 0;
+    const char *plan = NULL, *sortie = "c54x_multi";
+    int coeurs = 0, delai = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -121,6 +132,10 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--amp") && i + 1 < argc)     amp = atoi(argv[++i]);
         else if (!strcmp(a, "--rejouer")) { rejeu = 1; }
         else if (!strcmp(a, "--bsic") && i + 1 < argc) bsic_rej = atoi(argv[++i]);
+        else if (!strcmp(a, "--plan") && i + 1 < argc)    plan = argv[++i];
+        else if (!strcmp(a, "--coeurs") && i + 1 < argc)  coeurs = atoi(argv[++i]);
+        else if (!strcmp(a, "--sortie") && i + 1 < argc)  sortie = argv[++i];
+        else if (!strcmp(a, "--delai") && i + 1 < argc)   delai = atoi(argv[++i]);
         else if (!strcmp(a, "--arm")) {
             arm_sock = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : CALYPSO_PONT_SOCK;
         }
@@ -130,6 +145,13 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { usage(argv[0]); return 2; }
     }
+    if (plan) {
+        /* Multi-core: this process only supervises; each job is a fresh
+         * single-core c54x_exe (src/multi.c). */
+        if (!coeurs && getenv("COEURS")) coeurs = atoi(getenv("COEURS"));
+        return multi_executer(plan, coeurs, sortie, delai);
+    }
+    if (coeurs) { fprintf(stderr, "--coeurs sans --plan\n"); return 2; }
     if (insns < 0) {
         /* [2026-09-20] 200000 under --arm: the FB search over whole 1250-symbol
          * frames costs the ROM 24-36k instructions per frame, and a frame cut

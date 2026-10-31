@@ -94,6 +94,7 @@ Process-by-process launch, expected log lines and checks:
 | Bit-by-bit comparison: what the ROM decodes vs. libosmocoding on the same bursts | `tools/comparer_parole.py` |
 | CCH interleaving reference vectors | `tools/cch_ref/` |
 | Trace levels of the core, `-v` … `-vvvvvv` | `src/verbosite.c` |
+| Several DSPs at once, one process per CPU core: `./c54x_exe --plan FILE [--coeurs N] [--sortie DIR] [--delai S]`, one job per line (`VAR=val … --rejouer …`); `balayage.sh` runs its grid this way (`COEURS=N`); `osmo-operator/start.sh` uses it by default (`--multithreading`) | `src/multi.c` |
 
 ## Repository layout
 
