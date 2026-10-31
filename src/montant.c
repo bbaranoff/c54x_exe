@@ -72,6 +72,10 @@
 #define TCH_UL_SLOTS    16
 #define TCH_UL_SLOT_SZ  64      /* TCH_UL_SLOT       */
 #define TCH_UL_FR_OFS   16      /* TCH_UL_FR_OFS     */
+#define TCH_UL_FMT_OFS  12      /* TCH_UL_FMT_OFS: speech format of the slot */
+#define TCH_UL_FMT_FR   0       /* 33 bytes, TS 101 318 FR (0 = what older builds left) */
+#define TCH_UL_FMT_HR   2       /* 14 bytes, TS 101 318 GSM-HR */
+#define HR_BYTES        14
 #define FR_BYTES        33
 
 /* Search window for the L2 header in a_cu (SDCCH_UL_WINDOW_OFS of
@@ -116,6 +120,7 @@ static struct {
     bool     sd_valide;        /* an SDCCH is known (dcch_cfg armed)       */
     int      tch_tn, tch_tsc;  /* bridge announcement: 0 = no TCH announced */
     bool     sur_tch;          /* the BSP plays the TCH timeslot           */
+    bool     tch_demi;         /* the firmware is on a TCH/H (tap kind 3)   */
 } g;
 static int g_tn_tch_sb;   /* TCH TS seen on the side-band (0: TS0 / no TCH) */
 
@@ -203,7 +208,7 @@ static void noter_ul(uint32_t fn, uint8_t type, uint16_t etat, const uint8_t *da
     fwrite(r, 1, sizeof r, f);
     if ((++nrec % 32) == 0) fflush(f);
 }
-static void publier_parole(const uint8_t *fr, uint32_t fn)
+static void publier_parole(const uint8_t *trame, int n, uint8_t fmt, uint32_t fn)
 {
     static int fd = -2;
     static uint32_t seq;
@@ -218,7 +223,8 @@ static void publier_parole(const uint8_t *fr, uint32_t fn)
     memcpy(buf + 0, &seq, 4);
     memcpy(buf + 4, &fn, 4);
     memcpy(buf + 8, &fn, 4);
-    memcpy(buf + TCH_UL_FR_OFS, fr, FR_BYTES);
+    buf[TCH_UL_FMT_OFS] = fmt;
+    memcpy(buf + TCH_UL_FR_OFS, trame, (size_t)n);
     /* Header (the write counter) last: pont.py reads the header first, then
      * the slot; the other order would hand it a half-written slot. */
     sb_ecrire(fd, buf, sizeof(buf), 8 + (off_t)((seq - 1) % TCH_UL_SLOTS) * TCH_UL_SLOT_SZ);
@@ -296,11 +302,16 @@ static void mettre_bit_msb(uint8_t *b, int i, int v)
     if (v) b[i >> 3] |= (uint8_t)(0x80 >> (i & 7));
     else   b[i >> 3] &= (uint8_t)~(0x80 >> (i & 7));
 }
-static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
+static int parole_ti_convertie(void)
 {
     static int conv = -1;
     if (conv < 0) { const char *e = calypso_getenv("MONTANT_PAROLE_TI"); conv = !(e && *e == '0'); }
-    if (!conv) return;
+    return conv;
+}
+
+static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
+{
+    if (!parole_ti_convertie()) return;
     uint8_t canon[FR_BYTES];
     memset(canon, 0, sizeof canon);
     for (int i = 0; i < 260; i++) {                 /* ti_fr_to_canon */
@@ -310,6 +321,36 @@ static void parole_ti_vers_fr(uint8_t fr[FR_BYTES])
     fr[0] = (uint8_t)(0xd0 | (canon[0] >> 4));      /* gsm_from_canon: 0xd + 260 bits */
     for (int i = 1; i < FR_BYTES; i++)
         fr[i] = (uint8_t)((canon[i - 1] << 4) | (canon[i] >> 4));
+}
+
+/* ON A TCH/H a_du HOLDS A GSM-HR FRAME, IN TI FORMAT TOO. Same buffer, same byte order;
+ * gapk's ti_hr_to_canon (fmt_ti.c) gives the 14-byte TS 101 318 frame that the bridge
+ * passes to gsm0503_tch_hr_encode. MONTANT_PAROLE_TI=0: the first 14 bytes as they are. */
+static void parole_ti_vers_hr(const uint8_t ti[FR_BYTES], uint8_t hr[HR_BYTES])
+{
+    memset(hr, 0, HR_BYTES);
+    if (!parole_ti_convertie()) { memcpy(hr, ti, HR_BYTES); return; }
+    int voiced = (bit_msb(ti, 94) << 1) | bit_msb(ti, 93);
+    const uint16_t *ordre = voiced ? gsm620_voiced_bitorder : gsm620_unvoiced_bitorder;
+    for (int i = 0; i < 112; i++)
+        mettre_bit_msb(hr, ordre[i], bit_msb(ti, i >= 95 ? i + 4 : i));
+}
+
+/* Uplink speech block taken from a_du: logged raw, converted to the format the bridge
+ * codes (FR on a TCH/F, GSM-HR on a TCH/H) and published in calypso_tch_ul. */
+static void parole_vers_pont(uint8_t ti[FR_BYTES], uint16_t task, uint32_t fn)
+{
+    noter_ul(fn, 1, task, ti, FR_BYTES);            /* raw, TI format (a_du) */
+    if (g.tch_demi) {
+        uint8_t hr[HR_BYTES];
+        parole_ti_vers_hr(ti, hr);
+        noter_ul(fn, 0, task, hr, HR_BYTES);        /* converted to HR, what the bridge gets */
+        publier_parole(hr, HR_BYTES, TCH_UL_FMT_HR, fn);
+        return;
+    }
+    parole_ti_vers_fr(ti);
+    noter_ul(fn, 0, task, ti, FR_BYTES);            /* converted to FR, what the bridge gets */
+    publier_parole(ti, FR_BYTES, TCH_UL_FMT_FR, fn);
 }
 
 static int fd_facch = -2;
@@ -344,10 +385,7 @@ void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
     if (du) {
         uint8_t fr[FR_BYTES];
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
-            noter_ul(fn, 1, TCHT_DSP_TASK, fr, FR_BYTES);   /* raw, TI format (a_du) */
-            parole_ti_vers_fr(fr);
-            noter_ul(fn, 0, TCHT_DSP_TASK, fr, FR_BYTES);   /* converted to FR, what the bridge gets */
-            publier_parole(fr, fn);
+            parole_vers_pont(fr, TCHT_DSP_TASK, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u (au GO)\n", fn);
         }
@@ -368,10 +406,7 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
                 printf("  [montant] FACCH UL fn=%u task=0x%04x\n", fn, task_u);
         }
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
-            noter_ul(fn, 1, task_u, fr, FR_BYTES);      /* raw, TI format (a_du) */
-            parole_ti_vers_fr(fr);
-            noter_ul(fn, 0, task_u, fr, FR_BYTES);      /* converted to FR, what the bridge gets */
-            publier_parole(fr, fn);
+            parole_vers_pont(fr, task_u, fn);
             if (g.parole++ < (unsigned long)journal())
                 printf("  [montant] parole UL fn=%u\n", fn);
         }
@@ -568,6 +603,7 @@ static void scruter_dcch(uint32_t fn)
      * the firmware goes back). */
     if (genre == 2 || genre == 3) {
         g_tn_tch_sb = tn;   /* TCH TS, to label the published uplink bursts (air) */
+        g.tch_demi = (genre == 3);  /* uplink speech published as GSM-HR (parole_vers_pont) */
         /* With an A5/1-ciphered SDCCH neither the bridge nor the air reads the
          * ASSIGNMENT COMMAND, so calypso_tch_cfg never comes. The QEMU tap sees
          * the TS the firmware programs: it is taken as the TCH timeslot when
@@ -588,6 +624,7 @@ static void scruter_dcch(uint32_t fn)
            seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
            (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
     g_tn_tch_sb = 0;   /* SDCCH (TS0) armed or channel released: the mobile no longer sends on the TCH */
+    g.tch_demi = false;
     if (genre == 0xFF) {
         calypso_bsp_set_dedie(0, 0xFF, 0);
         g.dedie_arme = false;
