@@ -1,5 +1,7 @@
 # c54x_exe — the Calypso DSP, run as a native process
 
+> **40C3:** this repository is part of the talk *Emulating the Baseband* (40th Chaos Communication Congress, Hamburg). Fahrplan link to come.
+
 `c54x_exe` runs the **original TI mask ROM of the TMS320C54x DSP** found in
 Calypso GSM basebands (the chips behind OsmocomBB's Motorola C1xx targets), on
 a C54x core emulator, as a plain Linux process. It can run alone, replaying
