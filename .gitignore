@@ -26,3 +26,5 @@ __pycache__/
 /dsp-rom-3606-dump.txt
 *.avant-*
 .avant-*/
+# run artefacts of tools/toa23/reproduce.sh
+/tools/toa23/work/

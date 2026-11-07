@@ -16,7 +16,7 @@ The evidence rests on three sources:
 | source | what it is | where |
 |---|---|---|
 | **ROM** | TI Calypso DSP mask-ROM, version 3606, disassembled (binutils `tic54x`) | public dump: `ftp://ftp.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt` (Pirelli DP-L10, Calypso PD751992AZHH, OsmocomBB dump tool). The PROM0 (0x7000-0xdfff, 28,672 words) of that dump is **identical word for word** to the PROM0 used here (0 differences out of 28,672). |
-| **layer1** | OsmocomBB firmware sources, `src/target/firmware/layer1/{prim_fbsb.c,tpu_window.c,sync.c,toa.c}` and their git history | `osmocom-bb` repository |
+| **layer1** | OsmocomBB firmware sources, `src/target/firmware/layer1/{prim_fbsb.c,tpu_window.c,sync.c,toa.c}` and their git history | `osmocom-bb` repository; every file:line in this document is at HEAD `168b8c5f` (2026-10-08), checked on 2026-11-07 against `github.com/osmocom/osmocom-bb` |
 | **hardware logs** | firmware output from real Calypso phones, posted to the baseband-devel list | [1] Aegean Chou, 2011-09-26, *Re: About sniff multi bursts in a frame, CCCH_CONF* (DSP API 0x3606, firmware without TX): https://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html — [2] nish079858, 2024-10-02, *Osmocom bb mobile station cannot register to YateBTS basestation* (Motorola C115, `layer1.highram.bin` e88): https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html |
 
 The emulation bench (`c54x_exe`, `dsp_tester`) is **not** a source of evidence: it served to find out where
@@ -45,7 +45,7 @@ prediction), **VERY LIKELY**, **HYPOTHESIS**.
    an FB synchronisation, in both logs (n = 6): 29, 29, 27, 27, 24, 26 for a prediction of 27.25 (mean
    deviation −0.25, within the FB's granularity of 4); after SB synchronisation, every NB TOA deviation
    that `toa.c` prints is within 4 qbits of 16; FB TOA mode 1 ≡ 3 (mod 4) (10/10) and mode 0 ≡ 0
-   (mod 48) (7/7), as the ROM's immediates say.
+   (mod 48) (9/9), as the ROM's immediates say.
 5. **23 is the margin of the SB window**, the firmware's and TI's. The FIXME persists because 23
    (`prim_fbsb.c`), 75 (`sync.c`) and 16 qbits (`toa.c`) only make sense together, and because the
    191-sample window is written nowhere in the firmware.
@@ -102,6 +102,9 @@ program memory starting at `0x7a1c` (`ld #31260,a ; rpt #25 ; reada *ar2+` ×2, 
 
     ETS            1011100101100010000001000000111100101101010001010111011000011011
     sign(coeff)    0100011010011101111110111111000011010010101110101000100111100100   (= bitwise complement)
+
+These 64 words are data, not code: a disassembler shows `0x7a1c` as `retd` (0xfe00 = −512), which means
+nothing. The reproduction script dumps them as data and compares them bit for bit with the ETS: 64/64.
 
 **2.3 The correlation starts at sample 39.** `0x84a1-0x84c6`: `stm #10791,ar3` (0x2a27 = 0x2a00 +
 **39**), `stm #10983,ar4` (0x2ae7 = 0x2ac0 + 39), `stm #49,brc` (50 lags), `stm #-63,ar0`; for each lag i,
@@ -218,7 +221,7 @@ has not been traced; §5.4 confirms it on silicon), and a burst has the same pos
 
 ### 4.3 SB path: TOA − 23, then + 75 qbits — target 4.25
 
-`prim_fbsb.c:207-231` (`l1s_sbdet_resp`):
+`prim_fbsb.c:206-231` (`l1s_sbdet_resp`):
 
     last_fb->toa -= 23;
     qbits = last_fb->toa * 4;
@@ -312,13 +315,13 @@ synchronisation):
 And the `=>FB @ …` line printed after each SB comes from the task-completion handler `l1a_fb_compl`
 (`prim_fbsb.c:523-535`, registered at `:572`, triggered by `l1s_compl_sched(L1_COMPL_FB)` at `:266`), which
 calls `fbinfo2cellinfo` again (`:532`) on `last_fb`, where the SB result has already been reduced by 23 by
-`l1s_sbdet_resp` (`:207`): it reads ((TOA_sb − 46) mod 1250)×4, i.e. 29 → 4932 (×2), 27 → 4924 (×2),
+`l1s_sbdet_resp` (`:206`): it reads ((TOA_sb − 46) mod 1250)×4, i.e. 29 → 4932 (×2), 27 → 4924 (×2),
 24 → 4912, 26 → 4920. In total **12 lines out of 12** (6 after an FB1, 6 after an SB) follow the rule
 "−23 on every pass through `fbinfo2cellinfo`".
 
 **5.2 The ROM's immediates (§3).** FB mode 1: 9651, 8751, 8755, 10003, 10007, 12507, 12507, 1259, 10007,
 8755 are **all ≡ 3 (mod 4)** (10/10; 10007 = 48·208 + 23). FB mode 0: 7200, 2544, 8784, 10032, 48, 1296,
-8784 are **all multiples of 48** (7/7: pages 150, 53, 183, 209, 1, 27, 183).
+8784, 8784, 8784 are **all multiples of 48** (9/9: pages 150, 53, 183, 209, 1, 27, 183, 183, 183).
 
 **5.3 The hand-over from FB to SB (§4.4).** Criterion: *every* first SB following an FB synchronisation,
 in both logs, with no exclusion (n = 6; synchronisations 2 and later start from an already aligned time
@@ -411,53 +414,120 @@ code predicts.*
 
 ## Reproducing
 
-```
-#!/bin/bash
-# Reproduces the "magic 23" evidence and writes everything to toa.log.
-# Idempotent: skips downloads and builds already present.
-# Needs: curl, python3, gcc, make; osmocom-bb is cloned if absent.
-set -u
-LOG=toa.log
-: > "$LOG"
+`tools/toa23/reproduce.sh` fetches the public sources (the FreeCalypso dump of the ROM, which this
+repository does not redistribute, GNU binutils 2.21.1, osmocom-bb at `168b8c5f`, the two list posts),
+checks their SHA-256 where they are frozen, and writes every piece of evidence above to `toa.log`. It ends
+with a five-line summary and exits 0 only if every check holds. The hardware numbers are parsed from the
+list archives, not retyped. `REFERENCES.md`, next to the script, lists every reference on one page.
+
+Changes from the version of 2026-10-04:
+- the history uses `git log -G'toa -= 23'`: `-S` counts occurrences, and `cb71b972` adds one and removes
+  one, so `-S` did not list the commit this argument rests on;
+- the comment on `cb71b972` was wrong: that commit does remove a `toa -= 23`, the one of `l1a_fb_compl`,
+  moved into the new `fbinfo2cellinfo`; the one it leaves is the mode-1 one in `l1s_fbdet_resp`;
+- `0x7a1c` is dumped as data and compared with the ETS (§2.2), instead of being disassembled;
+- the mode-0 FB TOAs of log [2] are four, not two: 9/9 multiples of 48 (§5.2).
+
+Tested cold on a blank `ubuntu:24.04` (needs curl, ca-certificates, python3, build-essential, bzip2, git),
+run twice to check idempotence. The asciinema recording of that run is in `bbaranoff/demos`, `toa23/`.
+
+```bash
+#!/usr/bin/env bash
+# reproduce.sh: reproduces the "magic 23" evidence of proof_toa_23.md and writes it to toa.log.
+#
+#   tools/toa23/reproduce.sh [WORKDIR]      (default WORKDIR: tools/toa23/work)
+#
+# Idempotent: downloads, the binutils build and the osmocom-bb clone are reused when present.
+# Needs: bash, curl, ca-certificates, python3, build-essential (gcc, make, libc6-dev), bzip2, git.
+# Sources, all public and fetched here: the FreeCalypso dump of the TI DSP ROM 3606 (not
+# redistributed by this repository), GNU binutils 2.21.1, osmocom-bb, two baseband-devel posts.
+# Exit status 0 only if every check below holds.
+set -u -o pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK="${1:-$HERE/work}"; mkdir -p "$WORK"; cd "$WORK" || exit 2
+export LC_ALL=C
+
+OBB_URL=https://gitea.osmocom.org/phone-side/osmocom-bb
+OBB_REV=168b8c5fe49e84a8a8142e64519085b363b4982a       # HEAD verified on 2026-11-07
+L1=src/target/firmware/layer1
+DUMP_URL=ftp://ftp.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
+DUMP_SHA=e35798f50fd0a29aa61cd53e417c010d7f172582c7bc055211daab8af1e05470
+PROM0_SHA=75ce5375a07eac85ee42ba00af7ca82089d15b5df517710a756e6c26497021d7
+BU_URL=https://ftp.gnu.org/gnu/binutils/binutils-2.21.1.tar.bz2
+BU_SHA=cdecfa69f02aa7b05fbcdf678e33137151f361313b2f3e48aba925f64eabf654
+HW1=https://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html
+HW2=https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html
+
+LOG=toa.log; RES=results.txt
+: > "$LOG"; : > "$RES"
 say() { printf '%s\n' "$*" | tee -a "$LOG"; }
 run() { say "\$ $*"; "$@" 2>&1 | tee -a "$LOG"; say ""; }
+res() { printf '%s=%s\n' "$1" "$2" >> "$RES"; }
+fetch() { [ -s "$2" ] || curl -fsSL --retry 3 -o "$2" "$1" || { say "DOWNLOAD FAILED: $1"; rm -f "$2"; }; }
+shaok() { echo "$2  $1" | sha256sum -c --quiet - >/dev/null 2>&1; }
 
 say "# magic 23 reproduction — $(date -u +%Y-%m-%dT%H:%MZ) — $(uname -srm)"
+say "# workdir: $WORK"
 say ""
 
 # ---------------------------------------------------------------- 1. ROM
 say "## 1. ROM dump -> PROM0.bin"
-[ -f dsp-rom-3606-dump.txt ] || run curl -sO ftp://ftp.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
+fetch "$DUMP_URL" dsp-rom-3606-dump.txt
 run sha256sum dsp-rom-3606-dump.txt
-python3 - <<'E' 2>&1 | tee -a "$LOG"
-import re,struct
-sec=None;w={}
-for l in open("dsp-rom-3606-dump.txt",errors="replace"):
-    m=re.match(r"DSP dump: (\w+) \[",l)
-    if m: sec=m.group(1); continue
-    m=re.match(r"([0-9a-f]{5}) : ((?:[0-9a-f]{4} ?)+)",l)
-    if m and sec=="PROM0":
-        a=int(m.group(1),16)
-        for i,x in enumerate(m.group(2).split()): w[a+i]=int(x,16)
-open("PROM0.bin","wb").write(b"".join(struct.pack("<H",w[a]) for a in range(0x7000,0xe000)))
-print("PROM0.bin: %d words (0x7000-0xdfff)" % len(range(0x7000,0xe000)))
-for a in (0x7cbd,0x84a4,0xb21d,0xb2b1,0xb32d):
-    print("  %04x: %04x %04x" % (a,w[a],w[a+1]))
+shaok dsp-rom-3606-dump.txt "$DUMP_SHA" && res dump_sha ok || { say "SHA-256 MISMATCH (expected $DUMP_SHA)"; res dump_sha bad; }
+python3 -I - <<'E' 2>&1 | tee -a "$LOG"
+import re, struct
+sec = None; w = {}
+for l in open("dsp-rom-3606-dump.txt", errors="replace"):
+    m = re.match(r"DSP dump: (\w+) \[", l)
+    if m: sec = m.group(1); continue
+    m = re.match(r"([0-9a-f]{5}) : ((?:[0-9a-f]{4} ?)+)", l)
+    if m and sec == "PROM0":
+        a = int(m.group(1), 16)
+        for i, x in enumerate(m.group(2).split()): w[a + i] = int(x, 16)
+open("PROM0.bin", "wb").write(b"".join(struct.pack("<H", w[a]) for a in range(0x7000, 0xe000)))
+print("PROM0.bin: %d words (0x7000-0xdfff)" % len(range(0x7000, 0xe000)))
+for a in (0x7cbd, 0x84a4, 0xb21d, 0xb2b1, 0xb32d):
+    print("  %04x: %04x %04x" % (a, w[a], w[a + 1]))
 E
 run sha256sum PROM0.bin
+shaok PROM0.bin "$PROM0_SHA" && res prom0_sha ok || { say "SHA-256 MISMATCH (expected $PROM0_SHA)"; res prom0_sha bad; }
+
+say "### 0x7a1c-0x7a5b as data: the 64 correlator coefficients (read by 0x7c49-0x7c58, §2.2)"
+say "### expected: sign bit = SB extended training sequence, GSM 05.02 §5.2.5 (1 -> -512, 0 -> +512)"
+python3 -I - <<'E' 2>&1 | tee -a "$LOG"
+import struct
+rom = open("PROM0.bin", "rb").read()
+word = lambda a: struct.unpack_from("<H", rom, 2 * (a - 0x7000))[0]
+c = [word(0x7a1c + i) for i in range(64)]
+for r in range(4):
+    print("  %04x: %s" % (0x7a1c + 16 * r, " ".join("%04x" % x for x in c[16 * r:16 * r + 16])))
+s = [x - 0x10000 if x & 0x8000 else x for x in c]
+# GSM 05.02 (3GPP TS 45.002) §5.2.5, synchronisation burst, extended training sequence, 64 bits
+ets = "1011100101100010000001000000111100101101010001010111011000011011"
+got = "".join("1" if v < 0 else "0" for v in s)
+print("  values         %s" % sorted(set(s)))
+print("  ETS 05.02      %s" % ets)
+print("  coeff < 0      %s" % got)
+n = sum(a == b for a, b in zip(ets, got)) if set(s) == {-512, 512} else 0
+print("  %d/64 bits match" % n)
+open("results.txt", "a").write("ets=%d/64\n" % n)
+E
 say ""
 
 # ---------------------------------------------------------- 2. disassembler
 say "## 2. objdump tic54x (binutils 2.21.1)"
 OBJDUMP=build-tic54x/binutils/objdump
 if [ ! -x "$OBJDUMP" ]; then
-    [ -f binutils-2.21.1.tar.bz2 ] || run curl -sO https://ftp.gnu.org/gnu/binutils/binutils-2.21.1.tar.bz2
+    fetch "$BU_URL" binutils-2.21.1.tar.bz2
+    shaok binutils-2.21.1.tar.bz2 "$BU_SHA" || say "SHA-256 MISMATCH binutils-2.21.1.tar.bz2 (expected $BU_SHA)"
     [ -d binutils-2.21.1 ] || tar xjf binutils-2.21.1.tar.bz2
+    say "building objdump for tic54x-coff (a few minutes)"
     mkdir -p build-tic54x && ( cd build-tic54x && \
       ../binutils-2.21.1/configure --target=tic54x-coff --disable-werror --disable-nls --disable-gdb \
         --disable-gas --disable-ld --disable-gold --disable-gprof --disable-sim MAKEINFO=true \
-        CFLAGS='-O1 -w -std=gnu89' >/dev/null && make -j8 all-binutils MAKEINFO=true >/dev/null ) \
-      && say "built $OBJDUMP" || say "BUILD FAILED"
+        CFLAGS='-O1 -w -std=gnu89' >build.log 2>&1 && make -j"$(nproc)" all-binutils MAKEINFO=true >>build.log 2>&1 ) \
+      && say "built $OBJDUMP" || { say "BUILD FAILED, see $WORK/build-tic54x/build.log"; tail -20 build-tic54x/build.log | tee -a "$LOG"; }
 fi
 run "$OBJDUMP" --version
 "$OBJDUMP" -D -b binary -m tms320c54x --adjust-vma=0x7000 PROM0.bin > PROM0.dis 2>&1
@@ -465,9 +535,11 @@ say "full disassembly: PROM0.dis ($(wc -l < PROM0.dis) lines)"
 say ""
 say "### expected: 7cbd sub #11236,a | 84a4 stm #10791,ar3 | b21d stm #191,ar3 | b2b1 stm #151,ar3 | b32d stm #48,ar3"
 grep -E '^ *(7cbd|84a4|b21d|b2b1|b32d):' PROM0.dis | tee -a "$LOG"
+grep -qE '^ *b21d:.*stm +#191,ar3' PROM0.dis && res rom_191 ok || res rom_191 bad
+grep -qE '^ *b2b1:.*stm +#151,ar3' PROM0.dis && res rom_151 ok || res rom_151 bad
 say ""
-say "### SB TOA chain"
-for a in 7c3d 81c8 7c49 7a1c 84a1 84ca 84dd 7c5f 7ca6 7cbc 7e8a b1e7; do
+say "### SB TOA chain (0x7a1c is data, dumped in section 1: its disassembly is meaningless)"
+for a in 7c3d 81c8 7c49 84a1 84ca 84dd 7c5f 7ca6 7cbc 7e8a b1e7; do
     grep -E "^ *$a:" PROM0.dis | tee -a "$LOG"
 done
 say ""
@@ -479,45 +551,107 @@ awk '/^ *a5cd:/,/^ *a5f6:/' PROM0.dis | tee -a "$LOG"
 say ""
 
 # ---------------------------------------------------------------- 3. git
-say "## 3. layer1 git history"
-[ -d osmocom-bb ] || run git clone -q https://gitea.osmocom.org/phone-side/osmocom-bb
-run git -C osmocom-bb log --format='%h %ad %an %s' --date=short -S"toa -= 23" -- src/target/firmware/layer1
-run git -C osmocom-bb log --format='%h %ad %an %s' --date=short -S"magic 23" -- src/target/firmware/layer1
-say "### cb71b972: toa -= 23 / fbinfo2cellinfo lines (expect added fbinfo2cellinfo, no removed toa -= 23)"
-git -C osmocom-bb show cb71b972 -- src/target/firmware/layer1/prim_fbsb.c | grep -nE '^[-+].*(toa -= 23|fbinfo2cellinfo)|^@@' | tee -a "$LOG"
+say "## 3. layer1 source and git history, at $OBB_REV"
+[ -d osmocom-bb/.git ] || run git clone -q "$OBB_URL" osmocom-bb
+git -C osmocom-bb cat-file -e "$OBB_REV^{commit}" 2>/dev/null || run git -C osmocom-bb fetch -q origin
+G() { git -C osmocom-bb "$@"; }
+run git -C osmocom-bb log -1 --format='%H %ad %s' --date=short "$OBB_REV"
+say "### commits that add or remove a 'toa -= 23' line (-G; -S misses cb71b972, which adds one and removes one)"
+run git -C osmocom-bb log --format='%h %ad %an %s' --date=short -G'toa -= 23' "$OBB_REV" -- $L1
+case "$(G log --format='%h' -G'toa -= 23' "$OBB_REV" -- $L1)" in *cb71b972*) res git_cb71 ok;; *) res git_cb71 bad;; esac
+run git -C osmocom-bb log --format='%h %ad %an %s' --date=short -G'magic 23' "$OBB_REV" -- $L1
+say "### cb71b972: expect: toa -= 23 moved from l1a_fb_compl into fbinfo2cellinfo (one + and one -), while the mode-1 toa -= 23 in l1s_fbdet_resp stays"
+G show cb71b972 -- $L1/prim_fbsb.c | grep -nE '^[-+].*(toa -= 23|fbinfo2cellinfo)|^@@' | tee -a "$LOG"
 say ""
-say "### current constants"
-grep -nE 'L1_(SB|NB)_MARGIN_Q|L1_TAIL_DURATION_Q|L1_(SB|NB)_DURATION_Q' osmocom-bb/src/target/firmware/layer1/tpu_window.c | tee -a "$LOG"
-grep -nE 'toa -= 23|magic 23' osmocom-bb/src/target/firmware/layer1/prim_fbsb.c | tee -a "$LOG"
-grep -nE 'tpu_shift \+= 75|SB TOA of 4' osmocom-bb/src/target/firmware/layer1/sync.c | tee -a "$LOG"
+say "### the FIXME lines and their origin (git blame at $OBB_REV)"
+G blame -L333,334 -L469,470 --date=short "$OBB_REV" -- $L1/prim_fbsb.c | tee -a "$LOG"
+say ""
+say "### constants and call sites at $OBB_REV (file:line)"
+G show "$OBB_REV:$L1/tpu_window.c" | grep -nE 'L1_(SB|NB)_MARGIN_Q|L1_TAIL_DURATION_Q|L1_(SB|NB)_DURATION_Q' | sed 's/^/tpu_window.c:/' | tee -a "$LOG"
+G show "$OBB_REV:$L1/prim_fbsb.c" | grep -nE 'toa -= 23|magic 23|fbinfo2cellinfo\(|l1a_fb_compl' | sed 's/^/prim_fbsb.c:/' | tee -a "$LOG"
+G show "$OBB_REV:$L1/sync.c" | grep -nE 'tpu_shift \+= 75|SB TOA of 4' | sed 's/^/sync.c:/' | tee -a "$LOG"
+TPU="$(G show "$OBB_REV:$L1/tpu_window.c")"
+grep -qE 'define L1_SB_MARGIN_Q[[:space:]]+\(23 \* 4\)' <<< "$TPU" && res fw_sb ok || res fw_sb bad
+grep -qE 'define L1_NB_MARGIN_Q[[:space:]]+\(3 \* 4\)' <<< "$TPU" && res fw_nb ok || res fw_nb bad
 say ""
 
-# ---------------------------------------------------------------- 4. logs
-say "## 4. hardware logs: qbits check ((TOA-46) mod 1250)*4"
-say "sources: http://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html"
-say "         https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html"
-python3 - <<'E' 2>&1 | tee -a "$LOG"
-fb1 = [(9651,3420),(8751,4820),(8755,4836),(10003,4828),(10007,4844),(8755,4836)]
-sb  = [(29,4932),(29,4932),(27,4924),(27,4924),(24,4912),(26,4920)]
+# ---------------------------------------------------------------- 4. hardware logs
+say "## 4. hardware logs, parsed from the list archives"
+say "[1] $HW1"
+say "[2] $HW2"
+fetch "$HW1" hw1.html
+fetch "$HW2" hw2.html
+python3 -I - <<'E' 2>&1 | tee -a "$LOG"
+import html, re, os
+def lines(f):
+    if not os.path.exists(f): return []
+    t = html.unescape(re.sub(r"<[^>]+>", "", open(f, errors="replace").read()))
+    return [l.strip() for l in t.splitlines() if re.search(r"TOA=|qbits=|TOA AVG", l)]
+fb0, fb1, pairs, sbs = [], [], [], []
+for f in ("hw1.html", "hw2.html"):
+    last = None   # ("FB1"|"SB", toa) waiting for its "=>FB @ ... qbits=" line
+    print("  --- %s" % f)
+    for l in lines(f):
+        print("  " + re.sub(r",.*", "", l) if "TOA=" in l else "  " + l)
+        m = re.search(r"(FB0|FB1|SB1) \(\d+:\d+\): TOA= *(\d+)", l)
+        if m:
+            k, v = m.group(1), int(m.group(2))
+            if k == "FB0": fb0.append(v); last = None
+            elif k == "FB1": fb1.append(v); last = ("FB1", v)
+            else: sbs.append(v); last = ("SB", v)
+            continue
+        m = re.search(r"=>FB @ .*qbits=(\d+)", l)
+        if m and last:
+            pairs.append((last[0], last[1], int(m.group(1)))); last = None
+print()
+print("  qbits printed by fbinfo2cellinfo vs ((TOA-46) mod 1250)*4 and ((TOA-23) mod 1250)*4")
 ok = 0
-for toa,q in fb1+sb:
-    p46 = ((toa-46)%1250)*4; p23 = ((toa-23)%1250)*4
-    ok += (p46==q)
-    print("  TOA=%5d printed=%4d  -46:%4d %s  -23:%4d" % (toa,q,p46,"OK " if p46==q else "NO ",p23))
-print("  %d/%d lines match the -46 rule" % (ok,len(fb1)+len(sb)))
-fb0=[7200,2544,8784,10032,48,1296,8784]; m1=[9651,8751,8755,10003,10007,12507,12507,1259,10007,8755]
-print("  FB mode 0 multiples of 48: %d/%d" % (sum(t%48==0 for t in fb0),len(fb0)))
-print("  FB mode 1 == 3 mod 4:      %d/%d" % (sum(t%4==3 for t in m1),len(m1)))
-d=[t-27.25 for t,_ in sb]
-print("  first SB after FB sync: %s  mean delta %.2f" % ([t for t,_ in sb], sum(d)/len(d)))
-print("  148 + 2*23 - 3 = %d ; 148 + 2*3 - 3 = %d ; (191-148+3)/2 = %g" % (148+2*23-3,148+2*3-3,(191-148+3)/2))
+for k, toa, q in pairs:
+    p46 = ((toa - 46) % 1250) * 4; p23 = ((toa - 23) % 1250) * 4
+    ok += p46 == q
+    print("  %-3s TOA=%5d printed=%4d  -46:%4d %s  -23:%4d" % (k, toa, q, p46, "OK " if p46 == q else "NO ", p23))
+print("  %d/%d lines match the -46 rule" % (ok, len(pairs)))
+m1 = sum(t % 4 == 3 for t in fb1); m0 = sum(t % 48 == 0 for t in fb0)
+print("  FB mode 1 TOAs %s: %d/%d == 3 mod 4" % (fb1, m1, len(fb1)))
+print("  FB mode 0 TOAs %s: %d/%d multiples of 48" % (fb0, m0, len(fb0)))
+mean = sum(t - 27.25 for t in sbs) / len(sbs) if sbs else float("nan")
+print("  first SB after FB sync %s: mean delta vs 27.25 = %+.2f bit" % (sbs, mean))
+with open("results.txt", "a") as r:
+    r.write("qbits=%d/%d\nm1=%d/%d\nm0=%d/%d\nsb_n=%d\nsb_mean=%.2f\n" % (ok, len(pairs), m1, len(fb1), m0, len(fb0), len(sbs), mean))
 E
 say ""
-say "# done — $(wc -l < "$LOG") lines in $LOG"
+
+# ---------------------------------------------------------------- summary
+say "# full log: $WORK/$LOG"
+say "## summary"
+python3 -I - <<'E' 2>&1 | tee summary.txt | tee -a "$LOG"
+r = dict(l.strip().split("=", 1) for l in open("results.txt") if "=" in l)
+ok = lambda *k: all(r.get(x) == "ok" for x in k)
+frac = lambda k: r.get(k, "0/1").split("/")
+full = lambda k: frac(k)[0] == frac(k)[1] and frac(k)[1] != "0"
+bad = []
+if ok("rom_191", "fw_sb") and 148 + 2 * 23 - 3 == 191: print("191 = 148 + 2*23 - 3   (ROM 0xb21d: stm #191,ar3)")
+else: bad.append("SB window 191")
+if ok("rom_151", "fw_nb") and 148 + 2 * 3 - 3 == 151: print("151 = 148 + 2*3  - 3   (ROM 0xb2b1: stm #151,ar3)")
+else: bad.append("NB window 151")
+print("qbits rule ((TOA-46) mod 1250)*4: %s" % r.get("qbits"))
+print("FB mode 1 = 3 mod 4: %s ; FB mode 0 multiple of 48: %s" % (r.get("m1"), r.get("m0")))
+print("first SB after FB sync: mean delta %s bit (n=%s)" % (r.get("sb_mean"), r.get("sb_n")))
+for k in ("qbits", "m1", "m0", "ets"):
+    if not full(k): bad.append(k)
+for k in ("dump_sha", "prom0_sha", "git_cb71"):
+    if r.get(k) != "ok": bad.append(k)
+if bad: print("FAILED: " + ", ".join(bad))
+open("status", "w").write("FAILED\n" if bad else "OK\n")
+E
+[ "$(cat status)" = OK ]
 ```
 
+Log of the cold run, 2026-11-07:
+
 ```
-# magic 23 reproduction — 2026-10-04T16:50Z — Linux 6.8.0-146-generic x86_64
+# magic 23 reproduction — 2026-11-07T22:32Z — Linux 6.8.0-147-generic x86_64
+# workdir: /c54x_exe/tools/toa23/work
 
 ## 1. ROM dump -> PROM0.bin
 $ sha256sum dsp-rom-3606-dump.txt
@@ -532,8 +666,20 @@ PROM0.bin: 28672 words (0x7000-0xdfff)
 $ sha256sum PROM0.bin
 75ce5375a07eac85ee42ba00af7ca82089d15b5df517710a756e6c26497021d7  PROM0.bin
 
+### 0x7a1c-0x7a5b as data: the 64 correlator coefficients (read by 0x7c49-0x7c58, §2.2)
+### expected: sign bit = SB extended training sequence, GSM 05.02 §5.2.5 (1 -> -512, 0 -> +512)
+  7a1c: fe00 0200 fe00 fe00 fe00 0200 0200 fe00 0200 fe00 fe00 0200 0200 0200 fe00 0200
+  7a2c: 0200 0200 0200 0200 0200 fe00 0200 0200 0200 0200 0200 0200 fe00 fe00 fe00 fe00
+  7a3c: 0200 0200 fe00 0200 fe00 fe00 0200 fe00 0200 fe00 0200 0200 0200 fe00 0200 fe00
+  7a4c: 0200 fe00 fe00 fe00 0200 fe00 fe00 0200 0200 0200 0200 fe00 fe00 0200 fe00 fe00
+  values         [-512, 512]
+  ETS 05.02      1011100101100010000001000000111100101101010001010111011000011011
+  coeff < 0      1011100101100010000001000000111100101101010001010111011000011011
+  64/64 bits match
 
 ## 2. objdump tic54x (binutils 2.21.1)
+building objdump for tic54x-coff (a few minutes)
+built build-tic54x/binutils/objdump
 $ build-tic54x/binutils/objdump --version
 GNU objdump (GNU Binutils) 2.21.1
 Copyright 2011 Free Software Foundation, Inc.
@@ -550,11 +696,10 @@ full disassembly: PROM0.dis (28665 lines)
     b2b1:	7713 	stm    #151,ar3
     b32d:	7713 	stm    #48,ar3
 
-### SB TOA chain
+### SB TOA chain (0x7a1c is data, dumped in section 1: its disassembly is meaningless)
     7c3d:	7712 	stm    #3278,ar2
     81c8:	f272 	rptbd  0x81db
     7c49:	7712 	stm    #11498,ar2
-    7a1c:	fe00 	retd   
     84a1:	f7b6 	ssbx   st1,frct
     84ca:	f6b6 	rsbx   st1,frct
     84dd:	e900 	ld     #0,b
@@ -639,20 +784,26 @@ full disassembly: PROM0.dis (28665 lines)
     a5f5:	04a9 
     a5f6:	7556 	portw  DP+0x56,pa64552
 
-## 3. layer1 git history
-$ git clone -q https://gitea.osmocom.org/phone-side/osmocom-bb
+## 3. layer1 source and git history, at 168b8c5fe49e84a8a8142e64519085b363b4982a
+$ git clone -q https://gitea.osmocom.org/phone-side/osmocom-bb osmocom-bb
 
-$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Stoa -= 23 -- src/target/firmware/layer1
+$ git -C osmocom-bb log -1 --format=%H %ad %s --date=short 168b8c5fe49e84a8a8142e64519085b363b4982a
+168b8c5fe49e84a8a8142e64519085b363b4982a 2026-10-08 trxcon/trx_if: negotiate TRXD PDU version 1 (TRXDv1)
+
+### commits that add or remove a 'toa -= 23' line (-G; -S misses cb71b972, which adds one and removes one)
+$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Gtoa -= 23 168b8c5fe49e84a8a8142e64519085b363b4982a -- src/target/firmware/layer1
+cb71b972 2010-05-20 Harald Welte Make new L1CTL_FBSB_REQ work reliably
 8978ec57 2010-05-19 Harald Welte layer1/l1ctl: Split L1CTL_NEW_CCCH_REQ in FBSB_REQ nad SYNC_REQ
 5f751d3d 2010-04-09 Harald Welte layer1: move FB and SB detection into prim_fbsb.c
 fbe7b94c 2010-02-18 Harald Welte Initial import of OsmocomBB into git repository
 
-$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Smagic 23 -- src/target/firmware/layer1
+$ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Gmagic 23 168b8c5fe49e84a8a8142e64519085b363b4982a -- src/target/firmware/layer1
+cb71b972 2010-05-20 Harald Welte Make new L1CTL_FBSB_REQ work reliably
 8978ec57 2010-05-19 Harald Welte layer1/l1ctl: Split L1CTL_NEW_CCCH_REQ in FBSB_REQ nad SYNC_REQ
 5f751d3d 2010-04-09 Harald Welte layer1: move FB and SB detection into prim_fbsb.c
 48dfd41e 2010-04-07 Harald Welte layer1: add 'struct mon_state' argument to read_{fb,sb}_result()
 
-### cb71b972: toa -= 23 / fbinfo2cellinfo lines (expect added fbinfo2cellinfo, no removed toa -= 23)
+### cb71b972: expect: toa -= 23 moved from l1a_fb_compl into fbinfo2cellinfo (one + and one -), while the mode-1 toa -= 23 in l1s_fbdet_resp stays
 20:@@ -87,7 +87,7 @@ static void dump_mon_state(struct mon_state *fb)
 29:@@ -98,14 +98,16 @@ static int l1ctl_fbsb_resp(uint8_t res)
 48:@@ -179,25 +181,24 @@ static int l1s_sbdet_resp(__unused uint8_t p1, uint8_t attempt,
@@ -675,43 +826,110 @@ $ git -C osmocom-bb log --format=%h %ad %an %s --date=short -Smagic 23 -- src/ta
 313:+	fbinfo2cellinfo(&l1s.serving_cell, last_fb);
 319:@@ -513,6 +525,9 @@ void l1s_fbsb_req(uint8_t base_fn, struct l1ctl_fbsb_req *req)
 
-### current constants
-38:#define L1_NB_MARGIN_Q		(3 * 4)
-39:#define L1_SB_MARGIN_Q		(23 * 4)
-40:#define L1_TAIL_DURATION_Q	(3 * 4)
-43:#define L1_NB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_NB_MARGIN_Q - L1_TAIL_DURATION_Q)
-44:#define L1_SB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_SB_MARGIN_Q - L1_TAIL_DURATION_Q)
-54:	[L1_RXWIN_SB]	= L1_SB_DURATION_Q,
-55:	[L1_RXWIN_NB]	= L1_NB_DURATION_Q,
-206:	last_fb->toa -= 23;
-333:	/* FIXME: where did this magic 23 come from? */
-334:	last_fb->toa -= 23;
-469:	/* FIXME: where did this magic 23 come from? */
-470:	last_fb->toa -= 23;
-119:	 * is within 0...8. We have to add 75 to get an SB TOA of 4. */
-120:	tpu_shift += 75;
+### the FIXME lines and their origin (git blame at 168b8c5fe49e84a8a8142e64519085b363b4982a)
+cb71b972b (Harald Welte 2010-05-20 333) 	/* FIXME: where did this magic 23 come from? */
+cb71b972b (Harald Welte 2010-05-20 334) 	last_fb->toa -= 23;
+8978ec571 (Harald Welte 2010-05-19 469) 	/* FIXME: where did this magic 23 come from? */
+8978ec571 (Harald Welte 2010-05-19 470) 	last_fb->toa -= 23;
 
-## 4. hardware logs: qbits check ((TOA-46) mod 1250)*4
-sources: http://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html
-         https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html
-  TOA= 9651 printed=3420  -46:3420 OK   -23:3512
-  TOA= 8751 printed=4820  -46:4820 OK   -23:4912
-  TOA= 8755 printed=4836  -46:4836 OK   -23:4928
-  TOA=10003 printed=4828  -46:4828 OK   -23:4920
-  TOA=10007 printed=4844  -46:4844 OK   -23:4936
-  TOA= 8755 printed=4836  -46:4836 OK   -23:4928
-  TOA=   29 printed=4932  -46:4932 OK   -23:  24
-  TOA=   29 printed=4932  -46:4932 OK   -23:  24
-  TOA=   27 printed=4924  -46:4924 OK   -23:  16
-  TOA=   27 printed=4924  -46:4924 OK   -23:  16
-  TOA=   24 printed=4912  -46:4912 OK   -23:   4
-  TOA=   26 printed=4920  -46:4920 OK   -23:  12
+### constants and call sites at 168b8c5fe49e84a8a8142e64519085b363b4982a (file:line)
+tpu_window.c:38:#define L1_NB_MARGIN_Q		(3 * 4)
+tpu_window.c:39:#define L1_SB_MARGIN_Q		(23 * 4)
+tpu_window.c:40:#define L1_TAIL_DURATION_Q	(3 * 4)
+tpu_window.c:43:#define L1_NB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_NB_MARGIN_Q - L1_TAIL_DURATION_Q)
+tpu_window.c:44:#define L1_SB_DURATION_Q	(L1_BURST_LENGTH_Q + 2 * L1_SB_MARGIN_Q - L1_TAIL_DURATION_Q)
+tpu_window.c:54:	[L1_RXWIN_SB]	= L1_SB_DURATION_Q,
+tpu_window.c:55:	[L1_RXWIN_NB]	= L1_NB_DURATION_Q,
+prim_fbsb.c:206:	last_fb->toa -= 23;
+prim_fbsb.c:328:static void fbinfo2cellinfo(struct l1_cell_info *cinfo,
+prim_fbsb.c:333:	/* FIXME: where did this magic 23 come from? */
+prim_fbsb.c:334:	last_fb->toa -= 23;
+prim_fbsb.c:469:	/* FIXME: where did this magic 23 come from? */
+prim_fbsb.c:470:	last_fb->toa -= 23;
+prim_fbsb.c:491:				fbinfo2cellinfo(&l1s.serving_cell, last_fb);
+prim_fbsb.c:523:static void l1a_fb_compl(__unused enum l1_compl c)
+prim_fbsb.c:532:	fbinfo2cellinfo(&l1s.serving_cell, last_fb);
+prim_fbsb.c:572:	l1s.completion[L1_COMPL_FB] = &l1a_fb_compl;
+sync.c:119:	 * is within 0...8. We have to add 75 to get an SB TOA of 4. */
+sync.c:120:	tpu_shift += 75;
+
+## 4. hardware logs, parsed from the list archives
+[1] https://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html
+[2] https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html
+  --- hw1.html
+  Starting FCCH RecognitionFB0 (11:6): TOA= 7200
+  FB1 (21:8): TOA= 9651
+  =>FB @ FNR 20 fn_offset=20 qbits=3420
+  SB1 (46:1): TOA=   29
+  => SB 0x00c12184: BSIC=33 fn=89118(67/16/21) qbits=24
+  =>FB @ FNR 45 fn_offset=89118 qbits=4932
+  TOA AVG is not 16 qbits, correcting (got 20)
+  FB0 (91861:3): TOA= 2544
+  FB1 (91871:8): TOA= 8751
+  =>FB @ FNR 91869 fn_offset=91869 qbits=4820
+  SB1 (183745:1): TOA=   29
+  => SB 0x01e12284: BSIC=33 fn=91882(69/24/31) qbits=24
+  =>FB @ FNR 183744 fn_offset=91882 qbits=4932
+  FB0 (92514:8): TOA= 8784
+  FB1 (92524:8): TOA= 8755
+  =>FB @ FNR 92522 fn_offset=92522 qbits=4836
+  SB1 (185051:1): TOA=   27
+  => SB 0x00852284: BSIC=33 fn=92535(69/ 1/21) qbits=16
+  =>FB @ FNR 185050 fn_offset=92535 qbits=4924
+  TOA AVG is not 16 qbits, correcting (got 19)
+  FB0 (93574:9): TOA=10032
+  FB1 (93585:9): TOA=10003
+  =>FB @ FNR 93583 fn_offset=93583 qbits=4828
+  SB1 (187172:1): TOA=   27
+  => SB 0x01582384: BSIC=33 fn=93596(70/22/11) qbits=16
+  =>FB @ FNR 187171 fn_offset=93596 qbits=4924
+  FB0 (94186:1): TOA=   48
+  FB1 (94197:9): TOA=10007
+  FB1 (94217:11): TOA=12507
+  FB1 (94237:11): TOA=12507
+  FB1 (94248:2): TOA= 1259
+  --- hw2.html
+  =>FB @ FNR 378464 fn_offset=189241 qbits=4920
+  TOA AVG is not 16 qbits, correcting (got 13)
+  Starting FCCH RecognitionFB0 (192454:2): TOA= 1296
+  FB0 (192464:8): TOA= 8784
+  FB1 (192475:9): TOA=10007
+  =>FB @ FNR 192473 fn_offset=192473 qbits=4844
+  SB1 (384952:1): TOA=   24
+  => SB 0x019c4808: BSIC=2 fn=192485(145/ 7/11) qbits=4
+  =>FB @ FNR 384951 fn_offset=192485 qbits=4912
+  TOA AVG is not 16 qbits, correcting (got 17)
+  Starting FCCH RecognitionFB0 (194158:8): TOA= 8784
+  FB0 (194168:8): TOA= 8784
+  FB1 (194178:8): TOA= 8755
+  =>FB @ FNR 194176 fn_offset=194176 qbits=4836
+  SB1 (388359:1): TOA=   26
+  => SB 0x01514908: BSIC=2 fn=194188(146/20/31) qbits=12
+  =>FB @ FNR 388358 fn_offset=194188 qbits=4920
+
+  qbits printed by fbinfo2cellinfo vs ((TOA-46) mod 1250)*4 and ((TOA-23) mod 1250)*4
+  FB1 TOA= 9651 printed=3420  -46:3420 OK   -23:3512
+  SB  TOA=   29 printed=4932  -46:4932 OK   -23:  24
+  FB1 TOA= 8751 printed=4820  -46:4820 OK   -23:4912
+  SB  TOA=   29 printed=4932  -46:4932 OK   -23:  24
+  FB1 TOA= 8755 printed=4836  -46:4836 OK   -23:4928
+  SB  TOA=   27 printed=4924  -46:4924 OK   -23:  16
+  FB1 TOA=10003 printed=4828  -46:4828 OK   -23:4920
+  SB  TOA=   27 printed=4924  -46:4924 OK   -23:  16
+  FB1 TOA=10007 printed=4844  -46:4844 OK   -23:4936
+  SB  TOA=   24 printed=4912  -46:4912 OK   -23:   4
+  FB1 TOA= 8755 printed=4836  -46:4836 OK   -23:4928
+  SB  TOA=   26 printed=4920  -46:4920 OK   -23:  12
   12/12 lines match the -46 rule
-  FB mode 0 multiples of 48: 7/7
-  FB mode 1 == 3 mod 4:      10/10
-  first SB after FB sync: [29, 29, 27, 27, 24, 26]  mean delta -0.25
-  148 + 2*23 - 3 = 191 ; 148 + 2*3 - 3 = 151 ; (191-148+3)/2 = 23
+  FB mode 1 TOAs [9651, 8751, 8755, 10003, 10007, 12507, 12507, 1259, 10007, 8755]: 10/10 == 3 mod 4
+  FB mode 0 TOAs [7200, 2544, 8784, 10032, 48, 1296, 8784, 8784, 8784]: 9/9 multiples of 48
+  first SB after FB sync [29, 29, 27, 27, 24, 26]: mean delta vs 27.25 = -0.25 bit
 
-# done — 195 lines in toa.log
+# full log: /c54x_exe/tools/toa23/work/toa.log
+## summary
+191 = 148 + 2*23 - 3   (ROM 0xb21d: stm #191,ar3)
+151 = 148 + 2*3  - 3   (ROM 0xb2b1: stm #151,ar3)
+qbits rule ((TOA-46) mod 1250)*4: 12/12
+FB mode 1 = 3 mod 4: 10/10 ; FB mode 0 multiple of 48: 9/9
+first SB after FB sync: mean delta -0.25 bit (n=6)
 ```
-
