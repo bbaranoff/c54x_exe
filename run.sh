@@ -61,12 +61,12 @@ INSTANCE="${INSTANCE:-1}"
 INSTANCE_ENV="${INSTANCE_ENV:-/opt/GSM/osmo-operator/instances/instance-$INSTANCE.env}"
 if [ -r "$INSTANCE_ENV" ]; then
     set -a; . "$INSTANCE_ENV"; set +a
-    printf '\033[1m[run dsp]\033[0m instance %s : reglages de %s\n' "$INSTANCE" "$INSTANCE_ENV"
+    printf '\033[1m[run dsp]\033[0m instance %s: settings from %s\n' "$INSTANCE" "$INSTANCE_ENV"
 fi
 HOTE_SHM=/run/calypso-shm-hote
 AIR_DEMANDE="${AIR:-}"   # AIR set by the caller (otherwise default per instance / app, below)
 if [ "$INSTANCE" != 1 ] && [ -z "${CALYPSO_NS:-}" ]; then
-    command -v unshare >/dev/null || { echo "[run] ECHEC : unshare absent (util-linux)" >&2; exit 1; }
+    command -v unshare >/dev/null || { echo "[run] FAILED: unshare missing (util-linux)" >&2; exit 1; }
     _d="/dev/shm/calypso$INSTANCE"; mkdir -p "$_d" "$HOTE_SHM" && chmod 1777 "$_d"
     exec unshare -m --propagation private bash -c '
         mount --bind /dev/shm "$4" && mount --bind "$1" /dev/shm && export CALYPSO_NS="$2" && exec bash "$3" "${@:5}"' \
@@ -124,7 +124,7 @@ OSMO_TRX_PHONE="${OSMO_TRX_PHONE:-1}"
 # The mobile over the air (INSTANCE=N, AIR=1) is never the TRX: start-native.sh --bts exports OSMO_TRX=1
 # and instance 2 must not inherit it (trx firmware + second transceiver -> "UDP port 5700 already taken").
 if [ "$OSMO_TRX" = 1 ] && [ "$AIR" = 1 ] && [ "$INSTANCE" != 1 ] && [ "$OSMO_TRX_PHONE" != 2 ]; then
-    printf '\033[1m[run dsp]\033[0m INSTANCE=%s AIR=1 : OSMO_TRX=1 herite ignore, ce Calypso est le mobile (le TRX est l instance 1)\n' "$INSTANCE"
+    printf '\033[1m[run dsp]\033[0m INSTANCE=%s AIR=1: inherited OSMO_TRX=1 ignored, this Calypso is the mobile (the TRX is instance 1)\n' "$INSTANCE"
     OSMO_TRX=0
 fi
 if [ "$OSMO_TRX" = 1 ]; then
@@ -132,7 +132,7 @@ if [ "$OSMO_TRX" = 1 ]; then
     # in the environment, and a "${FIRMWARE_ELF:-trx}" would let it through: the transceiver would speak
     # BTS_MODE (0x1f) to a layer1 that does not know it. OSMO_TRX_FIRMWARE=<elf> for another trx.
     [ -n "${FIRMWARE_ELF:-}" ] && [ "${FIRMWARE_ELF##*/}" != "${OSMO_TRX_FIRMWARE:-trx.highram.elf}" ] \
-        && printf '\033[1m[run dsp]\033[0m OSMO_TRX=1 : firmware %s ignore, trx.highram.elf a la place\n' "$FIRMWARE_ELF"
+        && printf '\033[1m[run dsp]\033[0m OSMO_TRX=1: firmware %s ignored, trx.highram.elf instead\n' "$FIRMWARE_ELF"
     FIRMWARE_ELF="${OSMO_TRX_FIRMWARE:-$_FW/trx.highram.elf}"
     FIRMWARE_BIN="${FIRMWARE_ELF%.elf}.bin"
     # BSIC of the cell: osmo-bts-trx only sends SETTSC (BCC), the NCC comes from bts 0 of the BSC
@@ -185,7 +185,7 @@ FIRMWARE_BIN="${FIRMWARE_BIN:-${FIRMWARE_ELF%.elf}.bin}"
 FIRMWARE_FLASH="${FIRMWARE_FLASH:-}"
 # the TRX of the BTS (OSMO_TRX=1) or phone 2 of the TRX are NEVER Magnetite
 if [ -n "$FIRMWARE_FLASH" ] && { [ "$OSMO_TRX" = 1 ] || [ "$OSMO_TRX_PHONE" = 2 ]; }; then
-    printf '\033[1m[run dsp]\033[0m OSMO_TRX=1 : FIRMWARE_FLASH=%s ignore, cette instance est le TRX de la BTS (firmware trx)\n' "$FIRMWARE_FLASH"
+    printf '\033[1m[run dsp]\033[0m OSMO_TRX=1: FIRMWARE_FLASH=%s ignored, this instance is the BTS TRX (trx firmware)\n' "$FIRMWARE_FLASH"
     FIRMWARE_FLASH=""
 fi
 # Magnetite (real TI firmware in flash): no pacer catch-up. With catch-up (20), the ARM chains the
@@ -227,7 +227,7 @@ if [ -n "$FIRMWARE_FLASH" ]; then
     export AIR_B_FN_DELTA="${AIR_B_FN_DELTA:-0}"
     export MONTANT_RACH_DIFFERE="${MONTANT_RACH_DIFFERE:-0}"
     export CALYPSO_FAUX_AIR="${CALYPSO_FAUX_AIR:-$( . /etc/osmocom/radio-plan.env 2>/dev/null; echo "${PLAN_ARFCN:-}")}"
-    [ -r "$FIRMWARE_FLASH" ] || { printf '\033[1;31m[run] ECHEC :\033[0m image flash absente : %s\n' "$FIRMWARE_FLASH" >&2; exit 1; }
+    [ -r "$FIRMWARE_FLASH" ] || { printf '\033[1;31m[run] FAILED:\033[0m flash image missing: %s\n' "$FIRMWARE_FLASH" >&2; exit 1; }
     QEMU_CPU="${QEMU_CPU:-ti925t}"
     export CALYPSO_LCD="${CALYPSO_LCD:-c139}"
     RVINTERF_BIN="${RVINTERF_BIN:-/opt/GSM/fc-host-tools/rvinterf/lowlevel/rvinterf}"
@@ -263,18 +263,18 @@ if [ -n "$RT_FIFO" ]; then PRIO+=(chrt -f "$RT_FIFO"); elif [ -n "$RT_NICE" ]; t
 renice_autres() {
     [ -n "$RT_RENICE_AUTRES" ] || return 0
     local pids; pids="$(pgrep -f 'osmo-fft-snap|osmo-panel|osmo-topzone|osmo-ts-probe|conky' | tr '\n' ' ')"
-    [ -n "$pids" ] && renice -n "$RT_RENICE_AUTRES" -p $pids >/dev/null 2>&1 && dire "   outils du panneau a nice $RT_RENICE_AUTRES : $pids"
+    [ -n "$pids" ] && renice -n "$RT_RENICE_AUTRES" -p $pids >/dev/null 2>&1 && dire "   panel tools at nice $RT_RENICE_AUTRES: $pids"
     return 0
 }
 charge() {
-    echo "chaine (pid %cpu nice politique) :"
+    echo "chain (pid %cpu nice policy):"
     local n
     for n in dsp qemu osmocon rvinterf mobile transceiver pont air; do
-        if vivant "$n"; then printf '  %-8s %s\n' "$n" "$(ps -o pid=,pcpu=,ni=,cls= -p "$(pid_de "$n")" | tr -s ' ')"; else printf '  %-8s arrete\n' "$n"; fi
+        if vivant "$n"; then printf '  %-8s %s\n' "$n" "$(ps -o pid=,pcpu=,ni=,cls= -p "$(pid_de "$n")" | tr -s ' ')"; else printf '  %-8s stopped\n' "$n"; fi
     done
-    echo "processus les plus gourmands :"
+    echo "most CPU-hungry processes:"
     ps -eo pid,pcpu,ni,cls,comm --sort=-pcpu | head -12 | sed 's/^/  /'
-    echo "charge moyenne $(cut -d' ' -f1-3 /proc/loadavg) sur $(nproc) coeurs ; priorite de la chaine : ${PRIO[*]:-aucune}"
+    echo "load average $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) cores; chain priority: ${PRIO[*]:-none}"
 }
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
@@ -322,16 +322,16 @@ vitrine() {   # vitrine <name>: to be called BEFORE the launch that writes $RUND
 }
 
 dire()  { printf '\033[1m[run %s]\033[0m %s\n' "$MODE" "$*"; }
-rater() { printf '\033[1;31m[run] ECHEC :\033[0m %s\n' "$*" >&2; exit 1; }
+rater() { printf '\033[1;31m[run] FAILED:\033[0m %s\n' "$*" >&2; exit 1; }
 pid_de() { [ -f "$RUNDIR/$1.pid" ] && cat "$RUNDIR/$1.pid"; }
 vivant() { local p; p="$(pid_de "$1")"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 attendre() { local n=$(( $1 * 10 )); shift; while [ "$n" -gt 0 ]; do "$@" && return 0; sleep 0.1; n=$((n - 1)); done; return 1; }
-[ "$MODE" = dsp ] || [ "$MODE" = grgsm ] || rater "MODE=$MODE inconnu (dsp|grgsm)"
+[ "$MODE" = dsp ] || [ "$MODE" = grgsm ] || rater "MODE=$MODE unknown (dsp|grgsm)"
 
 etape1() {   # the DSP (dsp setup only)
     renice_autres
-    [ "$MODE" = dsp ] || { dire "1. (montage grgsm : pas de c54x_exe, la couche 1 est dans QEMU)"; return; }
-    vivant dsp && { dire "1. c54x_exe deja lance (pid $(pid_de dsp))"; return; }
+    [ "$MODE" = dsp ] || { dire "1. (grgsm setup: no c54x_exe, layer 1 is inside QEMU)"; return; }
+    vivant dsp && { dire "1. c54x_exe already running (pid $(pid_de dsp))"; return; }
     [ -x "$HERE/c54x_exe" ] || make -C "$HERE" >/dev/null || rater "make c54x_exe"
     rm -f "$DSP_SHM" "$DSP_SOCK"
     # The TCH announcement of a dead session (pont/dsp/tch.py) must not be
@@ -341,19 +341,19 @@ etape1() {   # the DSP (dsp setup only)
     # playing it as an erasure (calypso_bsp.c, bsp_attendre_trame).
     ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm "$DSP_SOCK" --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
-    attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe n'a pas ouvert $DSP_SOCK (voir $RUNDIR/dsp.log)"
+    attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe did not open $DSP_SOCK (see $RUNDIR/dsp.log)"
     # shm at 0666: the umask lowers c54x_exe's 0666 request to 0644, which prevents a harvard.sh
     # run under the user account from writing the API RAM (d@!, sb/si3 demos). Forced here.
     attendre 3 test -e "$DSP_SHM" && chmod 0666 "$DSP_SHM" 2>/dev/null || true
-    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/trame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
+    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/frame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
 }
 
 etape2() {   # the ARM
-    vivant qemu && { dire "2. QEMU deja lance (pid $(pid_de qemu))"; return; }
-    [ -x "$QEMU" ] || rater "QEMU absent : $QEMU (ninja -C $QOSMO/build)"
-    [ -r "$FIRMWARE_ELF" ] || rater "firmware absent : $FIRMWARE_ELF"
+    vivant qemu && { dire "2. QEMU already running (pid $(pid_de qemu))"; return; }
+    [ -x "$QEMU" ] || rater "QEMU missing: $QEMU (ninja -C $QOSMO/build)"
+    [ -r "$FIRMWARE_ELF" ] || rater "firmware missing: $FIRMWARE_ELF"
     local extern=""
-    if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "le DSP ne tourne pas (etape 1 d'abord)"; extern="$DSP_SOCK"; fi
+    if [ "$MODE" = dsp ]; then [ -S "$DSP_SOCK" ] || rater "the DSP is not running (step 1 first)"; extern="$DSP_SOCK"; fi
     rm -f "$MONITOR"
     vitrine qemu
     # gdb on the ARM: QEMU gdbstub on tcp::$GDB_STUB, and the qosmo telnet
@@ -422,7 +422,7 @@ etape2() {   # the ARM
                 # anneau= and not file=: file= is QEMU's keyword for the plugin path
                 gdb_opt+=(-plugin "$tbring,anneau=$ring,entries=${ASSEMBLY_LOGS_RING_ENTRIES:-8589934592}")
             else
-                dire "   anneau tbring ignore : libtbring.so introuvable (make -C $QOSMO/tools/qosmo-tbring)"
+                dire "   tbring ring skipped: libtbring.so not found (make -C $QOSMO/tools/qosmo-tbring)"
             fi
         fi
     fi
@@ -443,8 +443,8 @@ etape2() {   # the ARM
     local fw_opt=(-kernel "$FIRMWARE_ELF")
     if [ -n "$FIRMWARE_FLASH" ]; then
         if [ "${FLASH_RESET:-0}" != 0 ] || [ ! -f "$RUNDIR/flash.img" ] || [ "$FIRMWARE_FLASH" -nt "$RUNDIR/flash.img" ]; then
-            cp "$FIRMWARE_FLASH" "$RUNDIR/flash.img" || rater "copie de $FIRMWARE_FLASH impossible"
-            dire "   flash de travail $RUNDIR/flash.img (re)creee depuis $FIRMWARE_FLASH"
+            cp "$FIRMWARE_FLASH" "$RUNDIR/flash.img" || rater "cannot copy $FIRMWARE_FLASH"
+            dire "   working flash $RUNDIR/flash.img (re)created from $FIRMWARE_FLASH"
         fi
         fw_opt=(-drive "if=pflash,file=$RUNDIR/flash.img,format=raw")
     fi
@@ -457,50 +457,50 @@ etape2() {   # the ARM
             > "$RUNDIR/gdb.log" 2>&1 &
         echo $! > "$RUNDIR/gdb.pid"
     fi
-    attendre 10 grep -aq "label serial0" "$RUNDIR/qemu.log" || rater "QEMU n'a pas publie son pty (voir $RUNDIR/qemu.log)"
+    attendre 10 grep -aq "label serial0" "$RUNDIR/qemu.log" || rater "QEMU did not publish its pty (see $RUNDIR/qemu.log)"
     if [ "$MODE" = dsp ]; then
-        attendre 10 grep -aq "pont DSP : API RAM partagee" "$RUNDIR/qemu.log" || rater "QEMU n'a pas rejoint le DSP (voir $RUNDIR/qemu.log)"
+        attendre 10 grep -aqE "pont DSP : API RAM partagee|DSP bridge: shared API RAM" "$RUNDIR/qemu.log" || rater "QEMU did not join the DSP (see $RUNDIR/qemu.log)"
     else
-        attendre 5 grep -aq "backend gr-gsm" "$RUNDIR/qemu.log" || rater "la couche 1 gr-gsm ne s'est pas annoncee (voir $RUNDIR/qemu.log)"
+        attendre 5 grep -aq "backend gr-gsm" "$RUNDIR/qemu.log" || rater "the gr-gsm layer 1 did not announce itself (see $RUNDIR/qemu.log)"
     fi
     sed -n 's/.*redirected to \(\/dev\/pts\/[0-9]*\) (label serial0).*/\1/p' "$RUNDIR/qemu.log" | head -1 > "$RUNDIR/modem.pty"
-    dire "2. qemu-system-arm  pid $(pid_de qemu)  pty modem $(cat "$RUNDIR/modem.pty")  moniteur $MONITOR  L1=$([ "$MODE" = dsp ] && echo "DSP externe" || echo "gr-gsm (udp 4730/4731)")"
-    [ "$GDB" = 1 ] && dire "   gdb ARM : telnet 0 $GDB_TELNET  (stub tcp::$GDB_STUB, journal $RUNDIR/gdb.log)"
+    dire "2. qemu-system-arm  pid $(pid_de qemu)  modem pty $(cat "$RUNDIR/modem.pty")  monitor $MONITOR  L1=$([ "$MODE" = dsp ] && echo "external DSP" || echo "gr-gsm (udp 4730/4731)")"
+    [ "$GDB" = 1 ] && dire "   gdb ARM : telnet 0 $GDB_TELNET  (stub tcp::$GDB_STUB, log $RUNDIR/gdb.log)"
     case "${QEMU_ICOUNT:-}" in ''|0|off) ;; *) dire "   icount : $QEMU_ICOUNT" ;; esac
-    [ -n "${QEMU_DEBUG_FLAGS:-}" ] && [ "${ASSEMBLY_LOGS:-0}" != 1 ] && dire "   journal QEMU -d $QEMU_DEBUG_FLAGS : $RUNDIR/qemu-debug.log"
+    [ -n "${QEMU_DEBUG_FLAGS:-}" ] && [ "${ASSEMBLY_LOGS:-0}" != 1 ] && dire "   QEMU log -d $QEMU_DEBUG_FLAGS: $RUNDIR/qemu-debug.log"
     # mailbox monitor (CALYPSO_MAILBOX=1): two files, one per side
     if [ -n "${CALYPSO_MAILBOX:-}" ] && [ "${CALYPSO_MAILBOX}" != 0 ]; then
         local _mb="${CALYPSO_MAILBOX_FILE:-${LOG_DIR:-/tmp/calypso/logs}/mailbox.log}"
-        dire "   mailbox ARM<->DSP : ${_mb} (cote DSP, c54x_exe) et ${_mb%.log}-arm.log (cote ARM, QEMU) ; CALYPSO_MAILBOX=$CALYPSO_MAILBOX"
+        dire "   mailbox ARM<->DSP: ${_mb} (DSP side, c54x_exe) and ${_mb%.log}-arm.log (ARM side, QEMU); CALYPSO_MAILBOX=$CALYPSO_MAILBOX"
     fi
-    [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   trace asm ARM : $(readlink -f "$RUNDIR/qemu-asm.log") (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE}${ASSEMBLY_LOGS_FIFO:+, via FIFO}, QEMU_LOG_BUFFERED=$QEMU_LOG_BUFFERED)$([ "${ASSEMBLY_LOGS_RING:-1}" = 1 ] && echo " ; anneau des blocs executes : $(readlink -f "$RUNDIR/qemu-tbring" 2>/dev/null) (tbring-dump)")"
+    [ "${ASSEMBLY_LOGS:-0}" = 1 ] && dire "   ARM asm trace: $(readlink -f "$RUNDIR/qemu-asm.log") (-d ${ASSEMBLY_LOGS_FLAGS:-in_asm}${ASSEMBLY_LOGS_FILTRE:+, -dfilter $ASSEMBLY_LOGS_FILTRE}${ASSEMBLY_LOGS_FIFO:+, via FIFO}, QEMU_LOG_BUFFERED=$QEMU_LOG_BUFFERED)$([ "${ASSEMBLY_LOGS_RING:-1}" = 1 ] && echo " ; ring of executed blocks: $(readlink -f "$RUNDIR/qemu-tbring" 2>/dev/null) (tbring-dump)")"
 }
 
 etape3_rvinterf() {   # FIRMWARE_FLASH: rvinterf (FreeCalypso) instead of osmocon
-    vivant rvinterf && { dire "3. rvinterf deja lance (pid $(pid_de rvinterf))"; return; }
-    [ -x "$RVINTERF_BIN" ] || { dire "3. (rvinterf absent : $RVINTERF_BIN ; pas de traces RVTMUX)"; return; }
+    vivant rvinterf && { dire "3. rvinterf already running (pid $(pid_de rvinterf))"; return; }
+    [ -x "$RVINTERF_BIN" ] || { dire "3. (rvinterf missing: $RVINTERF_BIN; no RVTMUX traces)"; return; }
     local pty; pty="$(cat "$RUNDIR/modem.pty")"
     rm -f "$RUNDIR/rvinterf.sock"
     "$RVINTERF_BIN" -n -l "$RUNDIR/rvinterf.log" -s "$RUNDIR/rvinterf.sock" "$pty" > "$RUNDIR/rvinterf.out" 2>&1 &
     echo $! > "$RUNDIR/rvinterf.pid"
-    dire "3. rvinterf  pid $(pid_de rvinterf)  traces RVTMUX -> $RUNDIR/rvinterf.log  socket $RUNDIR/rvinterf.sock (fc-shell -s / fc-fsio -s)"
+    dire "3. rvinterf  pid $(pid_de rvinterf)  RVTMUX traces -> $RUNDIR/rvinterf.log  socket $RUNDIR/rvinterf.sock (fc-shell -s / fc-fsio -s)"
 }
 etape3() {   # osmocon
     [ -n "$FIRMWARE_FLASH" ] && { etape3_rvinterf; return; }
-    vivant osmocon && { dire "3. osmocon deja lance (pid $(pid_de osmocon))"; return; }
-    vivant qemu || rater "QEMU ne tourne pas (etape 2 d'abord)"
-    [ -x "$OSMOCON" ] || rater "osmocon absent : $OSMOCON"
-    [ -r "$FIRMWARE_BIN" ] || rater "image .bin absente : $FIRMWARE_BIN"
+    vivant osmocon && { dire "3. osmocon already running (pid $(pid_de osmocon))"; return; }
+    vivant qemu || rater "QEMU is not running (step 2 first)"
+    [ -x "$OSMOCON" ] || rater "osmocon missing: $OSMOCON"
+    [ -r "$FIRMWARE_BIN" ] || rater ".bin image missing: $FIRMWARE_BIN"
     local pty; pty="$(cat "$RUNDIR/modem.pty")"
     rm -f "$L2_SOCK"
     vitrine osmocon
     ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$OSMOCON" -m romload -i 100 -p "$pty" -s "$L2_SOCK" "$FIRMWARE_BIN" > "$RUNDIR/osmocon.log" 2>&1 &
     echo $! > "$RUNDIR/osmocon.pid"
     if ! attendre 30 grep -aq "your code is running now" "$RUNDIR/osmocon.log"; then
-        rater "osmocon n'a pas fini le romload (voir $RUNDIR/osmocon.log). Un osmocon tue a mi-bloc laisse
-       le stub romload de l'UART en attente : ./run.sh --stop puis ./run.sh"
+        rater "osmocon did not finish the romload (see $RUNDIR/osmocon.log). An osmocon killed mid-block leaves
+       the UART romload stub waiting: ./run.sh --stop then ./run.sh"
     fi
-    dire "3. osmocon  pid $(pid_de osmocon)  L1CTL sur $L2_SOCK"
+    dire "3. osmocon  pid $(pid_de osmocon)  L1CTL on $L2_SOCK"
 }
 
 # BANC_VOCODEUR=rom: the ROM vocodes (modelled voice port, CALYPSO_VSP=1).
@@ -515,41 +515,41 @@ config_vocodeur_rom() {
         /^ [^ ]/      { voix = 0 }
         voix && /^  io-handler gapk/ { print "  io-handler l1phy"; next }
         voix && /^  (io-tch-format|alsa-output-dev|alsa-input-dev)/ { next }
-        { print }' "$src" > "$dst" || rater "variante l1phy impossible : $dst"
-    grep -q "^  io-handler l1phy" "$dst" || rater "variante l1phy : pas de bloc tch-voice gapk dans $src"
+        { print }' "$src" > "$dst" || rater "cannot build the l1phy variant: $dst"
+    grep -q "^  io-handler l1phy" "$dst" || rater "l1phy variant: no tch-voice gapk block in $src"
     echo "$dst"
 }
 
 etape4_trx() {   # OSMO_TRX=1: the host app transceiver, instead of the mobile
-    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "4. (OSMO_TRX_PHONE=2 : telephone 2 du transceiver de l'instance 1, TS1 ; pas de transceiver ici)"; return; }
-    vivant transceiver && { dire "4. transceiver deja lance (pid $(pid_de transceiver))"; return; }
-    [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
+    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "4. (OSMO_TRX_PHONE=2: phone 2 of instance 1's transceiver, TS1; no transceiver here)"; return; }
+    vivant transceiver && { dire "4. transceiver already running (pid $(pid_de transceiver))"; return; }
+    [ -S "$L2_SOCK" ] || rater "no L1CTL socket $L2_SOCK (step 3 first)"
     local args_ts1=""
     if [ "$OSMO_TRX_TS1" = 1 ]; then
         local l2_3="/tmp/osmocom_l2_$OSMO_TRX_TS1_INSTANCE"
         if [ ! -S "$l2_3" ]; then
-            dire "4a. telephone 2 (TS1) : instance $OSMO_TRX_TS1_INSTANCE (c54x_exe + QEMU trx + osmocon)"
-            INSTANCE="$OSMO_TRX_TS1_INSTANCE" OSMO_TRX=1 OSMO_TRX_PHONE=2 AIR=0 PONT=0 bash "$0" || rater "l'instance $OSMO_TRX_TS1_INSTANCE (telephone 2) n'a pas demarre"
+            dire "4a. phone 2 (TS1): instance $OSMO_TRX_TS1_INSTANCE (c54x_exe + QEMU trx + osmocon)"
+            INSTANCE="$OSMO_TRX_TS1_INSTANCE" OSMO_TRX=1 OSMO_TRX_PHONE=2 AIR=0 PONT=0 bash "$0" || rater "instance $OSMO_TRX_TS1_INSTANCE (phone 2) did not start"
         fi
-        attendre 10 test -S "$l2_3" || rater "pas de socket L1CTL $l2_3 pour le telephone 2"
+        attendre 10 test -S "$l2_3" || rater "no L1CTL socket $l2_3 for phone 2"
         args_ts1="-2 -L $l2_3"
     fi
-    [ -x "$TRANSCEIVER" ] || rater "transceiver absent : $TRANSCEIVER (make -C /opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver)"
+    [ -x "$TRANSCEIVER" ] || rater "transceiver missing: $TRANSCEIVER (make -C /opt/GSM/osmocom-bb-transceiver/src/host/layer23/src/transceiver)"
     local p
     # LOCAL column of ss ($4; $5 is the peer), all states: with "-uan | grep" the peer column would match
     # too (osmo-bts-trx 5800 -> 127.0.0.1:5700 would pass for a holder), and "-uln" does not see the
     # transceiver's sockets, which are CONNECTED (ESTAB) to the BTS, not listening.
     for p in 5700 5701 5702; do
         ss -uanH 2>/dev/null | awk -v p="$p" '$4 ~ ("[:.]" p "$") {found=1} END {exit !found}' \
-            && rater "port UDP $p deja pris par $(ss -uanpH 2>/dev/null | awk -v p="$p" '$4 ~ ("[:.]" p "$")' | grep -o 'users:.*' | head -1) (un pont.py qui traine ? ./run.sh --stop)"
+            && rater "UDP port $p already taken by $(ss -uanpH 2>/dev/null | awk -v p="$p" '$4 ~ ("[:.]" p "$")' | grep -o 'users:.*' | head -1) (a leftover pont.py? ./run.sh --stop)"
     done
     vitrine transceiver
     # -l: osmocon's L1CTL socket; -m: RX timeslot mask (a single one to begin with); the TX mask
     # keeps its default 0xe3 (OSMO_TRX_TX_MASK to force it: -M), see the header
     ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL -eL "$TRANSCEIVER" -l "$L2_SOCK" -m "$OSMO_TRX_TS_MASK" ${OSMO_TRX_TX_MASK:+-M "$OSMO_TRX_TX_MASK"} ${OSMO_TRX_BSIC:+-b "$OSMO_TRX_BSIC"} $args_ts1 $OSMO_TRX_ARGS > "$RUNDIR/transceiver.log" 2>&1 &
     echo $! > "$RUNDIR/transceiver.pid"
-    attendre 10 sh -c "ss -uanH 2>/dev/null | awk '\$4 ~ /[:.]5702\$/ {f=1} END {exit !f}'" || rater "transceiver n'ecoute pas en 5700-5702 (voir $RUNDIR/transceiver.log)"
-    vivant transceiver || rater "transceiver s'est arrete : $(tail -1 "$RUNDIR/transceiver.log")"
+    attendre 10 sh -c "ss -uanH 2>/dev/null | awk '\$4 ~ /[:.]5702\$/ {f=1} END {exit !f}'" || rater "transceiver is not listening on 5700-5702 (see $RUNDIR/transceiver.log)"
+    vivant transceiver || rater "transceiver stopped: $(tail -1 "$RUNDIR/transceiver.log")"
     # osmo-bts-trx (BTS#0) EXITS when the transceiver disappears ("No more clock from
     # transceiver", bts_shutdown exit 1): after a --stop the BTS is gone, and the fork's plan
     # (qosmo/run.sh --only bts) refuses to restart it alone (bsc dependency). It is restarted here
@@ -561,7 +561,7 @@ etape4_trx() {   # OSMO_TRX=1: the host app transceiver, instead of the mobile
         for _i in $(seq 1 "${OSMO_TRX_BTS_ATTENTE:-90}"); do
             pgrep -f -- "osmo-bts-trx -c $bts_cfg\$" >/dev/null 2>&1 || break
             grep -aq 'BTS MODE: [0-9]* [1-9]' "$RUNDIR/osmocon.log" 2>/dev/null && break
-            [ "$_i" = 1 ] && dire "   BTS#0 presente mais muette : on attend qu'elle allume le firmware ou qu'elle finisse de s'eteindre (${OSMO_TRX_BTS_ATTENTE:-90} s max)"
+            [ "$_i" = 1 ] && dire "   BTS#0 present but silent: waiting for it to power the firmware on or finish shutting down (${OSMO_TRX_BTS_ATTENTE:-90} s max)"
             sleep 1
         done
         if ! pgrep -f -- "osmo-bts-trx -c $bts_cfg\$" >/dev/null 2>&1; then
@@ -571,25 +571,25 @@ etape4_trx() {   # OSMO_TRX=1: the host app transceiver, instead of the mobile
                 setsid stdbuf -oL -eL $(chrt -r 1 true 2>/dev/null && echo "chrt -r 1") "$bts_bin" -c "$bts_cfg" >> "$bts_log" 2>&1 </dev/null &
                 bts_pid=$!
                 for bts_piddir in /run/user/*/osmo-nitb; do [ -d "$bts_piddir" ] && echo "$bts_pid" > "$bts_piddir/bts.pid"; done
-                dire "4b. osmo-bts-trx relancee (BTS#0 absente : elle sort quand le transceiver disparait)  pid $bts_pid  $bts_cfg  journal $bts_log"
+                dire "4b. osmo-bts-trx restarted (BTS#0 was gone: it exits when the transceiver disappears)  pid $bts_pid  $bts_cfg  log $bts_log"
             else
-                dire "4b. BTS#0 absente et non relancable (binaire $bts_bin ou config $bts_cfg) : ./start-native.sh --osmo-trx"
+                dire "4b. BTS#0 gone and cannot be restarted (binary $bts_bin or config $bts_cfg): ./start-native.sh --osmo-trx"
             fi
         fi
     fi
-    dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)${args_ts1:+  + telephone 2 TS1 : $args_ts1}"
+    dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)${args_ts1:+  + phone 2 TS1: $args_ts1}"
 }
 
 etape4() {   # the mobile
-    [ -n "$FIRMWARE_FLASH" ] && { dire "4. (FIRMWARE_FLASH : pile L23 et UI dans le firmware Magnetite, pas de mobile ; ecran C139 : tools/osmo-c123-gtk.py --modele c139 --instance $INSTANCE)"; return; }
-    [ -n "$FIRMWARE_APP" ] && { dire "4. (FIRMWARE_APP=$FIRMWARE_APP : pas de mobile ; ecran /dev/shm/calypso_lcd, touches /tmp/calypso_keys.sock, fenetre : tools/osmo-c123-gtk.py)"; return; }
+    [ -n "$FIRMWARE_FLASH" ] && { dire "4. (FIRMWARE_FLASH: L23 stack and UI inside the Magnetite firmware, no mobile; C139 screen: tools/osmo-c123-gtk.py --modele c139 --instance $INSTANCE)"; return; }
+    [ -n "$FIRMWARE_APP" ] && { dire "4. (FIRMWARE_APP=$FIRMWARE_APP: no mobile; screen /dev/shm/calypso_lcd, keys /tmp/calypso_keys.sock, window: tools/osmo-c123-gtk.py)"; return; }
     [ "$OSMO_TRX" = 1 ] && { etape4_trx; return; }
-    vivant mobile && { dire "4. mobile deja lance (pid $(pid_de mobile))"; return; }
+    vivant mobile && { dire "4. mobile already running (pid $(pid_de mobile))"; return; }
     if [ "${BANC_VOCODEUR:-hote}" = rom ]; then
         MOBILE_CFG="$(config_vocodeur_rom "$MOBILE_CFG")"
-        dire "4. vocodeur ROM (BANC_VOCODEUR=rom) : tch-voice en l1phy -> $MOBILE_CFG"
+        dire "4. ROM vocoder (BANC_VOCODEUR=rom): tch-voice as l1phy -> $MOBILE_CFG"
     fi
-    [ -S "$L2_SOCK" ] || rater "pas de socket L1CTL $L2_SOCK (etape 3 d'abord)"
+    [ -S "$L2_SOCK" ] || rater "no L1CTL socket $L2_SOCK (step 3 first)"
     if [ "$INSTANCE" != 1 ]; then
         # instance-specific sockets and VTY (layer2/sap/ms_data suffixed _N, VTY +10 per instance)
         local _src="$MOBILE_CFG" _dst="$RUNDIR/mobile_instance$INSTANCE.cfg"
@@ -601,14 +601,14 @@ etape4() {   # the mobile
         local _arfcn; _arfcn="$( . /etc/osmocom/radio-plan.env 2>/dev/null; echo "${PLAN_ARFCN:-}")"
         [ -n "$_arfcn" ] && sed -i "s|^\([[:space:]]*\)stick [0-9]*\$|\1stick $_arfcn|" "$_dst"
         MOBILE_CFG="$_dst"
-        dire "4. instance $INSTANCE : config mobile derivee -> $MOBILE_CFG"
+        dire "4. instance $INSTANCE: derived mobile config -> $MOBILE_CFG"
     fi
-    [ -x "$MOBILE" ] || rater "mobile absent : $MOBILE"
-    [ -r "$MOBILE_CFG" ] || rater "config mobile absente : $MOBILE_CFG"
+    [ -x "$MOBILE" ] || rater "mobile missing: $MOBILE"
+    [ -r "$MOBILE_CFG" ] || rater "mobile config missing: $MOBILE_CFG"
     local vty; vty="$(sed -n 's/^ *bind 127.0.0.1 \([0-9]*\).*/\1/p' "$MOBILE_CFG" | head -1)"
     if [ -n "$vty" ] && ss -ltn 2>/dev/null | grep -q ":$vty "; then
-        rater "le port VTY $vty de $MOBILE_CFG est deja pris par : $(ss -ltnp 2>/dev/null | grep ":$vty " | grep -o 'users:.*' | head -1)
-       changez la ligne « bind 127.0.0.1 $vty » de la config (les 42xx sont ceux du reseau du banc)"
+        rater "VTY port $vty of $MOBILE_CFG is already taken by: $(ss -ltnp 2>/dev/null | grep ":$vty " | grep -o 'users:.*' | head -1)
+       change the line 'bind 127.0.0.1 $vty' in the config (the 42xx ports belong to the bench network)"
     fi
     vitrine mobile
     # Resync on the chosen cell: 8 attempts instead of 1 (gsm322.c,
@@ -621,13 +621,13 @@ etape4() {   # the mobile
     ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL "$MOBILE" -c "$MOBILE_CFG" > "$RUNDIR/mobile.log" 2>&1 &
     echo $! > "$RUNDIR/mobile.pid"
     sleep 2
-    vivant mobile || rater "mobile s'est arrete : $(sed 's/\x1b\[[0-9;]*m//g' "$RUNDIR/mobile.log" | grep -iE 'cannot|error|unable' | tail -1)"
+    vivant mobile || rater "mobile stopped: $(sed 's/\x1b\[[0-9;]*m//g' "$RUNDIR/mobile.log" | grep -iE 'cannot|error|unable' | tail -1)"
     dire "4. mobile  pid $(pid_de mobile)  config $MOBILE_CFG  vty telnet 127.0.0.1 ${vty:-?}"
 }
 
 etape5_air() {   # AIR=1: the air between the two Calypsos (pont/air.py), instead of the bridge
-    if vivant air; then dire "5. air deja lance (pid $(pid_de air))"; etape5_vsp; return; fi
-    [ -r "$AIR_PY" ] || rater "air.py absent : $AIR_PY"
+    if vivant air; then dire "5. air already running (pid $(pid_de air))"; etape5_vsp; return; fi
+    [ -r "$AIR_PY" ] || rater "air.py missing: $AIR_PY"
     local autre_shm="$HOTE_SHM" autre_port=6702
     [ "$INSTANCE" = 1 ] && { autre_shm=/dev/shm/calypso2; autre_port=6712; }
     vitrine air
@@ -642,8 +642,8 @@ etape5_air() {   # AIR=1: the air between the two Calypsos (pont/air.py), instea
     ${PRIO[@]+"${PRIO[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
         --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" $args_c --tch-cfg /dev/shm/calypso_tch_cfg > "$RUNDIR/air.log" 2>&1 &
     echo $! > "$RUNDIR/air.pid"
-    attendre 5 grep -aq "air :" "$RUNDIR/air.log" || rater "air.py ne s'est pas annonce (voir $RUNDIR/air.log)"
-    dire "5. air  pid $(pid_de air)  $autre_shm/calypso_tx_rom -> udp $CALYPSO_BSP_PORT (ici) ; /dev/shm/calypso_tx_rom (ici) -> udp $autre_port (l'autre)${args_c:+ ; TS1 : $args_c}"
+    attendre 5 grep -aq "air :" "$RUNDIR/air.log" || rater "air.py did not announce itself (see $RUNDIR/air.log)"
+    dire "5. air  pid $(pid_de air)  $autre_shm/calypso_tx_rom -> udp $CALYPSO_BSP_PORT (here); /dev/shm/calypso_tx_rom (here) -> udp $autre_port (the other)${args_c:+; TS1: $args_c}"
     etape5_vsp
 }
 
@@ -652,20 +652,20 @@ etape5_air() {   # AIR=1: the air between the two Calypsos (pont/air.py), instea
 # the instance's namespace: /dev/shm/calypso_pcm_ul and _dl are those of THIS mobile.
 etape5_vsp() {
     [ "${CALYPSO_VSP:-0}" = 1 ] || return 0
-    vivant vsp && { dire "5b. pont audio VSP deja lance (pid $(pid_de vsp))"; return 0; }
+    vivant vsp && { dire "5b. VSP audio bridge already running (pid $(pid_de vsp))"; return 0; }
     ( cd "$(dirname "$PONT_PY")/.." && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
     echo $! > "$RUNDIR/vsp.pid"
-    dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio  (journal $RUNDIR/vsp.log)"
+    dire "5b. VSP audio bridge  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio  (log $RUNDIR/vsp.log)"
 }
 
 etape5() {   # the TRX bridge (PONT=1): BTS bursts to layer 1
     [ "$AIR" = 1 ] && { etape5_air; return; }
-    [ "$OSMO_TRX" = 1 ] && { dire "5. (OSMO_TRX=1 : pas de pont, transceiver tient 5700-5702)"; return; }
-    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "5. (telephone 2 : rien)"; return; }
-    [ -n "$FIRMWARE_APP" ] && { dire "5. (FIRMWARE_APP=$FIRMWARE_APP : pas de pont)"; return; }
-    [ "$PONT" = 1 ] || { dire "5. (PONT=0 : pas de pont.py, aucun burst du BTS n'arrive)"; return; }
-    vivant pont && { dire "5. pont.py deja lance (pid $(pid_de pont))"; return; }
-    [ -r "$PONT_PY" ] || rater "pont.py absent : $PONT_PY"
+    [ "$OSMO_TRX" = 1 ] && { dire "5. (OSMO_TRX=1: no bridge, the transceiver holds 5700-5702)"; return; }
+    [ "$OSMO_TRX_PHONE" = 2 ] && { dire "5. (phone 2: nothing)"; return; }
+    [ -n "$FIRMWARE_APP" ] && { dire "5. (FIRMWARE_APP=$FIRMWARE_APP: no bridge)"; return; }
+    [ "$PONT" = 1 ] || { dire "5. (PONT=0: no pont.py, no burst from the BTS arrives)"; return; }
+    vivant pont && { dire "5. pont.py already running (pid $(pid_de pont))"; return; }
+    [ -r "$PONT_PY" ] || rater "pont.py missing: $PONT_PY"
     local extra=""; [ "$MODE" = dsp ] && extra="--dsp-port 6702"
     [ "$PONT_AIRREC" = 0 ] && extra="$extra --no-record"
     vitrine pont
@@ -681,21 +681,21 @@ etape5() {   # the TRX bridge (PONT=1): BTS bursts to layer 1
     if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then export PONT_HORLOGE_MAX="${PONT_HORLOGE_MAX:-16}"; fi
     ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && export PONT_UL_RAW="${UL_RAW:-1}" && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
-    attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py ne s'est pas annonce (voir $RUNDIR/pont.log)"
-    dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS ; vers $([ "$MODE" = dsp ] && echo "le DSP (udp 6702)" || echo "la L1 gr-gsm (udp 4730/4731)")"
-    [ -n "${PONT_HORLOGE_MAX:-}" ] && dire "   horloge asservie : ralentissement jusqu'a ${PONT_HORLOGE_MAX} x le temps reel (PONT_HORLOGE_MAX)"
+    attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py did not announce itself (see $RUNDIR/pont.log)"
+    dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS; to $([ "$MODE" = dsp ] && echo "the DSP (udp 6702)" || echo "the gr-gsm L1 (udp 4730/4731)")"
+    [ -n "${PONT_HORLOGE_MAX:-}" ] && dire "   slaved clock: slowdown up to ${PONT_HORLOGE_MAX} x real time (PONT_HORLOGE_MAX)"
     # voice port (CALYPSO_VSP=1): PCM rings of the DSP <-> PulseAudio
     if [ "${CALYPSO_VSP:-0}" = 1 ] && ! vivant vsp; then
         ( cd "$(dirname "$PONT_PY")/.." && exec python3 -m pont.vsp_audio ) > "$RUNDIR/vsp.log" 2>&1 &
         echo $! > "$RUNDIR/vsp.pid"
-        dire "5b. pont audio VSP  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio"
+        dire "5b. VSP audio bridge  pid $(pid_de vsp)  gsm_mic.monitor -> calypso_pcm_ul, calypso_pcm_dl -> gsm_audio"
     fi
 }
 
 arreter() {
     local n
     for n in vsp pont air bruit mobile transceiver osmocon rvinterf gdb qemu dsp asmcat; do
-        if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "arret $n (pid $(pid_de "$n"))"; fi
+        if vivant "$n"; then kill "$(pid_de "$n")" 2>/dev/null; dire "stopping $n (pid $(pid_de "$n"))"; fi
         rm -f "$RUNDIR/$n.pid"
     done; bruit_arreter
     sleep 1
@@ -714,7 +714,7 @@ arreter() {
             case "$ancetres" in *" $r "*) ;; *) restes="$restes$r " ;; esac
         done
         if [ -n "${restes// /}" ]; then
-            dire "instance $INSTANCE : restes arretes (pid $restes)"
+            dire "instance $INSTANCE: leftovers stopped (pid $restes)"
             kill $restes 2>/dev/null; sleep 1; kill -9 $restes 2>/dev/null
         fi
     fi
@@ -745,7 +745,7 @@ statut() {
     local n
     for n in dsp qemu osmocon rvinterf mobile transceiver pont air; do
         if vivant "$n"; then printf '  %-8s pid %-7s  %s\n' "$n" "$(pid_de "$n")" "$RUNDIR/$n.log"
-        else printf '  %-8s arrete\n' "$n"; fi
+        else printf '  %-8s stopped\n' "$n"; fi
     done; bruit_statut
     [ -f "$RUNDIR/dsp.log" ] && grep -a "fn=" "$RUNDIR/dsp.log" | tail -1
     [ -f "$RUNDIR/osmocon.log" ] && grep -a "FB0\|FB1\|SB\|BSIC" "$RUNDIR/osmocon.log" | tail -1
@@ -770,7 +770,7 @@ garder_journaux() {
     # state of the BSP's dedicated store (stored/played/missed/fallbacks/lost)
     [ -s /dev/shm/calypso_bsp_dedie ] && cp /dev/shm/calypso_bsp_dedie "$d/bsp_dedie.txt" 2>/dev/null
     ls -1dt "$RUNDIR"/archives/*/ 2>/dev/null | tail -n +$((JOURNAUX_GARDES + 1)) | xargs -r rm -rf
-    dire "journaux de la session precedente ranges dans $d"
+    dire "previous session logs stored in $d"
 }
 
 # NOISE INJECTOR, INACTIVE BY DEFAULT (BRUIT_MODE and BRUIT_SNR_DB empty: nothing
@@ -831,14 +831,14 @@ bruit_preparer() {   # before step 1: decides BRUIT_ACTIF, checks the configurat
     if [ "$MODE" = dsp ] && vivant dsp; then
         # An already running c54x_exe can only be intercepted if it already listens on the moved port.
         if ! tr '\0' '\n' < "/proc/$(pid_de dsp)/environ" 2>/dev/null | grep -qx "CALYPSO_BSP_PORT=$BRUIT_PORT_DSP"; then
-            dire "b. BRUIT_MODE=$BRUIT_MODE ignore : c54x_exe tourne deja sur 6702, sans injecteur (./run.sh --stop puis ./run.sh)"
+            dire "b. BRUIT_MODE=$BRUIT_MODE ignored: c54x_exe already runs on 6702, without injector (./run.sh --stop then ./run.sh)"
             return 0
         fi
     fi
-    [ -r "$BRUIT_PY" ] || rater "injecteur de bruit absent : $BRUIT_PY (posez BRUIT_PY)"
+    [ -r "$BRUIT_PY" ] || rater "noise injector missing: $BRUIT_PY (set BRUIT_PY)"
     bruit_args
     local msg
-    msg="$(python3 "$BRUIT_PY" "${BRUIT_ARGS[@]}" --verifier 2>&1)" || rater "injecteur de bruit : $(printf '%s\n' "$msg" | tail -1)"
+    msg="$(python3 "$BRUIT_PY" "${BRUIT_ARGS[@]}" --verifier 2>&1)" || rater "noise injector: $(printf '%s\n' "$msg" | tail -1)"
     BRUIT_ACTIF=1
 }
 
@@ -852,8 +852,8 @@ bruit_env_dsp() {   # in the c54x_exe subshell; sets nothing by default
 }
 
 bruit_dire_dsp() {   # after step 1; silent by default
-    [ "$BRUIT_ACTIF" = 1 ] && dire "   BSP deplace sur udp/$BRUIT_PORT_DSP (CALYPSO_BSP_PORT) : 6702 est a l'injecteur de bruit"
-    [ -z "$BRUIT_MODE" ] && [ -n "$BRUIT_SNR_DB" ] && dire "   bruit du coeur : CALYPSO_BSP_SNR_DB=${CALYPSO_BSP_SNR_DB:-$BRUIT_SNR_DB} dB${BRUIT_GRAINE:+, graine $BRUIT_GRAINE}"
+    [ "$BRUIT_ACTIF" = 1 ] && dire "   BSP moved to udp/$BRUIT_PORT_DSP (CALYPSO_BSP_PORT): 6702 belongs to the noise injector"
+    [ -z "$BRUIT_MODE" ] && [ -n "$BRUIT_SNR_DB" ] && dire "   core noise: CALYPSO_BSP_SNR_DB=${CALYPSO_BSP_SNR_DB:-$BRUIT_SNR_DB} dB${BRUIT_GRAINE:+, seed $BRUIT_GRAINE}"
     return 0
 }
 
@@ -867,13 +867,13 @@ bruit_env_pont() {   # in the bridge subshell; sets nothing by default
 
 etapeb() {   # the noise injector (BRUIT_MODE), between the bridge and layer 1
     [ "$BRUIT_ACTIF" = 1 ] || return 0
-    vivant bruit && { dire "b. injecteur de bruit deja lance (pid $(pid_de bruit))"; return; }
+    vivant bruit && { dire "b. noise injector already running (pid $(pid_de bruit))"; return; }
     bruit_args
     : > "$RUNDIR/bruit.log"
     python3 -u "$BRUIT_PY" "${BRUIT_ARGS[@]}" >> "$RUNDIR/bruit.log" 2>&1 &
     echo $! > "$RUNDIR/bruit.pid"
-    attendre 5 grep -aq "PRET ecoute=" "$RUNDIR/bruit.log" || rater "l'injecteur de bruit ne s'est pas annonce (voir $RUNDIR/bruit.log)"
-    dire "b. injecteur de bruit  pid $(pid_de bruit)  mode $BRUIT_MODE  $(sed -n 's/.*PRET \(ecoute=[^ ]*\) \(vers=[^ ]*\).*/\1 \2/p' "$RUNDIR/bruit.log" | head -1)  journal $RUNDIR/bruit.log"
+    attendre 5 grep -aqE "PRET ecoute=|READY listen=" "$RUNDIR/bruit.log" || rater "the noise injector did not announce itself (see $RUNDIR/bruit.log)"
+    dire "b. noise injector  pid $(pid_de bruit)  mode $BRUIT_MODE  $(sed -n 's/.*\(PRET\|READY\) \(\(ecoute\|listen\)=[^ ]*\) \(\(vers\|to\)=[^ ]*\).*/\2 \4/p' "$RUNDIR/bruit.log" | head -1)  log $RUNDIR/bruit.log"
 }
 
 bruit_arreter() {   # --stop: the injector without pid (launched by hand with --etiquette c54x)
@@ -884,9 +884,9 @@ bruit_arreter() {   # --stop: the injector without pid (launched by hand with --
 bruit_statut() {   # --status: silent by default
     if vivant bruit; then
         printf '  %-8s pid %-7s  %s\n' bruit "$(pid_de bruit)" "$RUNDIR/bruit.log"
-        grep -a "STATS\|BILAN" "$RUNDIR/bruit.log" 2>/dev/null | tail -1
+        grep -a "STATS\|BILAN\|SUMMARY" "$RUNDIR/bruit.log" 2>/dev/null | tail -1
     elif [ -n "$BRUIT_MODE" ]; then
-        printf '  %-8s arrete\n' bruit
+        printf '  %-8s stopped\n' bruit
     fi
     return 0
 }
@@ -918,6 +918,6 @@ case "${1:-}" in
     --step)   case "${2:-}" in 1) bruit_preparer; etape1;; b) bruit_preparer; etapeb;; 2) etape2;; 3) etape3;; 4) etape4;; 5) etape5;; a) etape5_air;; *) rater "--step 1|b|2|3|4|5|a";; esac ;;
     -h|--help) sed -n '2,22p' "$0" ;;
     "")       garder_journaux; bruit_preparer; etape1; etapeb; etape2; etape3; etape4; etape5
-              dire "tout tourne. Journaux : $RUNDIR/*.log   suivre : ./run.sh --logs   arreter : ./run.sh --stop" ;;
-    *)        rater "option inconnue : $1 (voir --help)" ;;
+              dire "all running. Logs: $RUNDIR/*.log   follow: ./run.sh --logs   stop: ./run.sh --stop" ;;
+    *)        rater "unknown option: $1 (see --help)" ;;
 esac

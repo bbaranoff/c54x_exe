@@ -13,8 +13,8 @@ import argparse, ctypes, math, struct, sys
 import numpy as np
 ap = argparse.ArgumentParser()
 ap.add_argument("sens", nargs="?", default="dl", choices=["dl", "ul"])
-ap.add_argument("--ton", type=float, default=1000.0, help="frequence cherchee (Hz)")
-ap.add_argument("--out", help="PCM s16le 8 kHz decode")
+ap.add_argument("--ton", type=float, default=1000.0, help="tone frequency to look for (Hz)")
+ap.add_argument("--out", help="decoded PCM s16le 8 kHz")
 a = ap.parse_args()
 path = "/dev/shm/calypso_add_%s.bin" % a.sens
 raw = open(path, "rb").read()
@@ -23,7 +23,7 @@ for o in range(0, len(raw) - 47, 48):
     fn, typ, n, etat, err = struct.unpack_from("<IBBHH", raw, o)
     recs.append((fn, typ, n, etat, err, raw[o + 12:o + 12 + n]))
 fr = [r for r in recs if r[1] == 0 and r[2] == 33]
-print("%s : %d enregistrements, %d trames FR (fn %d..%d), nibble de tete %s" % (
+print("%s: %d records, %d FR frames (fn %d..%d), header nibble %s" % (
     path, len(recs), len(fr), fr[0][0] if fr else 0, fr[-1][0] if fr else 0,
     sorted({hex(x[5][0] >> 4) for x in fr})))
 g = ctypes.CDLL("libgsm.so.1"); g.gsm_create.restype = ctypes.c_void_p
@@ -37,7 +37,7 @@ for _, _, _, _, _, d in fr:
 x = np.array(pcm, dtype=float); sr = 8000
 if a.out:
     open(a.out, "wb").write(np.array(pcm, dtype="<i2").tobytes())
-print(" sec    rms  raie(Hz)  %%dans %.0f+-50  fn" % a.ton)
+print(" sec    rms  peak(Hz)    %%in %.0f+-50  fn" % a.ton)
 for s in range(int(len(x) // sr)):
     v = x[s * sr:(s + 1) * sr]
     rms = math.sqrt(np.mean(v * v)) + 1e-9

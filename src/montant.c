@@ -257,9 +257,9 @@ static bool prendre_ul(uint16_t *api_ram, unsigned off, uint8_t *out, int n)
     if (consomme < 0) {
         const char *e = calypso_getenv("MONTANT_CONSOMME_BLUD");
         consomme = (e && *e == '1') ? 1 : 0;
-        printf("  [montant] B_BLUD des tampons montants (a_cu, a_fu, a_du) %s\n",
-               consomme ? "efface par l'hote apres lecture (MONTANT_CONSOMME_BLUD=1) : la ROM n'emet ni FACCH ni parole"
-                        : "laisse a la ROM, qui le consomme (MONTANT_CONSOMME_BLUD=1 pour l'ancien comportement)");
+        printf("  [montant] B_BLUD of the uplink buffers (a_cu, a_fu, a_du) %s\n",
+               consomme ? "cleared by the host after reading (MONTANT_CONSOMME_BLUD=1): the ROM sends neither FACCH nor speech"
+                        : "left to the ROM, which consumes it (MONTANT_CONSOMME_BLUD=1 for the old behaviour)");
     }
     int k;
     for (k = 0; k < nvu && vu[k].off != off; k++) { }
@@ -374,7 +374,7 @@ void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
     if (prendre_ul(api_ram, NDB_A_FU, l2, 23)) {
         publier_l2(&fd_facch, SHM_FACCH_UL, &seq_facch, l2, TCHT_DSP_TASK, fn);
         if (g.facch++ < (unsigned long)journal())
-            printf("  [montant] FACCH UL fn=%u (au GO)\n", fn);
+            printf("  [montant] FACCH UL fn=%u (at GO)\n", fn);
     }
     /* UPLINK SPEECH AT THE GO. a_du (NDB_A_DU_1) behaves like a_fu: B_BLUD is
      * cleared by the ROM during phase B of the frame, so capture_tch_ul
@@ -390,7 +390,7 @@ void montant_capter_fu(uint16_t *api_ram, uint32_t fn)
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
             parole_vers_pont(fr, TCHT_DSP_TASK, fn);
             if (g.parole++ < (unsigned long)journal())
-                printf("  [montant] parole UL fn=%u (au GO)\n", fn);
+                printf("  [montant] speech UL fn=%u (at GO)\n", fn);
         }
     }
 }
@@ -411,7 +411,7 @@ static bool capture_tch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
         if (prendre_ul(api_ram, NDB_A_DU_1, fr, FR_BYTES)) {
             parole_vers_pont(fr, task_u, fn);
             if (g.parole++ < (unsigned long)journal())
-                printf("  [montant] parole UL fn=%u\n", fn);
+                printf("  [montant] speech UL fn=%u\n", fn);
         }
         return true;
     case TCHA_DSP_TASK:
@@ -539,8 +539,8 @@ static void capture_sdcch_ul(uint16_t *api_ram, uint16_t task_u, uint32_t fn)
         /* B_BLUD never seen while the firmware posts uplink tasks: the ROM
          * may consume it first. Switch to the window scan. */
         if (++g.sans_blud == 400) {
-            printf("  [montant] a_cu : B_BLUD jamais vu en %u taches montantes, "
-                   "bascule sur la fenetre heuristique\n", g.sans_blud);
+            printf("  [montant] a_cu: B_BLUD never seen in %u uplink tasks, "
+                   "switching to the heuristic window\n", g.sans_blud);
         }
         if (g.sans_blud < 400) {
             return;
@@ -592,7 +592,7 @@ static void scruter_dcch(uint32_t fn)
     if (genre == 4) {
         /* PDCH (GPRS, firmware l1gprs_fw.c, tap calypso_dcch_tap.c): the BSP
          * plays the whole TN, like a TCH; no SDCCH memorised, no TCH switch. */
-        printf("  [montant] canal dedie (side-band seq=%u) : PDCH TS%d (GPRS), toutes les trames au BSP\n", seq, tn);
+        printf("  [montant] dedicated channel (side-band seq=%u): PDCH TS%d (GPRS), all frames to the BSP\n", seq, tn);
         fflush(stdout);
         calypso_bsp_set_dedie(tn, 4, 0);
         g.dedie_arme = true;
@@ -615,18 +615,18 @@ static void scruter_dcch(uint32_t fn)
          * task. */
         if (!g.tch_tn && tn >= 1 && tn <= 7) {
             g.tch_tn = tn;
-            printf("  [montant] TCH : intervalle TS%d pris sur le side-band (pas d'annonce calypso_tch_cfg)\n", tn);
+            printf("  [montant] TCH: slot TS%d taken from the side-band (no calypso_tch_cfg announcement)\n", tn);
         }
-        printf("  [montant] canal dedie (side-band seq=%u) : TCH/%c TS%d SS=%d, firmware sur le TCH "
+        printf("  [montant] dedicated channel (side-band seq=%u): TCH/%c TS%d SS=%d, firmware on the TCH "
                "(%s%s)\n", seq, genre == 2 ? 'F' : 'H', tn, ss,
-               g.sur_tch ? "BSP deja sur le TCH" : "BSP pas encore bascule",
-               g.sd_valide ? ", SDCCH memorise" : "");
+               g.sur_tch ? "BSP already on the TCH" : "BSP not switched yet",
+               g.sd_valide ? ", SDCCH remembered" : "");
         fflush(stdout);
         return;
     }
-    printf("  [montant] canal dedie (side-band seq=%u) : %s TS%d SDCCH/%d SS=%d%s\n",
-           seq, genre == 0xFF ? "libere" : "arme", tn, genre == 1 ? 8 : 4, ss,
-           (genre != 0xFF && g.sur_tch) ? " (memorise : le firmware est sur le TCH)" : "");
+    printf("  [montant] dedicated channel (side-band seq=%u): %s TS%d SDCCH/%d SS=%d%s\n",
+           seq, genre == 0xFF ? "released" : "armed", tn, genre == 1 ? 8 : 4, ss,
+           (genre != 0xFF && g.sur_tch) ? " (remembered: the firmware is on the TCH)" : "");
     g_tn_tch_sb = 0;   /* SDCCH (TS0) armed or channel released: the mobile no longer sends on the TCH */
     g.tch_demi = false;
     if (genre == 0xFF) {
@@ -656,12 +656,12 @@ static void revenir_sdcch(const char *raison, uint32_t fn)
 {
     g.sur_tch = false;
     if (g.sd_valide) {
-        printf("  [montant] %s a fn=%u : BSP rendu au SDCCH TS%d SS=%d\n",
+        printf("  [montant] %s at fn=%u: BSP returned to SDCCH TS%d SS=%d\n",
                raison, fn, g.sd_tn, g.sd_ss);
         calypso_bsp_set_dedie(g.sd_tn, g.sd_genre, g.sd_ss);
         g.dedie_arme = true;
     } else {
-        printf("  [montant] %s a fn=%u : aucun SDCCH connu, canal dedie libere\n",
+        printf("  [montant] %s at fn=%u: no known SDCCH, dedicated channel released\n",
                raison, fn);
         calypso_bsp_set_dedie(0, 0xFF, 0);
         g.dedie_arme = false;
@@ -739,13 +739,13 @@ static void scruter_tch(uint32_t fn)
         int etait = g.tch_tn;
         g.tch_tn = 0;
         if (g.sur_tch) {
-            printf("  [montant] TCH (seq=0) : libere TS%d\n", etait);
+            printf("  [montant] TCH (seq=0): released TS%d\n", etait);
             calypso_bsp_set_dedie(0, 0xFF, 0);
             g.sur_tch = false;
             g.dedie_arme = false;
             montant_canal_libere();
         } else if (etait) {
-            printf("  [montant] TCH (seq=0) : annonce TS%d retiree (le firmware n'y etait pas)\n", etait);
+            printf("  [montant] TCH (seq=0): announcement TS%d withdrawn (the firmware was not there)\n", etait);
         }
         return;
     }
@@ -754,24 +754,24 @@ static void scruter_tch(uint32_t fn)
          * SDCCH): the SDCCH is still alive, and so is the Kc. */
         int etait = g.tch_tn;
         g.tch_tn = 0;
-        printf("  [montant] TCH (seq=%u) : annonce TS%d abandonnee par le pont\n", seq, etait);
+        printf("  [montant] TCH (seq=%u): announcement TS%d dropped by the bridge\n", seq, etait);
         if (g.sur_tch) {
-            revenir_sdcch("abandon du TCH", fn);
+            revenir_sdcch("TCH dropped", fn);
         }
         return;
     }
     g.tch_tn = tn;
     g.tch_tsc = tsc;
     if (!tch_sur_tache()) {
-        printf("  [montant] TCH (seq=%u) : arme TS%d TSC=%d - toutes ses trames (MONTANT_TCH_TACHE=0)\n",
+        printf("  [montant] TCH (seq=%u): armed TS%d TSC=%d - all its frames (MONTANT_TCH_TACHE=0)\n",
                seq, tn, tsc);
         calypso_bsp_set_dedie(tn, 2 /* BSP_DEDIE_TCH */, 0);
         g.sur_tch = true;
         g.dedie_arme = true;
         return;
     }
-    printf("  [montant] TCH (seq=%u) : TS%d TSC=%d annonce par le pont, "
-           "bascule du BSP a la premiere tache TCH du firmware\n", seq, tn, tsc);
+    printf("  [montant] TCH (seq=%u): TS%d TSC=%d announced by the bridge, "
+           "BSP switches at the firmware's first TCH task\n", seq, tn, tsc);
     fflush(stdout);
 }
 
@@ -801,7 +801,7 @@ static void sonde_dfn(uint16_t *api_ram, unsigned pg, bool taches, uint32_t fn)
         return;
     }
     n++;
-    printf("  [d_fn] tick=%u tache=%u fn_report=%u fn%%104=%u\n",
+    printf("  [d_fn] tick=%u task=%u fn_report=%u fn%%104=%u\n",
            fn, t, dfn & 0xffu, (dfn >> 8) & 0xffu);
 }
 
@@ -823,19 +823,19 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
             int tn_tpu = calypso_bsp_fenetre_tn();
             if (tn_tpu >= 1 && tn_tpu <= 7) {
                 g.tch_tn = tn_tpu;
-                printf("  [montant] TCH : tache %u postee a fn=%u sans annonce (calypso_tch_cfg) : "
-                       "intervalle TS%d lu sur la fenetre TPU\n", t, fn, tn_tpu);
+                printf("  [montant] TCH: task %u posted at fn=%u without announcement (calypso_tch_cfg): "
+                       "slot TS%d read from the TPU window\n", t, fn, tn_tpu);
             } else {
                 if (!sans_annonce_dit) {
                     sans_annonce_dit = true;
-                    printf("  [montant] TCH : tache %u postee a fn=%u sans annonce du pont "
-                           "(calypso_tch_cfg) : intervalle inconnu (TPU %d), BSP inchange\n", t, fn, tn_tpu);
+                    printf("  [montant] TCH: task %u posted at fn=%u without bridge announcement "
+                           "(calypso_tch_cfg): unknown slot (TPU %d), BSP unchanged\n", t, fn, tn_tpu);
                 }
                 return;
             }
         }
         sans_annonce_dit = false;
-        printf("  [montant] TCH : le firmware poste la tache %u a fn=%u, BSP bascule sur TS%d (TSC=%d)\n",
+        printf("  [montant] TCH: the firmware posts task %u at fn=%u, BSP switches to TS%d (TSC=%d)\n",
                t, fn, g.tch_tn, g.tch_tsc);
         fflush(stdout);
         calypso_bsp_set_dedie(g.tch_tn, 2 /* BSP_DEDIE_TCH */, 0);
@@ -857,15 +857,15 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
                   const char *e = calypso_getenv("MONTANT_TI_ALLC_DIRECT"); direct = (e && *e == '1'); }
     if (tache_bloc && g.sur_tch) {
         if (!ti || direct) {
-            revenir_sdcch("le firmware est revenu sur le SDCCH (tache ALLC)", fn);
+            revenir_sdcch("the firmware went back to the SDCCH (ALLC task)", fn);
         } else {
             g.sur_tch = false;
             g.dedie_arme = false;
             calypso_bsp_set_dedie(0, 0xFF, 0);
             attente_ul = g.sd_valide;
             attente_fn = fn;
-            printf("  [montant] firmware TI : tache ALLC apres le TCH a fn=%u : BSP rendu a TS0, retour au SDCCH "
-                   "seulement sur une tache montante%s\n", fn, g.sd_valide ? "" : " (aucun SDCCH connu)");
+            printf("  [montant] TI firmware: ALLC task after the TCH at fn=%u: BSP returned to TS0, back to the SDCCH "
+                   "only on an uplink task%s\n", fn, g.sd_valide ? "" : " (no known SDCCH)");
             fflush(stdout);
         }
         return;
@@ -874,10 +874,10 @@ static void suivre_tache_tch(uint16_t *api_ram, unsigned pg, bool taches, uint32
         uint16_t u = api_ram[(API_W_PAGE(pg) + WP_D_TASK_U) / 2] & 0x7fffu;
         if (u) {
             attente_ul = false;
-            revenir_sdcch("firmware TI : tache montante apres le TCH (echec d'assignation)", fn);
+            revenir_sdcch("TI firmware: uplink task after the TCH (assignment failure)", fn);
         } else if ((uint32_t)(fn - attente_fn) > 102u) {
             attente_ul = false;
-            printf("  [montant] firmware TI : aucune tache montante 102 trames apres le TCH (fn=%u) : en veille\n", fn);
+            printf("  [montant] TI firmware: no uplink task 102 frames after the TCH (fn=%u): idle\n", fn);
         }
     }
 }
@@ -940,7 +940,7 @@ static void sonde_afd(uint16_t *api_ram, uint32_t fn)
         if (fire) ko++; else ok++;
         noter_dl(fn, 1, etat, api_ram[(API_NDB + NDB_A_FD) / 2 + 2], d, 23);
         if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
-            printf("  [a_fd] fn=%u fn%%13=%u etat=%04x BLUD=1 FIRE=%d d_tch_mode=%04x "
+            printf("  [a_fd] fn=%u fn%%13=%u state=%04x BLUD=1 FIRE=%d d_tch_mode=%04x "
                    "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
                    fn, fn % 13u, etat, fire ? 1 : 0, mode, d[0], d[1], d[2], d[3], ok, ko);
         }
@@ -993,7 +993,7 @@ static void sonde_add(uint16_t *api_ram, uint32_t fn)
         if (fire) ko++;
         if (mauvaise) bfi++;
         if (vues <= 20 || vues % 100 == 0) {
-            printf("  [a_dd] fn=%u etat=%04x FIRE=%d BFI=%d err=%u (ecart %u trames) | vues=%lu ko=%lu bfi=%lu\n",
+            printf("  [a_dd] fn=%u state=%04x FIRE=%d BFI=%d err=%u (gap %u frames) | seen=%lu ko=%lu bfi=%lu\n",
                    fn, etat, fire ? 1 : 0, mauvaise ? 1 : 0, erreurs, fn - fn_dernier, vues, ko, bfi);
         }
         fn_dernier = fn;
@@ -1154,10 +1154,10 @@ static void publier_kc(uint16_t *api_ram)
     memcpy(dernier, rec, sizeof rec);
     a_dernier = true;
     if (algo) {
-        printf("  [montant] chiffrement A5/%u : Kc publie vers %s (seq=%u)\n",
+        printf("  [montant] ciphering A5/%u: Kc published to %s (seq=%u)\n",
                algo, SHM_KC, seq);
     } else {
-        printf("  [montant] retour en clair (seq=%u)\n", seq);
+        printf("  [montant] back to clear (seq=%u)\n", seq);
     }
     fflush(stdout);
 }
@@ -1201,7 +1201,7 @@ static void prothese_parole_dl(uint16_t *api_ram, const uint8_t fr[FR_BYTES], in
     for (int k = 0; k < FR_BYTES; k += 2)              /* high byte first, like sonde_add */
         dd[3 + k / 2] = (uint16_t)((ti[k] << 8) | (k + 1 < FR_BYTES ? ti[k + 1] : 0));
     if (n_ok++ < 40 || n_ok % 500 == 0)
-        printf("  [parole-dl] fn=%u : trame FR de la BTS posee dans a_dd (%d err) [%u]\n", e, ne, n_ok);
+        printf("  [parole-dl] fn=%u: BTS FR frame placed in a_dd (%d err) [%u]\n", e, ne, n_ok);
 }
 
 static void prothese_facch_dl(uint16_t *api_ram)
@@ -1237,7 +1237,7 @@ static void prothese_facch_dl(uint16_t *api_ram)
     for (int k = 0; k < 12; k++)
         fd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < 23 ? l2[2 * k + 1] << 8 : 0));
     if (n_ok++ < 40 || n_ok % 100 == 0)
-        printf("  [facch-dl] fn=%u : FACCH de la BTS posee dans a_fd (%02x %02x %02x %02x, %d err) [%u]\n",
+        printf("  [facch-dl] fn=%u: BTS FACCH placed in a_fd (%02x %02x %02x %02x, %d err) [%u]\n",
                e, l2[0], l2[1], l2[2], l2[3], ne, n_ok);
     fflush(stdout);
 }
@@ -1353,8 +1353,8 @@ static void prothese_facchh_dl(uint16_t *api_ram)
     if (rc != GSM_MACBLOCK_LEN) rc = facchh_decoder(b6, fns, 0, cle, l2, &ne);
     if (rc != GSM_MACBLOCK_LEN) {
         if (rc != 14 && (n_ko++ < 20 || n_ko % 500 == 0)) {
-            printf("  [facchh-dl] fn=%u SS=%d : pas de FACCH/H (rc=%d, A5/%d %s) [%u]\n",
-                   e, g.tch_demi_ss, rc, cle_algo, cle_algo ? "puis clair" : "absent", n_ko);
+            printf("  [facchh-dl] fn=%u SS=%d: no FACCH/H (rc=%d, A5/%d %s) [%u]\n",
+                   e, g.tch_demi_ss, rc, cle_algo, cle_algo ? "then clear" : "absent", n_ko);
             fflush(stdout);
         }
         return;
@@ -1366,8 +1366,8 @@ static void prothese_facchh_dl(uint16_t *api_ram)
     for (int k = 0; k < 12; k++)
         fd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < GSM_MACBLOCK_LEN ? l2[2 * k + 1] << 8 : 0));
     if (n_ok++ < 40 || n_ok % 100 == 0)
-        printf("  [facchh-dl] fn=%u SS=%d : FACCH/H de la BTS posee dans a_fd (%02x %02x %02x %02x, %d err, %s) [%u]\n",
-               e, g.tch_demi_ss, l2[0], l2[1], l2[2], l2[3], ne, chiffre ? "dechiffree" : "en clair", n_ok);
+        printf("  [facchh-dl] fn=%u SS=%d: BTS FACCH/H placed in a_fd (%02x %02x %02x %02x, %d err, %s) [%u]\n",
+               e, g.tch_demi_ss, l2[0], l2[1], l2[2], l2[3], ne, chiffre ? "deciphered" : "clear", n_ok);
     fflush(stdout);
 }
 
@@ -1413,7 +1413,7 @@ static void prothese_sacchth_dl(uint16_t *api_ram)
     int ne = 0, nb = 0;
     if (gsm0503_xcch_decode(l2, soft, &ne, &nb) != 0) {
         if (n_ko++ < 20 || n_ko % 200 == 0) {
-            printf("  [sacchth-dl] fn=%u TS%d SS=%d : SACCH/TH illisible (A5/%d) [%u]\n",
+            printf("  [sacchth-dl] fn=%u TS%d SS=%d: SACCH/TH unreadable (A5/%d) [%u]\n",
                    e, g.tch_tn, g.tch_demi_ss, g_cle_tchh_algo, n_ko);
             fflush(stdout);
         }
@@ -1426,7 +1426,7 @@ static void prothese_sacchth_dl(uint16_t *api_ram)
     for (int k = 0; k < 12; k++)
         cd[3 + k] = (uint16_t)(l2[2 * k] | (2 * k + 1 < GSM_MACBLOCK_LEN ? l2[2 * k + 1] << 8 : 0));
     if (n_ok++ < 20 || n_ok % 100 == 0)
-        printf("  [sacchth-dl] fn=%u TS%d SS=%d : SACCH/TH de la BTS posee dans a_cd (%02x %02x %02x %02x, %d err) [%u]\n",
+        printf("  [sacchth-dl] fn=%u TS%d SS=%d: BTS SACCH/TH placed in a_cd (%02x %02x %02x %02x, %d err) [%u]\n",
                e, g.tch_tn, g.tch_demi_ss, l2[0], l2[1], l2[2], l2[3], ne, n_ok);
     fflush(stdout);
 }
@@ -1460,7 +1460,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         const uint16_t *kc = &api_ram[(API_NDB + 0x2ce) / 2];
         if (a5 != a5_prec || memcmp(kc, kc_prec, sizeof kc_prec)) {
             printf("  [a5-arm] tick=%u d_a5mode=%u a_kc=%04x %04x %04x %04x%s\n", fn, a5, kc[0], kc[1], kc[2], kc[3],
-                   g.sur_tch ? "  (BSP sur le TCH)" : "");
+                   g.sur_tch ? "  (BSP on the TCH)" : "");
             fflush(stdout);
             a5_prec = a5; memcpy(kc_prec, kc, sizeof kc_prec);
         }
@@ -1497,7 +1497,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
             else if (attente > 0) attente--;
             if (attente == 0) {
                 *ctrl |= 0x0200;
-                printf("  [sync-dl] tick=%u page W%u : d_ctrl_tch |= B_SYNC_TCH_DL -> %04x (reglage %d)\n", fn, pg, *ctrl, sync_dl);
+                printf("  [sync-dl] tick=%u page W%u: d_ctrl_tch |= B_SYNC_TCH_DL -> %04x (setting %d)\n", fn, pg, *ctrl, sync_dl);
                 fflush(stdout);
                 attente = -1;
             }
@@ -1519,7 +1519,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
                 static unsigned n_voc;
                 *ctrl &= (uint16_t)~0x0080u;
                 if (n_voc++ == 0) {
-                    printf("  [vocodeur-off] tick=%u : B_VOCODER_ON efface de d_ctrl_tch (voix par l'hote) -> %04x\n", fn, *ctrl);
+                    printf("  [vocodeur-off] tick=%u: B_VOCODER_ON cleared from d_ctrl_tch (voice by the host) -> %04x\n", fn, *ctrl);
                     fflush(stdout);
                 }
             }
@@ -1545,8 +1545,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         bool cherche_synchro = (md0 == FB_DSP_TASK || md0 == SB_DSP_TASK ||
                                 md1 == FB_DSP_TASK || md1 == SB_DSP_TASK);
         if (g.dedie_arme && cherche_synchro) {
-            printf("  [montant] tache %s postee : le mobile cherche la synchro, "
-                   "canal dedie libere (TS0 rendu au FCCH/SCH)\n",
+            printf("  [montant] %s task posted: the mobile is searching for sync, "
+                   "dedicated channel released (TS0 returned to FCCH/SCH)\n",
                    (md0 == FB_DSP_TASK || md1 == FB_DSP_TASK) ? "FB" : "SB");
             g.dedie_arme = false;
             g.sur_tch = false;
@@ -1579,7 +1579,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
                 bool fire = (etat & 0x0040) != 0;
                 if (fire) ko++; else ok++;
                 if ((ok + ko) <= 60 || ((ok + ko) % 50) == 0) {
-                    printf("  [a_cd] fn=%u p51=%u p102=%u etat=%04x %s "
+                    printf("  [a_cd] fn=%u p51=%u p102=%u state=%04x %s "
                            "L2=%02x %02x %02x %02x | ok=%lu ko=%lu\n",
                            fn, fn % 51u, fn % 102u, etat, fire ? "FIRE KO" : "ok",
                            d[0], d[1], d[2], d[3], ok, ko);
@@ -1608,7 +1608,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         if (!arme && (td0 == ALLC_DSP_TASK || td1 == ALLC_DSP_TASK)) {
             arme = true;
             reste = 300;
-            printf("  [ul-dedie] premiere tache ALLC (tick %u) : sonde du montant sur 300 trames\n", fn);
+            printf("  [ul-dedie] first ALLC task (tick %u): probing the uplink over 300 frames\n", fn);
         }
         if (reste) {
             reste--;
@@ -1678,7 +1678,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         const char *ed = calypso_getenv("MONTANT_RACH_DEDUP");
         front_seul = (ea && *ea == '0') && !(ed && *ed == '0');
         if (front_seul)
-            printf("  [montant] RACH publie sur le front de d_task_ra (MONTANT_RACH_DEDUP=0 : toutes les %d trames)\n",
+            printf("  [montant] RACH published on the d_task_ra edge (MONTANT_RACH_DEDUP=0: every %d frames)\n",
                    RACH_GARDE_TRAMES);
     }
     bool nouveau_rach = !front_seul || !tache_avant || front_valeur;
@@ -1693,7 +1693,7 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
     if (differe < 0) {
         const char *e = calypso_getenv("MONTANT_RACH_DIFFERE");
         differe = (e && *e) ? atoi(e) : 0;
-        if (differe > 0) printf("  [montant] RACH differe de %d trame(s) : d_rach lu apres le front de d_task_ra\n", differe);
+        if (differe > 0) printf("  [montant] RACH delayed by %d frame(s): d_rach read after the d_task_ra edge\n", differe);
     }
     if (rach_attente && (uint32_t)(fn - fn_attente) >= (uint32_t)differe) {
         rach_attente = false;
@@ -1709,8 +1709,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         g.fn_rach = fn;
         g.rach_vu = true;
         if (g.rach <= (unsigned long)journal())
-            printf("  [montant]   declencheur : %s (task_ra=0x%04x d_rach=0x%04x)\n",
-                   tache_rach ? "d_task_ra=RACH_DSP_TASK" : "transition de d_rach",
+            printf("  [montant]   trigger: %s (task_ra=0x%04x d_rach=0x%04x)\n",
+                   tache_rach ? "d_task_ra=RACH_DSP_TASK" : "d_rach transition",
                    task_ra, d_rach);
         static int consomme = -1;
         if (consomme < 0) {
@@ -1732,8 +1732,8 @@ void montant_scruter(uint16_t *api_ram, uint32_t fn, unsigned page)
         if (efface_ra < 0) {
             const char *e = calypso_getenv("MONTANT_EFFACE_TASK_RA");
             efface_ra = (e && *e == '1') ? 1 : 0;
-            printf("  [montant] d_task_ra %s\n", efface_ra ? "efface avant la ROM (MONTANT_EFFACE_TASK_RA=1) : RACH code par le pont"
-                                                           : "laisse a la ROM : elle code l'access-burst (MONTANT_EFFACE_TASK_RA=1 pour l'ancien comportement)");
+            printf("  [montant] d_task_ra %s\n", efface_ra ? "cleared before the ROM (MONTANT_EFFACE_TASK_RA=1): RACH encoded by the bridge"
+                                                           : "left to the ROM: it encodes the access burst (MONTANT_EFFACE_TASK_RA=1 for the old behaviour)");
         }
         if (task_ra && efface_ra) {
             wp[WP_D_TASK_RA / 2] = 0;   /* like qosmo-dsp/calypso_trx.c:1955 */
@@ -1761,9 +1761,9 @@ void montant_canal_libere(void)
 void montant_bilan(void)
 {
     if (g.rach || g.sdcch || g.facch || g.sacch || g.parole) {
-        printf("  montant publie : RACH %lu, SDCCH %lu, FACCH %lu, SACCH %lu, parole %lu\n",
+        printf("  uplink published: RACH %lu, SDCCH %lu, FACCH %lu, SACCH %lu, speech %lu\n",
                g.rach, g.sdcch, g.facch, g.sacch, g.parole);
     } else {
-        printf("  montant : rien publie (aucun d_rach ni d_task_u vu dans l'API RAM)\n");
+        printf("  uplink: nothing published (no d_rach nor d_task_u seen in the API RAM)\n");
     }
 }

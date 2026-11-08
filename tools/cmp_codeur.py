@@ -1,4 +1,4 @@
-"""cmp_codeur.py <trace> : codeur FR de la ROM contre libgsm, sur les memes 160 echantillons."""
+"""cmp_codeur.py <trace>: the ROM FR encoder against libgsm, on the same 160 samples."""
 import ctypes, sys, numpy as np
 gsm = ctypes.CDLL("libgsm.so.1"); oc = ctypes.CDLL("/usr/local/lib/libosmocodec.so.4")
 gsm.gsm_create.restype = ctypes.c_void_p
@@ -34,7 +34,7 @@ for so, w in paires:
         diff += np.array(pr) != np.array(pf); n += 1
     o = (ctypes.c_short * 160)(); gsm.gsm_decode(ctypes.c_void_p(gdec), (ctypes.c_ubyte * 33)(*fr), o); sortie_rom += list(o)
     entree += [v * 2 for v in so]
-print(f"{len(paires)} trames, {n} avec du signal ; fraction de trames ou le parametre ROM != libgsm :")
+print(f"{len(paires)} frames, {n} with signal; fraction of frames where the ROM parameter != libgsm:")
 print('  ' + '  '.join(f"{NOMS[i]}={diff[i]/max(n,1):.2f}" for i in range(76) if i < 12 or i % 17 in (8, 9, 10, 11)))
 e = np.array(entree, float); r = np.array(sortie_rom, float)
 def spec(x):
@@ -44,6 +44,6 @@ def spec(x):
         if np.sqrt((s**2).mean()) > 300: S += abs(np.fft.rfft(s * np.hanning(1024)))**2
     f = np.arange(513) * 8000 / 1024; t = S.sum() or 1
     return [round(100 * S[(f >= a) & (f < a + 1000)].sum() / t, 1) for a in (0, 1000, 2000, 3000)]
-print('entree micro  energie % [0-1k,1-2k,2-3k,3-4k]', spec(e))
-print('codeur ROM decode par libgsm               ', spec(r))
+print('mic input     energy % [0-1k,1-2k,2-3k,3-4k]', spec(e))
+print('ROM encoder decoded by libgsm               ', spec(r))
 np.array(r, '<i2').tofile(sys.argv[1] + '.ul_rom_decode.raw')

@@ -11,4 +11,4 @@ for l in L:
 pres=[a for a in att if a['snr']>1000]           # burst present inside the window
 ok=[a for a in pres if a['crc']=='OK']; ko=[a for a in pres if a['crc']!='OK']
 ma=lambda g: (sum(a['angle'] for a in g)/len(g)) if g else float('nan')
-print(f"{sys.argv[2]:28s} SCH presents={len(pres):3d} OK={len(ok):3d} ({100*len(ok)/max(1,len(pres)):3.0f}%)  angle OK={ma(ok):5.0f} KO={ma(ko):5.0f}  toa OK={collections.Counter(a['toa'] for a in ok).most_common(2)}")
+print(f"{sys.argv[2]:28s} SCH present={len(pres):3d} OK={len(ok):3d} ({100*len(ok)/max(1,len(pres)):3.0f}%)  angle OK={ma(ok):5.0f} KO={ma(ko):5.0f}  toa OK={collections.Counter(a['toa'] for a in ok).most_common(2)}")

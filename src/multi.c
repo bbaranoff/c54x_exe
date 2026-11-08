@@ -93,7 +93,7 @@ static int analyser(char *texte, int no, Tache *t)
         }
         args_vus = true;
         if (!strcmp(m, "--arm") || !strcmp(m, "--plan")) {
-            fprintf(stderr, "plan ligne %d : %s interdit dans une tache\n", no, m);
+            fprintf(stderr, "plan line %d: %s not allowed in a task\n", no, m);
             return -1;
         }
         if (na + 2 > cap_a) { cap_a *= 2; t->args = realloc(t->args, cap_a * sizeof(char *)); }
@@ -107,7 +107,7 @@ static int analyser(char *texte, int no, Tache *t)
 static Tache *lire_plan(const char *plan, int *n_out)
 {
     FILE *f = strcmp(plan, "-") ? fopen(plan, "r") : stdin;
-    if (!f) { fprintf(stderr, "plan %s : %s\n", plan, strerror(errno)); return NULL; }
+    if (!f) { fprintf(stderr, "plan %s: %s\n", plan, strerror(errno)); return NULL; }
     size_t cap = 64, n = 0;
     Tache *t = calloc(cap, sizeof(Tache));
     char *buf = NULL; size_t len = 0; int no = 0;
@@ -134,7 +134,7 @@ static void lancer(Tache *t, int k, int cpu, const char *sortie, const char *exe
     fflush(stderr);
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "fork : %s\n", strerror(errno));
+        fprintf(stderr, "fork: %s\n", strerror(errno));
         t->statut = 127;
         return;
     }
@@ -165,7 +165,7 @@ static void lancer(Tache *t, int k, int cpu, const char *sortie, const char *exe
         memcpy(av + 1, t->args, na * sizeof(char *));
         if (delai > 0) alarm((unsigned)delai);
         execv(exe, av);
-        fprintf(stderr, "execv %s : %s\n", exe, strerror(errno));
+        fprintf(stderr, "execv %s: %s\n", exe, strerror(errno));
         _exit(127);
     }
     t->pid = pid;
@@ -178,7 +178,7 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
     int n = 0;
     Tache *t = lire_plan(plan, &n);
     if (!t) return 2;
-    if (n == 0) { fprintf(stderr, "plan %s : aucune tache\n", plan); return 2; }
+    if (n == 0) { fprintf(stderr, "plan %s: no task\n", plan); return 2; }
 
     /* The CPUs we may use: the affinity mask (taskset, cgroups), not nproc. */
     cpu_set_t masque;
@@ -193,16 +193,16 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
     bool epingler = n_cpus > 0 && coeurs <= n_cpus;
 
     if (mkdir(sortie, 0755) < 0 && errno != EEXIST) {
-        fprintf(stderr, "sortie %s : %s\n", sortie, strerror(errno));
+        fprintf(stderr, "output %s: %s\n", sortie, strerror(errno));
         return 2;
     }
     char exe[4096];
     ssize_t l = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-    if (l <= 0) { fprintf(stderr, "readlink /proc/self/exe : %s\n", strerror(errno)); return 2; }
+    if (l <= 0) { fprintf(stderr, "readlink /proc/self/exe: %s\n", strerror(errno)); return 2; }
     exe[l] = '\0';
 
-    printf("[multi] %d tache(s) sur %d coeur(s)%s -> %s/\n", n, coeurs,
-           epingler ? ", un CPU par tache" : "", sortie);
+    printf("[multi] %d task(s) on %d core(s)%s -> %s/\n", n, coeurs,
+           epingler ? ", one CPU per task" : "", sortie);
     fflush(stdout);
 
     /* slot s runs on cpus[s]; occupe[s] = index of its job, -1 if free */
@@ -225,7 +225,7 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
         pid_t p = wait(&st);
         if (p < 0) {
             if (errno == EINTR) continue;
-            fprintf(stderr, "wait : %s\n", strerror(errno));
+            fprintf(stderr, "wait: %s\n", strerror(errno));
             break;
         }
         int s = 0;
@@ -242,7 +242,7 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
             printf("[multi] %d/%d  %.1fs%s", finies, n, maintenant() - t0,
                    x->statut ? "" : "\n");
             if (x->statut)
-                printf("  tache %d : statut %d (%s/%05d.log)\n", (int)(x - t) + 1,
+                printf("  task %d: status %d (%s/%05d.log)\n", (int)(x - t) + 1,
                        x->statut, sortie, (int)(x - t) + 1);
             fflush(stdout);
         }
@@ -252,7 +252,7 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
     snprintf(bilan, sizeof(bilan), "%s/bilan.tsv", sortie);
     FILE *b = fopen(bilan, "w");
     if (b) {
-        fprintf(b, "tache\tstatut\tsecondes\tcpu\tligne\n");
+        fprintf(b, "task\tstatus\tseconds\tcpu\tline\n");
         for (int k = 0; k < n; k++)
             fprintf(b, "%d\t%d\t%.3f\t%d\t%s\n", k + 1, t[k].statut, t[k].duree,
                     t[k].cpu, t[k].ligne);
@@ -260,7 +260,7 @@ int multi_executer(const char *plan, int coeurs, const char *sortie, int delai)
     }
     double total = maintenant() - t0, cumul = 0;
     for (int k = 0; k < n; k++) cumul += t[k].duree;
-    printf("[multi] termine : %d tache(s), %d echec(s), %.1fs ecoulees pour %.1fs de calcul"
-           " (x%.1f) ; bilan %s\n", n, echecs, total, cumul, total > 0 ? cumul / total : 0, bilan);
+    printf("[multi] done: %d task(s), %d failure(s), %.1fs elapsed for %.1fs of compute"
+           " (x%.1f); summary %s\n", n, echecs, total, cumul, total > 0 ? cumul / total : 0, bilan);
     return echecs ? 1 : 0;
 }

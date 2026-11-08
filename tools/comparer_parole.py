@@ -91,20 +91,20 @@ def main():
     ap.add_argument("--dsp-log", default="/tmp/c54x-pont/dsp.log")
     ap.add_argument("--bursts", default="/dev/shm/calypso_tch_dl.bin")
     ap.add_argument("--rom", default="/dev/shm/calypso_add_dl.bin")
-    ap.add_argument("--kc", help="Kc en hexa (sinon lu dans dsp.log)")
-    ap.add_argument("-v", action="store_true", help="une ligne par trame")
+    ap.add_argument("--kc", help="Kc in hex (otherwise read from dsp.log)")
+    ap.add_argument("-v", action="store_true", help="one line per frame")
     a = ap.parse_args()
 
     bursts = lire_bursts(a.bursts)
     rom = lire_rom(a.rom)
     if not bursts or not rom:
-        sys.exit("rien a comparer : %d bursts, %d trames ROM" % (len(bursts), len(rom)))
+        sys.exit("nothing to compare: %d bursts, %d ROM frames" % (len(bursts), len(rom)))
     kcs = [(0, bytes.fromhex(a.kc))] if a.kc else lire_kc(a.dsp_log)
     offs = collections.Counter(t - f for t, f, _ in bursts)
     off = offs.most_common(1)[0][0]
-    print("bursts : %d (fn BTS %d..%d, tick - fn = %s)" % (
+    print("bursts: %d (BTS fn %d..%d, tick - fn = %s)" % (
         len(bursts), bursts[0][1], bursts[-1][1], dict(offs.most_common(3))))
-    print("trames ROM : %d (parole %d, FACCH %d) ; Kc connus : %s" % (
+    print("ROM frames: %d (speech %d, FACCH %d); known Kc: %s" % (
         len(rom), sum(1 for r in rom if r[1] == 0), sum(1 for r in rom if r[1] == 1),
         [k.hex() for _, k in kcs]))
 
@@ -138,7 +138,7 @@ def main():
         blocs[fn] = (rc, bytes(out), ne.value)
     n_fr = sum(1 for r in blocs.values() if r[0] == FR)
     n_fa = sum(1 for r in blocs.values() if r[0] == MAC)
-    print("reference : %d blocs, %d parole, %d FACCH, %d en echec" % (
+    print("reference: %d blocks, %d speech, %d FACCH, %d failed" % (
         len(blocs), n_fr, n_fa, len(blocs) - n_fr - n_fa))
 
     cl = classes_fr()
@@ -149,48 +149,48 @@ def main():
         cible = fn_rom - off
         cand = [f for f in fins if cible - 8 <= f <= cible]
         if not cand:
-            stats["sans_reference"].append(0)
+            stats["no_reference"].append(0)
             continue
         f = cand[-1]
         rc, ref, ne = blocs[f]
         if typ == 0:
             if rc != FR:
-                stats["parole_ref_pas_parole"].append(rc)
+                stats["speech_ref_not_speech"].append(rc)
                 continue
             b1, b2 = bits260(ref), bits260(data)
             diff = [i for i in range(260) if b1[i] != b2[i]]
             par = [sum(1 for i in diff if cl[i] == c) for c in range(3)]
             stats["parole"].append((len(diff), par, err, ne, etat))
             if a.v:
-                print("  parole fn=%d ref_fin=%d etat=%04x err_rom=%d err_ref=%d faux=%d (Ia %d, Ib %d, II %d)"
+                print("  speech fn=%d ref_end=%d state=%04x err_rom=%d err_ref=%d wrong=%d (Ia %d, Ib %d, II %d)"
                       % (fn_rom, f, etat, err, ne, len(diff), *par))
         else:
             fire = bool(etat & 0x0040)
             if rc == MAC:
                 facch["ref FACCH, ROM %s" % ("FIRE KO" if fire else
-                      ("identique" if data[:MAC] == ref[:MAC] else "DIFFERENTE"))] += 1
+                      ("identical" if data[:MAC] == ref[:MAC] else "DIFFERENT"))] += 1
             else:
-                facch["ref pas FACCH (rc=%d), ROM %s" % (rc, "FIRE KO" if fire else "ok")] += 1
+                facch["ref not FACCH (rc=%d), ROM %s" % (rc, "FIRE KO" if fire else "ok")] += 1
             if a.v:
-                print("  facch  fn=%d ref_fin=%d etat=%04x rc_ref=%d ROM=%s REF=%s" % (
+                print("  facch  fn=%d ref_end=%d state=%04x rc_ref=%d ROM=%s REF=%s" % (
                     fn_rom, f, etat, rc, data[:6].hex(" "), ref[:6].hex(" ")))
 
     p = stats["parole"]
     if p:
         tot = [x[0] for x in p]
-        print("\nPAROLE : %d trames appariees" % len(p))
-        print("  identiques aux bits pres : %d" % sum(1 for x in tot if x == 0))
-        print("  bits faux par trame : moyenne %.1f, max %d (sur 260)" % (sum(tot) / len(tot), max(tot)))
+        print("\nSPEECH: %d paired frames" % len(p))
+        print("  bit-exact identical: %d" % sum(1 for x in tot if x == 0))
+        print("  wrong bits per frame: mean %.1f, max %d (of 260)" % (sum(tot) / len(tot), max(tot)))
         for c, nom in enumerate(("Ia (50)", "Ib (132)", "II (78)")):
             v = [x[1][c] for x in p]
-            print("  classe %-8s : moyenne %.2f, trames touchees %d" % (nom, sum(v) / len(v), sum(1 for x in v if x)))
-        print("  erreurs canal : ROM (a_dd[2]) moy %.1f | reference (Viterbi) moy %.1f" % (
+            print("  class %-8s: mean %.2f, frames hit %d" % (nom, sum(v) / len(v), sum(1 for x in v if x)))
+        print("  channel errors: ROM (a_dd[2]) mean %.1f | reference (Viterbi) mean %.1f" % (
             sum(x[2] for x in p) / len(p), sum(x[3] for x in p) / len(p)))
-    for k in ("parole_ref_pas_parole", "sans_reference"):
+    for k in ("speech_ref_not_speech", "no_reference"):
         if stats[k]:
-            print("  %s : %d" % (k, len(stats[k])))
+            print("  %s: %d" % (k, len(stats[k])))
     if facch:
-        print("\nFACCH (trames a_fd vues par la ROM) :")
+        print("\nFACCH (a_fd frames seen by the ROM):")
         for k, v in facch.most_common():
             print("  %-40s %d" % (k, v))
 

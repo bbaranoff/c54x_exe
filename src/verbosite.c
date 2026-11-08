@@ -41,8 +41,9 @@ static int niveau_ligne(const char *l)
         return 4;
     /* 0: what breaks */
     if (contient(l, "FATAL") || contient(l, "ERR") || contient(l, "abort") ||
-        contient(l, "CORRUPT") || contient(l, "TRAP") || contient(l, "manquante") ||
-        contient(l, "cannot") || contient(l, "impossible") || contient(l, "a echoue"))
+        contient(l, "CORRUPT") || contient(l, "TRAP") || contient(l, "manquante") || contient(l, "missing") ||
+        contient(l, "cannot") || contient(l, "impossible") || contient(l, "a echoue") ||
+        contient(l, "init failed"))
         return 0;
     /* 1: what is worrying */
     if (contient(l, "WARN") || contient(l, "echou") || contient(l, "failed") ||
@@ -141,12 +142,12 @@ void verbosite_bilan(FILE *out)
     if (!total) {
         return;
     }
-    fprintf(out, "  traces DSP masquees : %lu  (", total);
-    const char *nom[] = { "erreurs", "-v", "-vv", "-vvv", "-vvvv", "-vvvvv", "brut" };
+    fprintf(out, "  DSP traces hidden: %lu  (", total);
+    const char *nom[] = { "errors", "-v", "-vv", "-vvv", "-vvvv", "-vvvvv", "brut" };
     bool premier = true;
     for (int i = 1; i <= 5; i++) {
         if (!g_masquees[i]) continue;
-        fprintf(out, "%s%lu avec %s", premier ? "" : ", ", g_masquees[i], nom[i]);
+        fprintf(out, "%s%lu with %s", premier ? "" : ", ", g_masquees[i], nom[i]);
         premier = false;
     }
     fprintf(out, ")\n");

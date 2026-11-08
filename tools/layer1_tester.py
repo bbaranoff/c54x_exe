@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """layer1_tester.py - the layer1 (ARM) <-> Calypso DSP ROM interface, field by field.
 
-What the tool does (outputs PASS / FAIL / ECART / NON-EXERCE / INFO):
+What the tool does (outputs PASS / FAIL / DEVIATION / NOT-EXERCISED / INFO):
 
  1. EXTRACT. The API RAM structures as COMPILED for the firmware:
     - DWARF of layer1.highram.elf (gdb-multiarch "ptype /o"): offset and size of
@@ -32,10 +32,10 @@ What the tool does (outputs PASS / FAIL / ECART / NON-EXERCE / INFO):
 
     make layer1_tester
     python3 tools/layer1_tester.py                          # 1-3 (static)
-    python3 tools/layer1_tester.py --rejeu FICHIER          # + measurement (≈ 1 min)
-    python3 tools/layer1_tester.py --rejeu FICHIER --md docs/carte-memoire.md
-    python3 tools/layer1_tester.py --mesure m.tsv --journal j.tsv --enreg FICHIER --md ...
-    python3 tools/layer1_tester.py api_carte --rejeu FICHIER   # = --md docs/carte-memoire.md
+    python3 tools/layer1_tester.py --rejeu FILE          # + measurement (≈ 1 min)
+    python3 tools/layer1_tester.py --rejeu FILE --md docs/carte-memoire.md
+    python3 tools/layer1_tester.py --mesure m.tsv --journal j.tsv --enreg FILE --md ...
+    python3 tools/layer1_tester.py api_carte --rejeu FILE   # = --md docs/carte-memoire.md
 
 Exit code 1 if there is at least one FAIL. Read-only everywhere (firmware, qosmo,
 recording); only writes --md, --cache and the temporary files.
@@ -60,7 +60,7 @@ API_MOTS = 0x2000
 
 # -------------------------------------------------------------------- results
 class Resultats:
-    ORDRE = ['FAIL', 'SUSPECT', 'ECART', 'NON-EXERCE', 'PASS', 'INFO']
+    ORDRE = ['FAIL', 'SUSPECT', 'DEVIATION', 'NOT-EXERCISED', 'PASS', 'INFO']
 
     def __init__(self, bavard=False):
         self.lignes = []
@@ -68,7 +68,7 @@ class Resultats:
 
     def __call__(self, statut, cat, sujet, detail='', source=''):
         self.lignes.append((statut, cat, sujet, detail, source))
-        if self.bavard or statut in ('FAIL', 'SUSPECT', 'ECART'):
+        if self.bavard or statut in ('FAIL', 'SUSPECT', 'DEVIATION'):
             print('%-10s %-10s %-34s %s%s' % (statut, cat, sujet, detail, ('  [%s]' % source) if source else ''))
 
     def compte(self, cat=None):
@@ -88,7 +88,7 @@ def rel(p):
 def lancer(cmd, **kw):
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, **kw)
     if r.returncode != 0:
-        raise RuntimeError('%s : %s' % (' '.join(cmd[:3]), r.stderr[-2000:]))
+        raise RuntimeError('%s: %s' % (' '.join(cmd[:3]), r.stderr[-2000:]))
     return r.stdout
 
 
@@ -117,7 +117,7 @@ def evaluer(expr, env, prof=0):
     expr = re.sub(r'/\*.*?\*/', '', expr)
     expr = re.sub(r'//.*', '', expr).strip()
     if not expr:
-        raise ValueError('vide')
+        raise ValueError('empty')
 
     def sub(m):
         n = m.group(0)
@@ -127,13 +127,13 @@ def evaluer(expr, env, prof=0):
                 return str(v)
             texte, params = v
             if params is not None:
-                raise ValueError('macro a parametres ' + n)
+                raise ValueError('macro with parameters ' + n)
             return '(%d)' % evaluer(texte, env, prof + 1)
         if re.match(r'^(0[xX][0-9a-fA-F]+|\d+)$', n):
             return n
         if n in ('and', 'or', 'not', 'if', 'else'):
             return n
-        raise ValueError('inconnu ' + n)
+        raise ValueError('unknown ' + n)
     e = c_vers_py(expr)
     e = re.sub(r'\b[A-Za-z_]\w*\b|\b0[xX][0-9a-fA-F]+\b|\b\d+\b', sub, e)
     if re.search(r'[^\s\d()+\-*/%<>&|^~xXa-fA-F,.]|\b(?!(if|else|and|or|not)\b)[g-wyzG-WYZ_]\w*', e):
@@ -142,7 +142,7 @@ def evaluer(expr, env, prof=0):
     if isinstance(v, bool):
         v = int(v)
     if not isinstance(v, int):
-        raise ValueError('pas entier')
+        raise ValueError('not an integer')
     return v
 
 
@@ -335,21 +335,21 @@ class Interface:
                 if h == (off, taille):
                     nb[t] += 1
                     if r.bavard:
-                        r('PASS', 'extraction', '%s.%s' % (t, nom), 'offset %d taille %d (ELF = offsetof)' % (off, taille))
+                        r('PASS', 'extraction', '%s.%s' % (t, nom), 'offset %d size %d (ELF = offsetof)' % (off, taille))
                 else:
-                    r('FAIL', 'extraction', '%s.%s' % (t, nom), 'ELF offset %d taille %d, offsetof hote %s' % (off, taille, h))
-            r('PASS', 'extraction', t, '%d champs : offsets DWARF de l\'ELF = offsetof(dsp_api.h, DSP=%s)' % (nb[t], self.l1.get('DSP')),
+                    r('FAIL', 'extraction', '%s.%s' % (t, nom), 'ELF offset %d size %d, host offsetof %s' % (off, taille, h))
+            r('PASS', 'extraction', t, '%d fields: DWARF offsets of the ELF = offsetof(dsp_api.h, DSP=%s)' % (nb[t], self.l1.get('DSP')),
               rel(self.elf))
             te, th = self.taille_elf.get(t), self.taille_hote.get(t)
             if te != th:
                 dernier = self.disp[t][-1]
-                r('ECART', 'extraction', 'sizeof(%s)' % t,
-                  'ELF %s octets, hote %s : bourrage de fin (dernier champ %s finit a %d) ; offsets inchanges' %
+                r('DEVIATION', 'extraction', 'sizeof(%s)' % t,
+                  'ELF %s bytes, host %s: tail padding (last field %s ends at %d); offsets unchanged' %
                   (te, th, dernier[0], dernier[1] + dernier[2]), rel(self.elf))
         # 2. bases: header == dsp_api initialiser of the ELF
         for z, t, b in self.ZONES:
             if b not in self.l1:
-                r('FAIL', 'extraction', b, 'absent de dsp_api.h')
+                r('FAIL', 'extraction', b, 'missing from dsp_api.h')
         for cle, base in (('ndb', 'BASE_API_NDB'), ('db_r', 'BASE_API_R_PAGE_0'), ('db_w', 'BASE_API_W_PAGE_0'), ('param', 'BASE_API_PARAM')):
             v = self.dsp_api_init.get(cle)
             st = 'PASS' if v == self.l1.get(base) else 'FAIL'
@@ -382,26 +382,26 @@ class Interface:
             utile = self.disp['T_PARAM_MCU_DSP'][-1]
             fin_utile = p0 + utile[1] + utile[2]
             ok = tc['trou'] and fin_utile <= tc['octet'] + tc['taille']
-            r('PASS' if ok else 'FAIL', 'extraction', 'PARAM dans le NDB',
-              'PARAM (0x%03x..0x%03x utiles) recouvre NDB.%s (0x%03x..0x%03x)%s' %
+            r('PASS' if ok else 'FAIL', 'extraction', 'PARAM inside the NDB',
+              'PARAM (0x%03x..0x%03x used) overlaps NDB.%s (0x%03x..0x%03x)%s' %
               (p0, fin_utile - 1, tc['nom'], tc['octet'], tc['octet'] + tc['taille'] - 1,
-               '' if ok else ' : le recouvrement deborde sur un champ utile'))
+               '' if ok else ': the overlap spills onto a used field'))
         fin = max(v[1] for v in zones.values())
-        r('PASS' if fin <= API_MOTS * 2 else 'FAIL', 'extraction', 'fenetre DSP',
-          'structures 0x000..0x%03x octets = mots DSP 0x0800..0x%04x (fenetre 0x0800..0x%04x)' %
+        r('PASS' if fin <= API_MOTS * 2 else 'FAIL', 'extraction', 'DSP window',
+          'structures 0x000..0x%03x bytes = DSP words 0x0800..0x%04x (window 0x0800..0x%04x)' %
           (fin - 1, API_DSP + (fin - 1) // 2, API_DSP + API_MOTS - 1))
         # 5. loader (calypso/dsp.c)
         base_ram = self.dspc.get('BASE_API_RAM')
         r('PASS' if base_ram == API_ARM else 'FAIL', 'extraction', 'BASE_API_RAM', '0x%08x' % (base_ram or 0), self.dspc_src.get('BASE_API_RAM', ''))
         api_size = self.dspc.get('API_SIZE')
-        r('PASS' if api_size == API_MOTS else 'FAIL', 'extraction', 'API_SIZE', '0x%x mots' % (api_size or 0), self.dspc_src.get('API_SIZE', ''))
+        r('PASS' if api_size == API_MOTS else 'FAIL', 'extraction', 'API_SIZE', '0x%x words' % (api_size or 0), self.dspc_src.get('API_SIZE', ''))
         self.bl = {}
         for n in ('BL_CMD_STATUS', 'BL_ADDR_LO', 'BL_ADDR_HI', 'BL_SIZE'):
             if n in self.dspc:
                 a = self.dspc[n]
                 self.bl[n] = API_DSP + (a - API_ARM) // 2
                 dessous = [c['nom'] for c, i in self.par_mot.get(self.bl[n], [])]
-                r('INFO', 'extraction', n, 'ARM 0x%08x = mot DSP 0x%04x (recouvre NDB %s)' % (a, self.bl[n], ','.join(dessous) or '-'),
+                r('INFO', 'extraction', n, 'ARM 0x%08x = DSP word 0x%04x (overlaps NDB %s)' % (a, self.bl[n], ','.join(dessous) or '-'),
                   self.dspc_src[n])
         # 6. hard-coded address of the layer1 itself (dsp.c SC_CHKSUM_VER)
         m = re.search(r'#define\s+SC_CHKSUM_VER\s+\(BASE_API_W_PAGE_0\s*\+\s*\(2\s*\*\s*\((0x[0-9A-Fa-f]+)\s*-\s*0x800\)\)\)',
@@ -410,7 +410,7 @@ class Interface:
             w = int(m.group(1), 16)
             noms = [c['nom'] for c, i in self.par_mot.get(w, []) if c['zone'] == 'NDB']
             r('PASS' if noms == ['d_version_number2'] else 'FAIL', 'extraction', 'SC_CHKSUM_VER (dsp.c)',
-              'mot DSP 0x%04x = NDB.%s (« dsp patch version »)' % (w, ','.join(noms)), rel(self.dsp_c))
+              'DSP word 0x%04x = NDB.%s ("dsp patch version")' % (w, ','.join(noms)), rel(self.dsp_c))
         return self
 
     # -- lookup

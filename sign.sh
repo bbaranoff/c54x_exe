@@ -22,7 +22,7 @@ GPG=(gpg --batch --yes --pinentry-mode loopback --passphrase "$SIGN_PASSPHRASE")
 verify=0
 [ "${1:-}" = "--verify" ] && { verify=1; shift; }
 F="${1:-$HERE/proof_toa_23.md}"
-[ -r "$F" ] || { echo "fichier illisible : $F" >&2; exit 2; }
+[ -r "$F" ] || { echo "unreadable file: $F" >&2; exit 2; }
 D="$(cd "$(dirname "$F")" && pwd)"; B="$(basename "$F")"
 
 if [ "$verify" = 1 ]; then
@@ -38,15 +38,15 @@ cat "$F.sha256"
 
 # 2. key (generated once)
 if ! gpg --batch --list-secret-keys "=$SIGN_UID" >/dev/null 2>&1; then
-    echo "aucune cle secrete pour « $SIGN_UID » : generation d'une cle ed25519 (signature, sans expiration)"
+    echo "no secret key for '$SIGN_UID': generating an ed25519 key (signing, no expiration)"
     "${GPG[@]}" --quick-gen-key "$SIGN_UID" ed25519 sign 0
 fi
 FPR="$(gpg --batch --with-colons --list-secret-keys "=$SIGN_UID" | awk -F: '$1=="fpr"{print $10; exit}')"
-echo "cle : $FPR  ($SIGN_UID)"
+echo "key: $FPR  ($SIGN_UID)"
 
 # 3. detached signature + public key
 "${GPG[@]}" --armor --detach-sign --local-user "$FPR" --output "$F.asc" "$F"
 gpg --batch --armor --export "$FPR" > "$F.pubkey.asc"
-echo "signature : $F.asc"
-echo "cle publique : $F.pubkey.asc"
-echo "verification : $0 --verify $F"
+echo "signature: $F.asc"
+echo "public key: $F.pubkey.asc"
+echo "verify: $0 --verify $F"

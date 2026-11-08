@@ -197,10 +197,10 @@ int main(int argc, char **argv)
                 if (!apres[i].mem && !strcmp(apres[i].reg, "XPC")) { att &= 3; got &= 3; }
                 if (got != att) {
                     echec = true;
-                    if (apres[i].mem) d += snprintf(detail + d, sizeof detail - d, "  %s[%04x]: attendu %04llx, obtenu %04llx",
+                    if (apres[i].mem) d += snprintf(detail + d, sizeof detail - d, "  %s[%04x]: expected %04llx, got %04llx",
                                                     apres[i].mem == 1 ? "data" : "prog", apres[i].addr,
                                                     (unsigned long long)apres[i].val, (unsigned long long)got);
-                    else d += snprintf(detail + d, sizeof detail - d, "  %s: attendu %llx, obtenu %llx",
+                    else d += snprintf(detail + d, sizeof detail - d, "  %s: expected %llx, got %llx",
                                        apres[i].reg, (unsigned long long)apres[i].val, (unsigned long long)got);
                 }
             }
@@ -218,6 +218,6 @@ int main(int argc, char **argv)
             ignores++;
         }
     }
-    printf("\n%d exemples : %d ok, %d FAIL, %d non assembles (S)\n", total, ok, ko, ignores);
+    printf("\n%d examples: %d ok, %d FAIL, %d not assembled (S)\n", total, ok, ko, ignores);
     return ko ? 1 : 0;
 }

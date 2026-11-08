@@ -79,12 +79,12 @@ static void pause_ecrire(const C54xState *dsp, const char *etat)
 static void pause_cooperative(C54xState *dsp)
 {
     pause_ecrire(dsp, "pause");
-    printf("pont : PAUSE (SIGUSR1) fn=%u pc=%04x xpc=%x idle=%d : etat dans %s, SIGUSR2 pour reprendre\n",
+    printf("pont : PAUSE (SIGUSR1) fn=%u pc=%04x xpc=%x idle=%d: state in %s, SIGUSR2 to resume\n",
            g_c54x_exe_fn, dsp->pc & 0xffff, dsp->xpc, dsp->idle, PONT_PAUSE_FICHIER);
     fflush(stdout);
     while (g_pause && !g_stop) usleep(10000);
     pause_ecrire(dsp, "reprise");
-    printf("pont : REPRISE fn=%u pc=%04x\n", g_c54x_exe_fn, dsp->pc & 0xffff);
+    printf("pont : RESUME fn=%u pc=%04x\n", g_c54x_exe_fn, dsp->pc & 0xffff);
     fflush(stdout);
 }
 
@@ -104,7 +104,7 @@ C54xState *pont_allouer_dsp(void)
     C54xState *s = (C54xState *)((char *)brut + decal);
     uint16_t *fenetre = &s->data[C54X_API_BASE];
     if (((uintptr_t)fenetre & 4095) != 0) {
-        fprintf(stderr, "pont : fenetre API non alignee (%p)\n", (void *)fenetre);
+        fprintf(stderr, "pont : API window not aligned (%p)\n", (void *)fenetre);
         return NULL;
     }
 
@@ -238,7 +238,7 @@ static void trace_zones(C54xState *dsp, bool init)
         for (unsigned k = 0; k < z[r].n; k++) {
             unsigned a = z[r].a + k; uint16_t v = dsp->data[a];
             if (!init && v != g_zone_prev[a] && g_trace_f)
-                fprintf(g_trace_f, "      Z data[%04x] %04x -> %04x   (par pc=%04x)\n", a, g_zone_prev[a], v, g_trace_pc_prev);
+                fprintf(g_trace_f, "      Z data[%04x] %04x -> %04x   (by pc=%04x)\n", a, g_zone_prev[a], v, g_trace_pc_prev);
             g_zone_prev[a] = v;
         }
 }
@@ -248,7 +248,7 @@ static void trace_cellules(C54xState *dsp, bool init)
     for (unsigned i = 0; i < N_CELLULES; i++) {
         uint16_t v = dsp->data[g_cellules[i]];
         if (!init && v != g_cell_prev[i] && g_trace_f)
-            fprintf(g_trace_f, "      W data[%04x] %04x -> %04x   (par pc=%04x)\n",
+            fprintf(g_trace_f, "      W data[%04x] %04x -> %04x   (by pc=%04x)\n",
                     g_cellules[i], g_cell_prev[i], v, g_trace_pc_prev);
         g_cell_prev[i] = v;
     }
@@ -266,7 +266,7 @@ static inline void trace_pas(C54xState *dsp)
             (unsigned long long)(dsp->a & 0xffffffffffULL), (unsigned long long)(dsp->b & 0xffffffffffULL),
             dsp->ar[1], dsp->ar[2], dsp->ar[3], dsp->ar[4], dsp->st0 & 0x1ff, !!(dsp->st1 & 0x800),
             dsp->imr, dsp->ifr, dsp->sp, dsp->t, dsp->brc, dsp->rsa, dsp->rea, dsp->st0, dsp->st1, dsp->insn_count);
-    if (--g_trace_reste == 0) { fclose(g_trace_f); g_trace_f = NULL; printf("pont : trace FB terminee (/tmp/c54x-pont/trace-fb.txt)\n"); }
+    if (--g_trace_reste == 0) { fclose(g_trace_f); g_trace_f = NULL; printf("pont : FB trace done (/tmp/c54x-pont/trace-fb.txt)\n"); }
 }
 
 /* PONT_PC_COUNT=pc1,pc2,... : exact hit counters, published with the profile.
@@ -301,7 +301,7 @@ static void dump_publier(C54xState *dsp)
 static void pcc_publier(void)
 {
     if (g_pcc_k <= 0) return;
-    printf("  passages exacts :");
+    printf("  exact passes:");
     for (int i = 0; i < g_pcc_k; i++) { printf(" %04x:%lu", g_pcc[i], g_pcc_n[i]); g_pcc_n[i] = 0; }
     printf("\n");
 }
@@ -355,7 +355,7 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
     printf("  [tx-sonde] fn=%u task_u: page0=0x%04x page1=0x%04x task_ra: page0=0x%04x page1=0x%04x pc=0x%04x\n", fn,
            api_ram[(API_W_PAGE(0) + WP_D_TASK_U) / 2], api_ram[(API_W_PAGE(1) + WP_D_TASK_U) / 2],
            api_ram[(API_W_PAGE(0) + 0x06u) / 2], api_ram[(API_W_PAGE(1) + 0x06u) / 2], dsp->pc);
-    printf("  [tx-sonde]   %u mots de donnees modifies pendant la trame\n", changes);
+    printf("  [tx-sonde]   %u data words modified during the frame\n", changes);
     /* The modified ranges of at least 8 words, AND THEIR CONTENT in
      * /tmp/tx-sonde/fn<fn>_<adresse>.txt (one hex word per line): enough to
      * search offline for the expected encoded block, in all its forms (one
@@ -369,7 +369,7 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
             char nom[96]; snprintf(nom, sizeof nom, "/tmp/tx-sonde/fn%u_%04x.txt", fn, a);
             FILE *f = fopen(nom, "w");
             if (f) { for (unsigned k = a; k < b; k++) fprintf(f, "%04x\n", dsp->data[k]); fclose(f); }
-            printf("  [tx-sonde]   modifie data[0x%04x..0x%04x] (%u mots) -> %s\n", a, b - 1, n, nom);
+            printf("  [tx-sonde]   modified data[0x%04x..0x%04x] (%u words) -> %s\n", a, b - 1, n, nom);
             nplages++;
         }
         a = b + 1;
@@ -380,13 +380,13 @@ static void tx_sonde_apres(const C54xState *dsp, const uint16_t *api_ram, uint32
         unsigned b = a, ch = 0, uns = 0;
         while (b < C54X_DATA_SIZE && dsp->data[b] <= 1) { if (dsp->data[b] != g_tx_snap[b]) ch++; if (dsp->data[b]) uns++; b++; }
         if (b - a >= 100 && ch >= 40 && uns > 0) {
-            printf("  [tx-sonde]   SUITE 0/1 data[0x%04x..0x%04x] long=%u modifies=%u uns=%u :", a, b - 1, b - a, ch, uns);
+            printf("  [tx-sonde]   0/1 RUN data[0x%04x..0x%04x] len=%u modified=%u ones=%u :", a, b - 1, b - a, ch, uns);
             for (unsigned k = 0; k < 24 && a + k < b; k++) printf(" %u", dsp->data[a + k]);
             printf("\n"); runs++;
         }
         a = b + 1;
     }
-    if (!runs) printf("  [tx-sonde]   aucune suite de bits 0/1 (mot a mot)\n");
+    if (!runs) printf("  [tx-sonde]   no 0/1 bit run (word by word)\n");
     fflush(stdout);
 }
 
@@ -409,7 +409,7 @@ static void tx_inject_charger(void)
     g_inj_n = 0;
     if (!f || !*f) return;
     FILE *fp = fopen(f, "r");
-    if (!fp) { printf("  [tx-inject] %s illisible\n", f); return; }
+    if (!fp) { printf("  [tx-inject] %s unreadable\n", f); return; }
     char ligne[256];
     while (g_inj_n < TX_INJ_MAX && fgets(ligne, sizeof ligne, fp)) {
         unsigned v[23]; int k = sscanf(ligne, "%x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x",
@@ -419,7 +419,7 @@ static void tx_inject_charger(void)
         g_inj_n++;
     }
     fclose(fp);
-    printf("  [tx-inject] %d blocs de test charges depuis %s\n", g_inj_n, f);
+    printf("  [tx-inject] %d test blocks loaded from %s\n", g_inj_n, f);
 }
 /* avant = B_BLUD of a_cu BEFORE montant_scruter(): a block has just been posted. */
 static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
@@ -427,7 +427,7 @@ static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
     if (g_inj_n < 0) tx_inject_charger();
     if (g_inj_n == 0 || !avant) return;
     if (g_inj_i >= g_inj_n) {
-        if (g_inj_i == g_inj_n) { printf("  [tx-inject] fn=%u fin : %d blocs injectes\n", fn, g_inj_n); g_inj_i++; }
+        if (g_inj_i == g_inj_n) { printf("  [tx-inject] fn=%u end: %d blocks injected\n", fn, g_inj_n); g_inj_i++; }
         return;
     }
     uint16_t *w = &api_ram[(API_NDB + NDB_A_CU) / 2];
@@ -442,10 +442,10 @@ static void tx_inject_apres(uint16_t *api_ram, uint32_t fn, int avant)
           g_trace_reste = (e && *e) ? atol(e) : 250000;
           g_trace_f = fopen("/tmp/c54x-pont/trace-tx.txt", "w");
           if (g_trace_f) { g_zone_active = true; g_trace_ouverte = true; trace_cellules(dsp_global_tx, true);
-              fprintf(g_trace_f, "# trace du bloc injecte %d a fn=%u\n", g_inj_i, fn);
-              printf("  [tx-inject] trace ouverte (bloc %d, %ld instructions) -> /tmp/c54x-pont/trace-tx.txt\n", g_inj_i, g_trace_reste); }
+              fprintf(g_trace_f, "# trace of injected block %d at fn=%u\n", g_inj_i, fn);
+              printf("  [tx-inject] trace opened (block %d, %ld instructions) -> /tmp/c54x-pont/trace-tx.txt\n", g_inj_i, g_trace_reste); }
       } }
-    printf("  [tx-inject] fn=%u bloc=%d ->", fn, g_inj_i);
+    printf("  [tx-inject] fn=%u block=%d ->", fn, g_inj_i);
     for (int i = 0; i < 23; i++) printf(" %02x", b[i]);
     printf("\n");
     g_inj_i++;
@@ -465,7 +465,7 @@ static void tx_inject_fulldump(const C54xState *dsp, int bloc, uint32_t fn, int 
     mkdir("/tmp/tx-full",0777);
     char nom[96]; snprintf(nom,sizeof nom,"/tmp/tx-full/full_%d_%d.txt",bloc,d);
     FILE*f=fopen(nom,"w");
-    if(f){fprintf(f,"# fn=%u bloc=%d\n",fn,bloc);
+    if(f){fprintf(f,"# fn=%u block=%d\n",fn,bloc);
         for(unsigned a=0x2800;a<0x5c00;a++) fprintf(f,"%04x %04x\n",a,dsp->data[a]);
         fclose(f);}
 }
@@ -489,7 +489,7 @@ static void tx_inject_sortie(const C54xState *dsp, uint32_t fn)
     else        snprintf(nom, sizeof nom, "/tmp/tx-sonde/injf_%d_%d.txt", bloc, d);
     FILE *f = fopen(nom, "w");
     if (f) {
-        fprintf(f, "# fn=%u bloc=%d d=%d\n", fn, bloc, d);
+        fprintf(f, "# fn=%u block=%d d=%d\n", fn, bloc, d);
         for (unsigned r = 0; r < sizeof plages / sizeof plages[0]; r++)
             for (unsigned k = 0; k < plages[r].n; k++)
                 fprintf(f, "%04x %04x\n", plages[r].a + k, dsp->data[plages[r].a + k]);
@@ -533,10 +533,10 @@ static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
     static int lac = -2, sb = -2;
     if (lac == -2) { const char *e = calypso_getenv("CALYPSO_SHADOW_LAC");
                      lac = (e && *e) ? atoi(e) : -1;
-                     if (lac >= 0) printf("  [ombre-dl] LAC SI3 force a %d (0x%04x)\n", lac, lac & 0xffff); }
+                     if (lac >= 0) printf("  [ombre-dl] LAC SI3 forced to %d (0x%04x)\n", lac, lac & 0xffff); }
     if (sb == -2)  { const char *e = calypso_getenv("CALYPSO_SHADOW_SB");
                      sb = (e && *e == '1') ? 1 : 0;
-                     if (sb) printf("  [ombre-dl] SB a_sch force a 40C3 2026 (CCC 2026 ; DESTRUCTIF : perte de synchro)\n"); }
+                     if (sb) printf("  [ombre-dl] SB a_sch forced to 40C3 2026 (CCC 2026; DESTRUCTIVE: sync loss)\n"); }
     if (!api_ram) return;
     if (lac >= 0) {
         /* LAI in SI3: L2 bytes 8-9 = LAC (big-endian). dsp_memcpy be=0 puts both into a_cd[7]:
@@ -563,7 +563,7 @@ static void ombre_descendante(uint16_t *api_ram, uint32_t fn)
 }
 static void tx_ombre_pose(const uint16_t *api_ram, int blud_avant)
 {
-    if (g_omb < 0) { const char *e = calypso_getenv("PONT_TX_OMBRE"); g_omb = (e && *e == '1'); if (g_omb) printf("  [ombre] actif\n"); }
+    if (g_omb < 0) { const char *e = calypso_getenv("PONT_TX_OMBRE"); g_omb = (e && *e == '1'); if (g_omb) printf("  [ombre] active\n"); }
     if (!g_omb || !blud_avant) return;
     const uint16_t *w = &api_ram[(API_NDB + NDB_A_CU) / 2];
     for (int i = 0; i < 23; i += 2) {
@@ -628,7 +628,7 @@ static void tx_ombre_compare(const C54xState *dsp, uint32_t fn)
         unsigned bit = (dsp->data[0x4280 + p / 16] >> (15 - p % 16)) & 1u, att = e[i] & 1u;
         n++; ng[p / 128]++;
         if (bit == att) { ok++; okg[p / 128]++; }
-        else if (f) fprintf(f, "  p=%d (g%d q=%d) i=%d rom=%u hote=%u\n", p, p / 128, p % 128, i, bit, att);
+        else if (f) fprintf(f, "  p=%d (g%d q=%d) i=%d rom=%u host=%u\n", p, p / 128, p % 128, i, bit, att);
     }
     if (f) fclose(f);
     FILE *g = fopen("/tmp/tx-sonde/reel.txt", "a");
@@ -640,7 +640,7 @@ static void tx_ombre_compare(const C54xState *dsp, uint32_t fn)
     }
     g_omb_blocs++; g_omb_parfaits += (ok == n);
     for (int g = 0; g < 4; g++) { g_omb_ok[g] += okg[g]; g_omb_n[g] += ng[g]; }
-    printf("  [ombre] fn=%u L2=%02x %02x %02x.. %u/%u bits connus identiques (g0 %u/%u g1 %u/%u g2 %u/%u g3 %u/%u) | blocs=%lu parfaits=%lu\n", fn,
+    printf("  [ombre] fn=%u L2=%02x %02x %02x.. %u/%u known bits identical (g0 %u/%u g1 %u/%u g2 %u/%u g3 %u/%u) | blocks=%lu perfect=%lu\n", fn,
            g_omb_l2[0], g_omb_l2[1], g_omb_l2[2], ok, n, okg[0], ng[0], okg[1], ng[1], okg[2], ng[2], okg[3], ng[3], g_omb_blocs, g_omb_parfaits);
     fflush(stdout);
 }
@@ -786,7 +786,7 @@ static int rach_corr(uint32_t tick)
         unsigned d = calypso_bsp_dedie_entrees();
         if (vu && d == dedie_prec && (uint32_t)(tick - t_prec) < 1000) {
             idx = (idx + 1) % 5;
-            if (rot) printf("  [rach-corr] RACH sans canal depuis le tick %u : correction %+d\n", t_prec, seq[idx]);
+            if (rot) printf("  [rach-corr] RACH with no channel since tick %u: correction %+d\n", t_prec, seq[idx]);
         }
         dedie_prec = d; t_prec = tick; vu = true;
     }
@@ -821,7 +821,7 @@ static bool rach_dfn_caler(uint32_t tick, uint32_t estime, uint32_t *fn)
     *fn = (estime + GSM_HYPERFRAME + (uint32_t)d) % GSM_HYPERFRAME;
     static unsigned n;
     if (++n <= 40 || n % 100 == 0)
-        printf("  [rach-dfn] tick=%u d_fn%%104=%u estime=%u -> fn %u (%+d)\n", tick, g_rach_dfn.fn104, estime, *fn, d);
+        printf("  [rach-dfn] tick=%u d_fn%%104=%u estimated=%u -> fn %u (%+d)\n", tick, g_rach_dfn.fn104, estime, *fn, d);
     return true;
 }
 static uint32_t tx_tsp_fn(uint32_t tick, int *source)
@@ -885,10 +885,10 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     if (actif < 0) {
         const char *e = calypso_getenv("MONTANT_ROM_TX"); actif = !(e && *e == '0');
         e = calypso_getenv("MONTANT_ROM_TX_CHAQUE"); chaque = (e && *e == '1') ? 1 : 0;
-        if (chaque) printf("  [rom-tx] MONTANT_ROM_TX_CHAQUE=1 : un burst publie a CHAQUE trame avec tache TX (mode TRX)\n");
-        if (trx_page_mode()) { actif = 0; printf("  [rom-tx] mode TRX : les bursts sont publies depuis la page de l'extcode (tx_page_publier), pas du script TSP\n"); }
-        else printf("  [rom-tx] burst montant final de la ROM (script TSP 0x3cbb) -> %s : %s\n", ROM_TX_SHM,
-               actif ? "actif" : "coupe (MONTANT_ROM_TX=0)");
+        if (chaque) printf("  [rom-tx] MONTANT_ROM_TX_CHAQUE=1: one burst published on EVERY frame with a TX task (TRX mode)\n");
+        if (trx_page_mode()) { actif = 0; printf("  [rom-tx] TRX mode: bursts are published from the extcode page (tx_page_publier), not from the TSP script\n"); }
+        else printf("  [rom-tx] final uplink burst from the ROM (TSP script 0x3cbb) -> %s: %s\n", ROM_TX_SHM,
+               actif ? "active" : "off (MONTANT_ROM_TX=0)");
     }
     if (!actif) return;
     struct tsp_tx_burst b; bool nouveau = false;
@@ -947,18 +947,18 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
                 int32_t ecart = (int32_t)(fn_best - fn);
                 if (ecart == ecart_prec) {
                     if (calypso_bsp_trx_calage(fn_best, fn) && (++n_cal <= 5 || n_cal % 500 == 0))
-                        printf("  [rom-tx] calage TRX : SB fn=%u emis au tick %u (fn - tick = %d) -> BSP montant cale (%u)\n", fn_best, fn, ecart, n_cal);
+                        printf("  [rom-tx] TRX alignment: SB fn=%u sent at tick %u (fn - tick = %d) -> uplink BSP aligned (%u)\n", fn_best, fn, ecart, n_cal);
                 }
                 ecart_prec = ecart;
             } else n_sans_page++;
             if (n_sb <= 3 || n_sb % 1000 == 0)
-                printf("  [rom-tx] SB recode (prothese SCH) : %u SB, %u recodes, %u sans page sch, %.1f bits faux/SB en moyenne\n",
+                printf("  [rom-tx] SB re-encoded (SCH prosthesis): %u SB, %u re-encoded, %u without sch page, %.1f wrong bits/SB on average\n",
                        n_sb, n_recodes, n_sans_page, n_sb ? (double)n_bits_faux / n_sb : 0.0);
         }
     }
     if (b.type != TSP_TX_NB) g_rom_emis_tick = fn;
     if (g_rach_pend.actif && b.type != TSP_TX_NB && (uint32_t)(fn - g_rach_pend.tick) <= 2)
-        rach_pend_publier(fn, "emission ROM");
+        rach_pend_publier(fn, "ROM transmission");
     int src = 0;
     uint32_t fn_gsm = tx_tsp_fn(fn, &src);
     uint8_t octet_src = (uint8_t)src;
@@ -980,12 +980,12 @@ static void tx_tsp_publier(const C54xState *dsp, uint32_t fn)
     if (b.type == TSP_TX_RACH) n_rach++; else if (b.type == TSP_TX_NB) n_nb++; else if (b.type == TSP_TX_SB) n_sb++; else if (b.type == TSP_TX_DUMMY) n_dummy++; else if (b.type == TSP_TX_FB) n_fb++; else n_inconnu++;
     static int nlog;
     if (nlog++ < 6 || (b.type == TSP_TX_RACH && n_rach <= 3))
-        printf("  [rom-tx] #%u tick=%u fn=%u (%s) %s%s offset=%d @%04x : %s...\n", w_compte, fn, fn_gsm,
-               src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : src == 3 ? "calage BSP" : "TICK NU",
+        printf("  [rom-tx] #%u tick=%u fn=%u (%s) %s%s offset=%d @%04x: %s...\n", w_compte, fn, fn_gsm,
+               src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : src == 3 ? "BSP alignment" : "BARE TICK",
                b.type == TSP_TX_RACH ? "RACH" : b.type == TSP_TX_NB ? "NB" : b.type == TSP_TX_SB ? "SB" : b.type == TSP_TX_DUMMY ? "DUMMY" : b.type == TSP_TX_FB ? "FB" : "?", b.type == TSP_TX_NB ? (char[]){' ', 'T', 'S', 'C', (char)('0' + b.tsc), 0} : "",
                b.offset, b.adresse, (char[]){ '0' + b.bits[0], '0' + b.bits[1], '0' + b.bits[2], '0' + b.bits[3], '0' + b.bits[4], '0' + b.bits[5], '0' + b.bits[6], '0' + b.bits[7], 0 });
     if ((n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu) % 2000 == 0)
-        printf("  [rom-tx] %u bursts publies : RACH %u, NB %u, SB %u, DUMMY %u, FB %u, inconnus %u\n", n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu, n_rach, n_nb, n_sb, n_dummy, n_fb, n_inconnu);
+        printf("  [rom-tx] %u bursts published: RACH %u, NB %u, SB %u, DUMMY %u, FB %u, unknown %u\n", n_rach + n_nb + n_sb + n_dummy + n_fb + n_inconnu, n_rach, n_nb, n_sb, n_dummy, n_fb, n_inconnu);
 }
 
 /* RACH TO THE AIR (CALYPSO_RACH_VERS_AIR=1, Magnetite). The capture at the ROM's TSP script
@@ -1047,7 +1047,7 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
             }
             if (g_c54x_exe_fn - b_tick >= 255) {
                 b_tick = g_c54x_exe_fn;
-                printf("  [apm-bilan] fn=%u sur 255 trames : PM <- burst %lu, <- bruit %lu, file vide %lu\n",
+                printf("  [apm-bilan] fn=%u over 255 frames: PM <- burst %lu, <- noise %lu, queue empty %lu\n",
                        g_c54x_exe_fn, b_burst, b_bruit, b_vide);
                 b_burst = b_bruit = b_vide = 0; (void)b_t0;
             }
@@ -1057,7 +1057,7 @@ static void apm_jamais_nul_corps(uint16_t *api_ram)
             (n_fort++ < 20 || n_fort % 50 == 0)) {
             char t[256]; calypso_bsp_pm_mav_texte(t, sizeof t);
             uint16_t *r = &api_ram[API_R_PAGE(pg) / 2];
-            printf("  [apm-fort] page=%d d_task_md=%04x d_task_d=%04x a_pm %04x->%04x %04x->%04x %04x->%04x depiles %d %d %d | mav %s\n",
+            printf("  [apm-fort] page=%d d_task_md=%04x d_task_d=%04x a_pm %04x->%04x %04x->%04x %04x->%04x popped %d %d %d | mav %s\n",
                    pg, r[4], r[0], avant[0], a[0], avant[1], a[1], avant[2], a[2], depile[0], depile[1], depile[2], t);
         }
     }
@@ -1134,13 +1134,13 @@ static void rach_pend_publier(uint32_t tick_emis, const char *quoi)
     if (!ring_publier(TSP_TX_RACH, g_rach_pend.bits, -1, 8, (uint8_t)src, f)) return;
     static unsigned n;
     if (++n <= 40 || n % 100 == 0)
-        printf("  [rach-air] RACH pose tick=%u, emis tick=%u (%s) -> fn BTS %u publie vers l'air [%u]\n",
+        printf("  [rach-air] RACH set tick=%u, sent tick=%u (%s) -> BTS fn %u published to the air [%u]\n",
                g_rach_pend.tick, tick_emis, quoi, f, n);
 }
 static void rach_pend_echeance(uint32_t tick)
 {
     if (g_rach_pend.actif && (uint32_t)(tick - g_rach_pend.tick) >= 3)
-        rach_pend_publier(g_rach_pend.tick + 1, "sans emission vue, pose+1");
+        rach_pend_publier(g_rach_pend.tick + 1, "no transmission seen, set+1");
 }
 void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
 {
@@ -1157,9 +1157,9 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
     for (int i = 0; i < 41; i++) bits[8 + i] = (uint8_t)(sync[i] - '0');
     memcpy(bits + 49, code, 36);
     if (rach_emission_on()) {
-        if (g_rach_pend.actif) rach_pend_publier(g_rach_pend.tick + 1, "remplace");
+        if (g_rach_pend.actif) rach_pend_publier(g_rach_pend.tick + 1, "replaced");
         g_rach_pend.actif = true; g_rach_pend.tick = tick; memcpy(g_rach_pend.bits, bits, 148);
-        if (g_rom_emis_tick == tick) rach_pend_publier(tick, "emission ROM, meme tick");   /* already transmitted */
+        if (g_rom_emis_tick == tick) rach_pend_publier(tick, "ROM transmission, same tick");   /* already transmitted */
         return;
     }
     int src = 0;
@@ -1168,8 +1168,8 @@ void tx_rach_vers_air(uint8_t ra, uint8_t bsic, uint32_t tick)
     if (!ring_publier(TSP_TX_RACH, bits, -1, 8, (uint8_t)src, fn_gsm)) return;
     static unsigned n;
     if (++n <= 20 || n % 100 == 0)
-        printf("  [rach-air] RACH ra=0x%02x bsic=%u tick=%u -> fn BTS %u (%s) publie vers l'air [%u]\n",
-               ra, bsic, tick, fn_gsm, src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : src == 3 ? "calage BSP" : src == 4 ? "fn du mobile (SB)" : "TICK NU", n);
+        printf("  [rach-air] RACH ra=0x%02x bsic=%u tick=%u -> BTS fn %u (%s) published to the air [%u]\n",
+               ra, bsic, tick, fn_gsm, src == 1 ? "a_a5fn" : src == 2 ? "tick+dec" : src == 3 ? "BSP alignment" : src == 4 ? "mobile fn (SB)" : "BARE TICK", n);
 }
 
 /* TRX MODE: PUBLICATION FROM THE EXTCODE PAGE. The trx firmware fills tx[p] (cmd, data pointer) for
@@ -1193,7 +1193,7 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
         if (nslots < 1) nslots = 1;
         if (nslots > 8) nslots = 8;
         e = calypso_getenv("CALYPSO_TRX_TX_START"); tx_start = (e && *e) ? atoi(e) & 7 : 0;
-        printf("  [rom-tx] publication depuis la page de l'extcode : %d slot(s) TX a partir du TS%d\n", nslots, tx_start);
+        printf("  [rom-tx] publishing from the extcode page: %d TX slot(s) starting at TS%d\n", nslots, tx_start);
     }
     const uint16_t *db = &dsp->data[w_page ? 0x2200 : 0x2000];
     uint32_t fn_tag = tick - 1;                       /* the DSP frame where these bursts left */
@@ -1221,7 +1221,7 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
             /* the alignment keeps the relation measured at the TSP script (fn of the SB = transmit tick - 1):
              * the phase A tick (T + 1) is passed, not fn_tag, so that CALYPSO_BSP_TRX_DELTA keeps its meaning */
             if (ecart == ecart_prec && calypso_bsp_trx_calage(fnsb, tick) && (++n_cal <= 3 || n_cal % 500 == 0))
-                printf("  [rom-tx] calage TRX (page) : SB fn=%u emis au tick %u (fn - tick = %d) -> BSP montant cale (%u)\n", fnsb, fn_tag, ecart, n_cal);
+                printf("  [rom-tx] TRX alignment (page): SB fn=%u sent at tick %u (fn - tick = %d) -> uplink BSP aligned (%u)\n", fnsb, fn_tag, ecart, n_cal);
             ecart_prec = ecart;
             break; }
         case 3: for (int k = 0; k < 148; k++) bits[k] = (uint8_t)(DUMMY_148[k] - '0'); type = TSP_TX_DUMMY; break;
@@ -1242,7 +1242,7 @@ static void tx_page_publier(const C54xState *dsp, uint32_t tick, int w_page)
         ring_publier(type, bits, tscp, offset, src, fn_tag);
         n_pub++;
         if (n_pub <= 4 || n_pub % 20000 == 0)
-            printf("  [rom-tx] page : #%u tick=%u slot %d (TS%d) cmd=%u -> %s\n", n_pub, fn_tag, p, (tx_start + p) & 7, cmd,
+            printf("  [rom-tx] page: #%u tick=%u slot %d (TS%d) cmd=%u -> %s\n", n_pub, fn_tag, p, (tx_start + p) & 7, cmd,
                    type == TSP_TX_FB ? "FB" : type == TSP_TX_SB ? "SB" : type == TSP_TX_DUMMY ? "DUMMY" : "NB");
     }
 }
@@ -1257,7 +1257,7 @@ static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
     if (actif < 0) {
         const char *e = calypso_getenv("MONTANT_ROM_UL"); actif = !(e && *e == '0');
         prev = dsp->data[ROM_UL_PTR];
-        printf("  [rom-ul] bursts xCCH montants de la ROM (0x3f8a) -> %s : %s\n", ROM_UL_SHM, actif ? "actif" : "coupe (MONTANT_ROM_UL=0)");
+        printf("  [rom-ul] uplink xCCH bursts from the ROM (0x3f8a) -> %s: %s\n", ROM_UL_SHM, actif ? "active" : "off (MONTANT_ROM_UL=0)");
     }
     if (!actif) return;
     uint16_t p = dsp->data[ROM_UL_PTR];
@@ -1292,7 +1292,7 @@ static void tx_rom_publier(const C54xState *dsp, uint32_t fn)
     off_t off = 8 + (off_t)((w_compte - 1) % ROM_UL_SLOTS) * ROM_UL_SLOT_SZ;
     if (pwrite(fd, slot, sizeof slot, off) < 0 || pwrite(fd, &w_compte, 4, 0) < 0) return;
     static int nlog;
-    if (nlog++ < 4) printf("  [rom-ul] bloc %u publie (fn burst0=%u, L2=%02x %02x %02x..)\n", w_compte, fn0, l2[0], l2[1], l2[2]);
+    if (nlog++ < 4) printf("  [rom-ul] block %u published (fn burst0=%u, L2=%02x %02x %02x..)\n", w_compte, fn0, l2[0], l2[1], l2[2]);
 }
 
 static int c54x_run_profile(C54xState *dsp, int budget)
@@ -1307,9 +1307,9 @@ static int c54x_run_profile(C54xState *dsp, int budget)
             (dsp->pc & 0xffff) >= g_trace_pc_lo && (dsp->pc & 0xffff) <= g_trace_pc_hi && g_trace_f) {
             g_trace_ouverte = true;
             trace_cellules(dsp, true);
-            fprintf(g_trace_f, "# PC=%04x dans [%04x,%04x] a fn=%u ; IMR=%04x IFR=%04x\n",
+            fprintf(g_trace_f, "# PC=%04x in [%04x,%04x] at fn=%u; IMR=%04x IFR=%04x\n",
                     dsp->pc & 0xffff, g_trace_pc_lo, g_trace_pc_hi, g_c54x_exe_fn, dsp->imr, dsp->ifr);
-            printf("pont : trace ouverte sur PC=%04x fn=%u\n", dsp->pc & 0xffff, g_c54x_exe_fn);
+            printf("pont : trace opened on PC=%04x fn=%u\n", dsp->pc & 0xffff, g_c54x_exe_fn);
         }
         if (g_trace_reste > 0 && g_trace_ouverte) n = 1;
         if (g_pcc_k > 0) {
@@ -1336,7 +1336,7 @@ static void profil_publier(void)
     unsigned long tot = 0; unsigned n = 0;
     for (unsigned i = 0; i < 0x10000 / PROFIL_SEAU; i++) tot += g_profil[i];
     if (!tot) return;
-    printf("  profil PC (%lu tranches, high-water 0x%04x) :", tot, g_profil_hw);
+    printf("  PC profile (%lu slices, high-water 0x%04x):", tot, g_profil_hw);
     /* the 12 hottest buckets, in decreasing order */
     for (int k = 0; k < 12; k++) {
         unsigned best = 0; unsigned long bv = 0;
@@ -1487,8 +1487,8 @@ static void chrono_trame(double t_tick, double t_done_a, double t_go, double t_d
     g_chrono.t_fin = t_fin;
     if (++g_chrono.n == 1000) {
         double k = 1.0 / g_chrono.n;
-        printf("  [chrono] fn=%u sur 1000 trames (ms) : qemu %.2f | A %.2f | go %.2f | B %.2f | apres DONE %.2f "
-               "| trame %.2f (temps reel 4.62) | pire trame %.2f, DSP pire %.2f, trames >5.54 ms %u/1000, DSP >4.62 ms %u/1000\n",
+        printf("  [chrono] fn=%u over 1000 frames (ms): qemu %.2f | A %.2f | go %.2f | B %.2f | after DONE %.2f "
+               "| frame %.2f (real time 4.62) | worst frame %.2f, worst DSP %.2f, frames >5.54 ms %u/1000, DSP >4.62 ms %u/1000\n",
                fn, g_chrono.qemu * k, g_chrono.a * k, g_chrono.go * k,
                g_chrono.b * k, g_chrono.apres * k,
                (g_chrono.qemu + g_chrono.a + g_chrono.go + g_chrono.b + g_chrono.apres) * k,
@@ -1547,7 +1547,7 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
             c54x_interrupt_ex(dsp, C54X_IT_TPU_FRAME_VEC, C54X_IT_TPU_FRAME_BIT);
         }
         if (calypso_getenv("PONT_IRQ_DEBUG") && g_c54x_exe_fn > 5000 && g_c54x_exe_fn < 5012)
-            printf("  [irq] fn=%u APRES vec28 : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x\n",
+            printf("  [irq] fn=%u AFTER vec28: idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x\n",
                    g_c54x_exe_fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr);
         if (g_inj.actif || phase == 1) {
             int fait = 0;
@@ -1580,11 +1580,11 @@ static uint32_t jouer_trame(C54xState *dsp, long budget, bool *init_done, uint32
                  * bit missing from the IMR (ROM) when the DSP sits at "0 insn, idle=1" on a TCH.
                  * 200 lines to cover several calls. */
                 if (n_tch++ < 200)
-                    printf("  [depot_tch] fn=%u phase A : %d insn, idle=%d, fenetre armee=%d irq_trame=%d "
+                    printf("  [depot_tch] fn=%u phase A: %d insn, idle=%d, window armed=%d irq_trame=%d "
                            "IMR=%04x IFR=%04x INTM=%d pc=%04x%s\n",
                            g_c54x_exe_fn, fait, dsp->idle, calypso_rhea_dma_rx_armed(), g_tick_irq_trame,
                            dsp->imr, dsp->ifr, !!(dsp->st1 & 0x800), dsp->pc & 0xffff,
-                           dsp->idle ? "" : "  <- BUDGET/2 ATTEINT, depot avant la fin");
+                           dsp->idle ? "" : "  <- BUDGET/2 REACHED, deposit before the end");
             }
             fait_a = fait;
             if (phase == 1) {
@@ -1799,14 +1799,14 @@ static void reelle_caler(void)
 
     if (!trouve) {
         g_reel_base = 0;
-        printf("pont : ATTENTION — phase de multitrame indeterminee (%u FCCH reperees, "
-               "aucun ecart de 11) ; calage a 0, la lecture reste cadencee par fn\n", nf);
+        printf("pont : WARNING — multiframe phase undetermined (%u FCCH found, "
+               "no gap of 11); aligned to 0, reading stays clocked by fn\n", nf);
         return;
     }
     g_reel_base = (40u + 51u - (i40 % 51u)) % 51u;   /* i40 == 40 - base  (mod 51) */
     unsigned ecart_tag = (g_reel[0].fn + 51u - g_reel_base) % 51u;
-    printf("pont : %u FCCH reperees dans la capture (ecarts 10/11), phase calee sur le signal : "
-           "base=%u ; les tags fn du fichier sont decales de +%u mod 51\n",
+    printf("pont : %u FCCH found in the capture (gaps 10/11), phase aligned on the signal: "
+           "base=%u; the file fn tags are shifted by +%u mod 51\n",
            nf, g_reel_base, ecart_tag);
 }
 
@@ -1853,7 +1853,7 @@ static void reelle_injecter(C54xState *dsp, uint32_t fn, unsigned long *injectes
 static int reelle_charger(const char *chemin)
 {
     FILE *f = fopen(chemin, "rb");
-    if (!f) { fprintf(stderr, "pont : cellule reelle introuvable : %s\n", chemin); return 0; }
+    if (!f) { fprintf(stderr, "pont : real cell not found: %s\n", chemin); return 0; }
     uint32_t hdr[4];
     if (fread(hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return 0; }
     unsigned n = hdr[0], nsym = hdr[1], bsic = hdr[2];
@@ -1878,8 +1878,8 @@ static int reelle_charger(const char *chemin)
     for (unsigned i = 0; i < g_reel_n; i++)
         g_reel[i].fcch = reelle_est_fcch(&g_reel[i]);
 
-    printf("pont : cellule REELLE %s — %u trames consecutives a %d ech/symbole, BSIC=%u, "
-           "fn %u..%u, %u trames jouees (%u multitrames de 51, %u ecartees), adressage par fn\n",
+    printf("pont : REAL cell %s — %u consecutive frames at %d samples/symbol, BSIC=%u, "
+           "fn %u..%u, %u frames played (%u 51-multiframes, %u dropped), addressed by fn\n",
            chemin, n, nsym / 148, bsic, n ? g_reel[0].fn : 0, n ? g_reel[n - 1].fn : 0,
            g_reel_util, g_reel_util / 51u, n - g_reel_util);
     reelle_caler();
@@ -1910,10 +1910,10 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
                     if (p) { dec = atof(p + 1); p = strchr(p + 1, ':'); if (p) marge = atoi(p + 1); } }
                 if (marge > 50) marge = 50;
                 if (strstr(iq_mode, "all")) cellule_sch_partout = 1;
-                printf("pont : cellule BSIC=%d (NCC=%d BCC=%d), echantillonnage a %.2f symbole, "
-                       "SCH dans une fenetre de %d echantillons (DARAM len=%u mots)%s\n",
+                printf("pont : cell BSIC=%d (NCC=%d BCC=%d), sampling at %.2f symbol, "
+                       "SCH in a window of %d samples (DARAM len=%u words)%s\n",
                        bsic, bsic >> 3, bsic & 7, dec, 148 + 2 * marge, calypso_bsp_get_daram_len(),
-                       cellule_sch_partout ? ", SCH sur toutes les trames non-FCCH" : ""); }
+                       cellule_sch_partout ? ", SCH on all non-FCCH frames" : ""); }
             /* the SCH burst is delivered as the 190-sample window block only when
              * the DSP has its one-shot SB window armed; otherwise it is a frame of
              * the FB stream like any other (same rule as rejouer.c) */
@@ -1942,19 +1942,19 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
             t_dbg = t; g_inj.dernier_type = t; g_inj.dernier_n_iq = n_iq;
             static unsigned nS, nF, nB, nC, tot;
             if (t == 'S') nS++; else if (t == 'F') nF++; else if (t == 'B') nB++; else if (t == 'C') nC++;
-            if (++tot % 5000 == 1) printf("pont : bursts injectes FCCH=%u SCH=%u BCCH=%u CCCH=%u (fn=%u)\n", nF, nS, nB, nC, fn);
+            if (++tot % 5000 == 1) printf("pont : bursts injected FCCH=%u SCH=%u BCCH=%u CCCH=%u (fn=%u)\n", nF, nS, nB, nC, fn);
         } else {
             iq_synthese(iq_mode, amp, fn, iq);
         }
         static int irqdbg = -1; static unsigned irqdbg_n;
         if (irqdbg < 0) irqdbg = calypso_getenv("PONT_IRQ_DEBUG") ? 1 : 0;
         bool dbg = irqdbg && fn > 5000 && irqdbg_n < 12;
-        if (dbg) printf("  [irq] fn=%u AVANT rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x PMST=%04x SP=%04x\n",
+        if (dbg) printf("  [irq] fn=%u BEFORE rx_burst: idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x PMST=%04x SP=%04x\n",
                         fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr, dsp->pmst, dsp->sp);
         { static int dj = -1; if (dj < 0) dj = calypso_getenv("PONT_DEBUG_INJ") ? 1 : 0;
           int md0 = dsp->api_ram ? (dsp->api_ram[4] & 0xff) : 0, md1 = dsp->api_ram ? (dsp->api_ram[0x18] & 0xff) : 0;
           if (dj && (calypso_rhea_dma_one_shot() || md0 == 6 || md1 == 6 || (fn >= 300 && fn <= 312)))
-              printf("  [inj] fn=%u p51=%u AVANT : type=%c n_iq=%d dma armee=%d one_shot=%d task_md=%d/%d rif=%d mots idle=%d pc=%04x"
+              printf("  [inj] fn=%u p51=%u BEFORE: type=%c n_iq=%d dma armed=%d one_shot=%d task_md=%d/%d rif=%d words idle=%d pc=%04x"
                      " | W0=%04x %04x %04x %04x %04x ..%04x %04x  W1=%04x %04x %04x %04x %04x ..%04x %04x  NDB page=%04x fb_mode=%04x fb_det=%04x\n",
                      fn, fn % 51u, t_dbg, n_iq, calypso_rhea_dma_rx_armed(), calypso_rhea_dma_one_shot(), md0, md1, calypso_rif_level(), dsp->idle, dsp->pc & 0xffff,
                      dsp->api_ram[0], dsp->api_ram[1], dsp->api_ram[2], dsp->api_ram[3], dsp->api_ram[4], dsp->api_ram[15], dsp->api_ram[16],
@@ -1964,8 +1964,8 @@ static void injecter_burst(C54xState *dsp, const char *iq_mode, int amp, uint32_
         calypso_bsp_rx_burst(0, fn, iq, n_iq);
         { static int dj2 = -1; if (dj2 < 0) dj2 = calypso_getenv("PONT_DEBUG_INJ") ? 1 : 0;
           if (dj2 && fn >= 300 && fn <= 312)
-              printf("  [inj] fn=%u APRES : rif=%d mots idle=%d IFR=%04x\n", fn, calypso_rif_level(), dsp->idle, dsp->ifr); }
-        if (dbg) { printf("  [irq] fn=%u APRES rx_burst : idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x SP=%04x\n",
+              printf("  [inj] fn=%u AFTER: rif=%d words idle=%d IFR=%04x\n", fn, calypso_rif_level(), dsp->idle, dsp->ifr); }
+        if (dbg) { printf("  [irq] fn=%u AFTER rx_burst: idle=%d pc=%04x INTM=%d IMR=%04x IFR=%04x SP=%04x\n",
                           fn, dsp->idle, dsp->pc & 0xffff, !!(dsp->st1 & 0x800), dsp->imr, dsp->ifr, dsp->sp); irqdbg_n++; }
         (*injectes)++;
 }
@@ -2018,7 +2018,7 @@ static const char *cadencement_actif(void)
     const char *s2 = calypso_getenv("CALYPSO_PONT_LOCKSTEP");
     if (s1 && *s1 == '1') strcat(buf, "STREAM ");
     if (s2 && *s2 == '1') strcat(buf, "LOCKSTEP ");
-    return buf[0] ? buf : "aucun (le DSP ne suivra pas le temps reel)";
+    return buf[0] ? buf : "none (the DSP will not follow real time)";
 }
 
 static const char *hacks_actifs(void)
@@ -2052,7 +2052,7 @@ static const char *hacks_actifs(void)
         char e[64]; snprintf(e, sizeof e, "CALYPSO_FIX_%s", fx[i]); const char *v = calypso_getenv(e);
         if (v && *v == '0') { size_t l = strlen(buf); snprintf(buf + l, sizeof buf - l, "%sFIX_%s=0", l ? "," : "", fx[i]); }
     }
-    return buf[0] ? buf : "aucun";
+    return buf[0] ? buf : "none";
 }
 
 /* PONT_NB_DEBUG=1: pages as seen at one instant of the frame (A = end of the
@@ -2135,11 +2135,11 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
         { const char *d = calypso_getenv("PONT_NB_HIST"); static unsigned nz;
           if (d && nz < 12) { char nom[256]; snprintf(nom, sizeof nom, "%s/zones_%u.txt", d, fn); FILE *f = fopen(nom, "w");
               if (f) { for (unsigned q = 0x60; q < C54X_DATA_SIZE; q++) if (dsp->data[q] != g_data_avant_b[q]) fprintf(f, "%04x %04x %04x\n", q, g_data_avant_b[q], dsp->data[q]); fclose(f); nz++; } } }
-        printf("  [zones] fn=%u flags(OVA=%d OVB=%d C=%d TC=%d OVM=%d FRCT=%d SXM=%d) ecrites:%s\n", fn,
+        printf("  [zones] fn=%u flags(OVA=%d OVB=%d C=%d TC=%d OVM=%d FRCT=%d SXM=%d) written:%s\n", fn,
                g_flags_entree & 1, !!(g_flags_entree & 2), !!(g_flags_entree & 4), !!(g_flags_entree & 8), !!(g_flags_entree & 16), !!(g_flags_entree & 32), !!(g_flags_entree & 64), z); }
       if (g_snap_ok) { int es = 0; for (int i = 0; i < 148; i++) if ((((int16_t)g_snap_2be2[i]) > 0) != (bits[i] != 0)) es++;
-                       printf("  [scan] fn=%u 2be2 au pas 12800 (avant le decodeur) : erreurs=%d\n", fn, es); g_snap_ok = 0; }
-      printf("  [scan] fn=%u marge=%d tsc=%d dec=%.2f phase=%.1f rif=%d 2be2 erreurs=%d (vs N-1: %d, N-2: %d) insnA=%u insnB=%u %s  v[0..3]=%d %d %d %d\n", fn, cellule_marge_nb, cellule_tsc_force, cellule_dec_nb, cellule_phase_nb, calypso_rif_level(), err, e1, e2, g_insn_a, g_insn_b, map,
+                       printf("  [scan] fn=%u 2be2 at step 12800 (before the decoder): errors=%d\n", fn, es); g_snap_ok = 0; }
+      printf("  [scan] fn=%u margin=%d tsc=%d dec=%.2f phase=%.1f rif=%d 2be2 errors=%d (vs N-1: %d, N-2: %d) insnA=%u insnB=%u %s  v[0..3]=%d %d %d %d\n", fn, cellule_marge_nb, cellule_tsc_force, cellule_dec_nb, cellule_phase_nb, calypso_rif_level(), err, e1, e2, g_insn_a, g_insn_b, map,
              (int16_t)dsp->data[0x2be2], (int16_t)dsp->data[0x2be3], (int16_t)dsp->data[0x2be4], (int16_t)dsp->data[0x2be5]); }
     /* after burst 3: the decoder's vectors. Search the whole data memory for
      * the 456 coded bits in deinterleaved order and for the 184 information
@@ -2147,7 +2147,7 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
     { uint8_t code[456], info[184];
       if (((fn % 51u) % 10u - 2) % 4 == 3 && cellule_bloc_attendu(fn, bsic, code, info) == 0) {
           const struct { const uint8_t *t; int len; const char *nom; } tp[2] = { { code, 456, "456 codes" }, { info, 184, "184 info" } };
-          printf("  [bloc] fn=%u :", fn);
+          printf("  [bloc] fn=%u:", fn);
           for (int k = 0; k < 2; k++) {
               int best[3] = {0,0,0}; unsigned bad[3] = {0,0,0};
               for (unsigned a = 0x60; a + tp[k].len < C54X_DATA_SIZE; a++) {
@@ -2174,7 +2174,7 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
             printf("  packed %d/456 @%04x", bestp, badp);
             int pb[4] = {0,0,0,0};
             for (int i = 0; i < 456; i++) { int bit = (dsp->data[badp + i / 16] >> (15 - i % 16)) & 1; if (bit == code[i]) pb[i & 3]++; }
-            printf(" par burst %d %d %d %d /114", pb[0], pb[1], pb[2], pb[3]); }
+            printf(" per burst %d %d %d %d /114", pb[0], pb[1], pb[2], pb[3]); }
           printf("\n");
           /* the decoder input at 0x2a00 (the trellis loop reads pairs from AR1 = 0x2a00) */
           if (g_snap_2a00_ok) { const char *d = calypso_getenv("PONT_NB_HIST"); if (d) { char nom[256]; snprintf(nom, sizeof nom, "%s/entree_%u.txt", d, fn); FILE *f = fopen(nom, "w"); if (f) { for (int i = 0; i < 456; i++) fprintf(f, "%d\n", (int16_t)g_snap_2a00[i]); fclose(f); } } }
@@ -2183,12 +2183,12 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
                 if ((v > 0) == (code[i] != 0)) mp++;
                 if ((v < 0) == (code[i] != 0)) mn++;
                 if ((v == 1) == (code[i] != 0)) m1++; }
-            printf("  [entree] fn=%u 0x2a00..+456 : nonzero=%d  pos=1 %d/456  neg=1 %d/456  one=1 %d/456 | premiers:", fn, nz, mp, mn, m1);
+            printf("  [entree] fn=%u 0x2a00..+456: nonzero=%d  pos=1 %d/456  neg=1 %d/456  one=1 %d/456 | first:", fn, nz, mp, mn, m1);
             for (int i = 0; i < 48; i++) printf(" %d", (int16_t)g_snap_2a00[i]);
-            printf("\n  [entree] attendu :"); for (int i = 0; i < 48; i++) printf(" %d", code[i]); printf("\n");
+            printf("\n  [entree] expected:"); for (int i = 0; i < 48; i++) printf(" %d", code[i]); printf("\n");
             /* per-burst view: bits k with k%4==b */
             for (int b = 0; b < 4; b++) { int m = 0, n = 0; for (int i = b; i < 456; i += 4) { int16_t v = (int16_t)g_snap_2a00[i]; if (v) { n++; if ((v < 0) == (code[i] != 0)) m++; } }
-                printf("  [entree] burst %d : neg=1 %d/%d\n", b, m, n); } }
+                printf("  [entree] burst %d: neg=1 %d/%d\n", b, m, n); } }
           /* the 228 decoder output bits: best match over memory, hard words and LSB */
           { uint8_t u[228];
             if (cellule_u228_attendu(fn, bsic, u) == 0) {
@@ -2203,7 +2203,7 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
                 /* mismatch map at 0x2d66 (hard) */
                 unsigned a = 0x2d66; int e = 0; char map[240]; int k = 0;
                 for (int i = 0; i < 228; i++) { uint16_t v = dsp->data[a + i]; int ok = (v == u[i]); if (!ok) e++; if (i == 184 || i == 224) map[k++] = '|'; map[k++] = ok ? '.' : (v > 1 ? '?' : 'x'); }
-                map[k] = 0; printf("2d66: %d faux %s\n", e, map);
+                map[k] = 0; printf("2d66: %d wrong %s\n", e, map);
                 /* packed forms of the 228 bits anywhere in memory: 16 per word MSB
                  * first, LSB first, and the same with each word bit-reversed */
                 { const char *nm[4] = { "msb", "lsb", "msb-rev", "lsb-rev" }; printf("  [u228] fn=%u packed:", fn);
@@ -2238,8 +2238,8 @@ static void sonde_bits(uint32_t fn, C54xState *dsp, uint8_t bsic)
         }
         runs[k] = 0;
         int d_dma = 0; for (int q = 0; q < g_dernier_n_iq && q < 384; q++) if ((int16_t)g_daram_apres_dma[q] != g_dernier_iq[q]) d_dma++;
-        printf("  [daram] fn=%u differences apres la trame (mot+longueur(valeur)):%s | juste apres le DMA, avant la ROM : %d mots differents (aad=%04x)\n", fn, runs, d_dma, g_daram_aad); }
-      printf("  [daram] fn=%u aad=%04x livres=%d mots, identiques=%d a l'offset %d, premier mot non nul a +%d, mots 0..7: %d %d %d %d %d %d %d %d\n",
+        printf("  [daram] fn=%u differences after the frame (word+length(value)):%s | right after the DMA, before the ROM: %d words differ (aad=%04x)\n", fn, runs, d_dma, g_daram_aad); }
+      printf("  [daram] fn=%u aad=%04x delivered=%d words, identical=%d at offset %d, first non-zero word at +%d, words 0..7: %d %d %d %d %d %d %d %d\n",
              fn, aad, g_dernier_n_iq, best, boff, p0,
              (int16_t)dsp->data[aad], (int16_t)dsp->data[aad+1], (int16_t)dsp->data[aad+2], (int16_t)dsp->data[aad+3],
              (int16_t)dsp->data[aad+4], (int16_t)dsp->data[aad+5], (int16_t)dsp->data[aad+6], (int16_t)dsp->data[aad+7]); }
@@ -2272,11 +2272,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
     CalypsoPontMsg m;
     if (recv(fd, &m, sizeof(m), 0) != (ssize_t)sizeof(m) || m.type != PONT_HELLO ||
         m.a != CALYPSO_API_WORDS || m.b != CALYPSO_PONT_MAGIC) {
-        fprintf(stderr, "pont : poignee de main invalide (type=%u a=%u)\n", m.type, m.a);
+        fprintf(stderr, "pont : invalid handshake (type=%u a=%u)\n", m.type, m.a);
         return;
     }
     envoyer(fd, PONT_HELLO_OK, CALYPSO_API_WORDS, CALYPSO_PONT_MAGIC);
-    printf("pont : ARM connecte, API RAM %u mots, %ld insn/trame\n", CALYPSO_API_WORDS, insns);
+    printf("pont : ARM connected, API RAM %u words, %ld insn/frame\n", CALYPSO_API_WORDS, insns);
     fflush(stdout);
 
     /* PONT_RESET arriving while waiting for the PONT_GO (two-phase frame): the TI firmware
@@ -2291,7 +2291,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             memset(&m, 0, sizeof m);
             m.type = PONT_RESET;
             m.a = reset_differe_dl;
-            printf("pont : reset garde pendant l'attente du GO, applique maintenant\n");
+            printf("pont : reset held while waiting for GO, applied now\n");
         } else {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
             if (poll(&pfd, 1, 200) <= 0) {
@@ -2299,7 +2299,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             }
             ssize_t n = recv(fd, &m, sizeof(m), 0);
             if (n != (ssize_t)sizeof(m)) {
-                printf("pont : ARM deconnecte (%zd)\n", n);
+                printf("pont : ARM disconnected (%zd)\n", n);
                 break;
             }
         }
@@ -2328,7 +2328,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 for (int i = 0; i < 0x2000; i++) dsp->data[0x0800 + i] = api_avant[i];
                 dsp->st1 = 0x2900; dsp->st0 = 0x1800; dsp->sp = 0x5AC8;
                 dsp->pc = 0xb410;
-                printf("pont : bootCode TI dans l'API (0xff80 = b 0xfe00) : API gardee, DSP dans le chargeur ROM 0xb410\n");
+                printf("pont : TI bootCode in the API (0xff80 = b 0xfe00): API kept, DSP in the ROM loader 0xb410\n");
             }
             dsp->running = true;
             init_done = false;
@@ -2369,7 +2369,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 int16_t d0 = (int16_t)api_ram[0x00u + 15u], d1 = (int16_t)api_ram[0x14u + 15u];
                 static int16_t p0 = 0x7fff, p1 = 0x7fff;
                 if ((d0 != p0 || d1 != p1) && na++ < 40)
-                    printf("  [afc] fn=%u w_page=%u relaye=%d | page0=%d page1=%d\n",
+                    printf("  [afc] fn=%u w_page=%u relayed=%d | page0=%d page1=%d\n",
                            m.a, wp, dac, d0, d1);
                 p0 = d0; p1 = d1; }
               if (first || dac != prev) { calypso_twl3025_set_afc_dac(dac); prev = dac; first = 0; } }
@@ -2383,9 +2383,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     api_ram[(API_W_PAGE(1) + WP_D_TASK_MD) / 2] == md_cible) {
                     g_trace_ouverte = true;
                     trace_cellules(dsp, true);
-                    fprintf(g_trace_f, "# d_task_md=%d vu a fn=%u page=%u ; IMR=%04x IFR=%04x pc=%04x\n",
+                    fprintf(g_trace_f, "# d_task_md=%d seen at fn=%u page=%u; IMR=%04x IFR=%04x pc=%04x\n",
                             md_cible, m.a, m.b, dsp->imr, dsp->ifr, dsp->pc & 0xffff);
-                    printf("pont : trace FB ouverte a fn=%u\n", m.a);
+                    printf("pont : FB trace opened at fn=%u\n", m.a);
                 }
             }
             /* PONT_RX_APRES (default 1): deliver the burst AFTER the frame
@@ -2436,13 +2436,13 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                 bool go = false;
                 while (!g_stop && !go) {
                     struct pollfd pg = { .fd = fd, .events = POLLIN };
-                    if (poll(&pg, 1, 2000) <= 0) { static unsigned nt; if (nt++ < 3) printf("pont : PONT_GO attendu (fn=%u)\n", m.a); continue; }
+                    if (poll(&pg, 1, 2000) <= 0) { static unsigned nt; if (nt++ < 3) printf("pont : PONT_GO expected (fn=%u)\n", m.a); continue; }
                     CalypsoPontMsg g;
                     ssize_t ng = recv(fd, &g, sizeof(g), 0);
-                    if (ng != (ssize_t)sizeof(g)) { printf("pont : ARM deconnecte en attente de GO (%zd)\n", ng); g_stop = 1; break; }
+                    if (ng != (ssize_t)sizeof(g)) { printf("pont : ARM disconnected while waiting for GO (%zd)\n", ng); g_stop = 1; break; }
                     if (g.type == PONT_GO) { go = true; t_go = chrono_ms(); }
                     else if (g.type == PONT_RESET) { reset_differe = 1; reset_differe_dl = g.a; }   /* see reset_differe */
-                    else { static unsigned nx; if (nx++ < 3) printf("pont : message %u recu en attente de GO, ignore\n", g.type); }
+                    else { static unsigned nx; if (nx++ < 3) printf("pont : message %u received while waiting for GO, ignored\n", g.type); }
                 }
                 if (!go) break;
                 sonde_pages("G", m.a, dsp, api_ram);
@@ -2451,7 +2451,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     (api_ram[API_R_PAGE(0) / 2] == 24 || api_ram[API_R_PAGE(1) / 2] == 24)) {
                     static unsigned nq;
                     if (nq++ < 8) {
-                        printf("  [garde] fn=%u avant le burst 3, bursts precedents en memoire :", m.a);
+                        printf("  [garde] fn=%u before burst 3, previous bursts in memory:", m.a);
                         for (int b = 1; b <= 3; b++) {
                             uint8_t bits[148]; if (cellule_bits_attendus(m.a - b, 42, bits) < 0) continue;
                             uint8_t t116[116]; memcpy(t116, bits + 3, 58); memcpy(t116 + 58, bits + 87, 58);
@@ -2509,9 +2509,9 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                     if (nv++ < 4000) {
                         uint16_t vpg = calypso_bsp_verif_last_page();
                         printf("  [verif] fn=%u p51=%u age=%d page=0x%04x w_page=%d : "
-                               "%d/%d en 0x%04x %s\n",
+                               "%d/%d at 0x%04x %s\n",
                                vfn, vfn % 51u, vage, vpg, (int)(vpg & 1u),
-                               ident, vn, vad, ident == vn ? "VALIDE" : "partiel");
+                               ident, vn, vad, ident == vn ? "VALID" : "partial");
                     }
                 }
             }
@@ -2571,7 +2571,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                         uint16_t cur[4] = { r[RP_D_TASK_D/2], r[RP_D_BURST_D/2], r[RP_A_SERV_DEMOD/2 + D_TOA], r[RP_A_SERV_DEMOD/2 + D_PM] };
                         if (r[RP_D_TASK_D/2] && memcmp(cur, prev[pg], sizeof cur)) {
                             const uint16_t *w0 = &api_ram[API_W_PAGE(0) / 2], *w1 = &api_ram[API_W_PAGE(1) / 2];
-                            printf("  [nb] fn=%u p51=%u R%d task_d=%u burst_d=%u TOA=%d PM=%d ANGLE=%d SNR=%u | W0 task_d=%u burst=%u W1 task_d=%u burst=%u | livre=%c n_iq=%d one_shot=%d len=%u mots",
+                            printf("  [nb] fn=%u p51=%u R%d task_d=%u burst_d=%u TOA=%d PM=%d ANGLE=%d SNR=%u | W0 task_d=%u burst=%u W1 task_d=%u burst=%u | delivered=%c n_iq=%d one_shot=%d len=%u words",
                                    m.a, m.a % 51u, pg, r[RP_D_TASK_D/2], r[RP_D_BURST_D/2],
                                    (int16_t)r[RP_A_SERV_DEMOD/2 + D_TOA], (int16_t)r[RP_A_SERV_DEMOD/2 + D_PM],
                                    (int16_t)r[RP_A_SERV_DEMOD/2 + D_ANGLE], r[RP_A_SERV_DEMOD/2 + D_SNR],
@@ -2607,7 +2607,7 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
                  * task (d_task_d != 0). The TOA of the SB (a_sch, 23) stays native: sync depends on it. */
                 static int can_nb = -2;
                 if (can_nb == -2) { const char *e = calypso_getenv("PONT_CAN_NB_TOA"); can_nb = (e && *e) ? atoi(e) : -1;
-                                    if (can_nb >= 0) printf("  [pont] PONT_CAN_NB_TOA=%d : TOA des NB fixe\n", can_nb); }
+                                    if (can_nb >= 0) printf("  [pont] PONT_CAN_NB_TOA=%d: NB TOA fixed\n", can_nb); }
                 /* init_done: during the boot these API RAM words carry the DSP code the ARM
                  * downloads; writing there would break the download. */
                 if (can_nb >= 0 && init_done) {
@@ -2683,15 +2683,15 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             if (!done_envoye) { apm_jamais_nul(api_ram); ombre_descendante(api_ram, m.a); envoyer(fd, PONT_DONE, drapeaux, ninsn); }
             { double t_fin = chrono_ms(); chrono_trame(t_tick, t_done_a, t_go, t_done > 0 ? t_done : t_fin, t_fin, m.a); }
             if (!init_avant && init_done) {
-                printf("pont : DSP boote (premier IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
+                printf("pont : DSP booted (first IDLE) fn=%u insn=%u\n", m.a, dsp->insn_count);
             }
             /* frame at which the ARM posts the FB/SB task (W0 word 4, W1 word 0x18) */
             { static int prev5 = -1, prev6 = -1, ncmd = 0;
               int md0 = api_ram[4] & 0xff, md1 = api_ram[0x18] & 0xff;
               int has5 = (md0 == 5 || md1 == 5), has6 = (md0 == 6 || md1 == 6);
-              if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache FB postee par l'ARM\n", m.a); ncmd++; }
-              { static int ncmd6; if (has6 && prev6 != 1 && ncmd6 < 60) { printf("  [cmd] fn=%u tache SB postee par l'ARM (W0 md=%d W1 md=%d)\n", m.a, md0, md1); ncmd6++; } }
-              if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u tache SB postee par l'ARM\n", m.a); ncmd++; }
+              if (has5 && prev5 != 1 && ncmd < 24) { printf("  [cmd] fn=%u FB task posted by the ARM\n", m.a); ncmd++; }
+              { static int ncmd6; if (has6 && prev6 != 1 && ncmd6 < 60) { printf("  [cmd] fn=%u SB task posted by the ARM (W0 md=%d W1 md=%d)\n", m.a, md0, md1); ncmd6++; } }
+              if (has6 && prev6 != 1 && ncmd < 24) { printf("  [cmd] fn=%u SB task posted by the ARM\n", m.a); ncmd++; }
               if (has6 && prev6 != 1) calypso_bsp_sb_trace(8);   /* and around every SB task */
               prev5 = has5; prev6 = has6; }
             { static int fb_prev = 0; if (*d_fb_det && !fb_prev) { printf("  [jalon] fn=%u d_fb_det=1  hacks=%s\n", m.a, hacks_actifs());
@@ -2721,12 +2721,12 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               if (sb_now && !sb_prev) {
                   static unsigned nsb;
                   if (nsb++ < 4000)
-                      printf("  [sb] fn=%u p51=%u | FB a fn=%u toa=%d pm=%u ang=%d "
+                      printf("  [sb] fn=%u p51=%u | FB at fn=%u toa=%d pm=%u ang=%d "
                              "| TOA-ROM=%d src=%s "
                              "| a_sch=%04x %s\n",
                              m.a, m.a % 51u, lat_fn, lat_toa, lat_pm, lat_ang,
                              g_toa_valeur,
-                             g_toa_grille < 0 ? "?" : (g_toa_grille ? "GRILLE(0x0cce)" : "fine"),
+                             g_toa_grille < 0 ? "?" : (g_toa_grille ? "GRID(0x0cce)" : "fine"),
                              a_sch0[0],
                              ((a_sch0[0] & 0x8100) == 0x8000) ? "CRC_OK" : "crc_ko");
               }
@@ -2753,8 +2753,8 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
               uint16_t dp = api_ram[(API_NDB + NDB_D_DSP_PAGE) / 2];
               if (!dfirst && dp != dpp && ndp < 40) {
                   printf("  [page] fn=%u d_dsp_page %04x -> %04x  (%s)\n", m.a, dpp, dp,
-                         (dp & 0x0002) ? ((dp & 1) ? "arme page 1" : "arme page 0")
-                                       : "NON ARME (etat de reset)");
+                         (dp & 0x0002) ? ((dp & 1) ? "armed page 1" : "armed page 0")
+                                       : "NOT ARMED (reset state)");
                   ndp++;
               }
               dpp = dp; dfirst = 0; }
@@ -2811,14 +2811,14 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             }
             if (verbeux || (trames % 217) == 0) {
                 printf("  fn=%-7u page=%u insn=%-7u %s%s%s  d_fb_det=%-5u a_sch=%04x %04x %04x %04x"
-                       " sync=%04x %04x %04x  | trames=%lu irq=%lu iq=%lu\n",
+                       " sync=%04x %04x %04x  | frames=%lu irq=%lu iq=%lu\n",
                        m.a, m.b, ninsn,
-                       (drapeaux & PONT_DONE_IDLE) ? "IDLE " : "occupe ",
+                       (drapeaux & PONT_DONE_IDLE) ? "IDLE " : "busy ",
                        (drapeaux & PONT_DONE_API_IRQ) ? "IRQ-API " : "",
                        (drapeaux & PONT_DONE_INIT) ? "" : "boot ",
                        *d_fb_det, a_sch0[0], a_sch0[1], a_sch0[2], a_sch0[3],
                        a_sync[0], a_sync[1], a_sync[2], trames, irqs, injectes);
-                if ((trames % (217*8)) == 0) printf("  hacks actifs : %s ; cadencement : %s ; stimulus : %s\n",
+                if ((trames % (217*8)) == 0) printf("  active hacks: %s; clocking: %s; stimulus: %s\n",
                                                      hacks_actifs(), cadencement_actif(), iq_mode ? iq_mode : "none");
             }
             fflush(stdout);
@@ -2831,10 +2831,10 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
              * all eight, it only plays one per tick, and without this it is
              * always TS0 - hence nothing of the mobile's SDCCH. */
             if (m.b == 4)
-                printf("pont : canal dedie arme : TS%u PDCH (GPRS)\n", m.a);
+                printf("pont : dedicated channel armed: TS%u PDCH (GPRS)\n", m.a);
             else
-                printf("pont : canal dedie %s : TS%u SDCCH/%s SS=%u\n",
-                       m.b == 0xFF ? "libere" : "arme", m.a, m.b ? "8" : "4", m.c);
+                printf("pont : dedicated channel %s: TS%u SDCCH/%s SS=%u\n",
+                       m.b == 0xFF ? "released" : "armed", m.a, m.b ? "8" : "4", m.c);
             calypso_bsp_set_dedie((int)m.a, (int)m.b, (int)m.c);
             if (m.b == 0xFF || (int)m.a <= 0) {
                 montant_canal_libere();
@@ -2844,11 +2844,11 @@ static void servir(int fd, C54xState *dsp, uint16_t *api_ram, long insns, bool v
             printf("pont : BYE\n");
             return;
         default:
-            fprintf(stderr, "pont : message inconnu type=%u\n", m.type);
+            fprintf(stderr, "pont : unknown message type=%u\n", m.type);
             break;
         }
     }
-    printf("pont : bilan de la session : %lu trames, %lu IRQ API, %lu reset, %llu insn\n",
+    printf("pont : session summary: %lu frames, %lu API IRQ, %lu reset, %llu insn\n",
            trames, irqs, resets, (unsigned long long)insns_total);
     montant_bilan();
 }
@@ -2879,10 +2879,10 @@ int pont_serveur(C54xState *dsp, uint16_t *api_ram, const char *socket_path,
     }
     chmod(socket_path, 0666);
     if (iq_mode && *iq_mode && strcmp(iq_mode, "none") != 0)
-        printf("pont : injection I/Q « %s » amplitude %d a chaque trame (DARAM 0x%04x, %u mots)\n",
+        printf("pont : I/Q injection \"%s\" amplitude %d every frame (DARAM 0x%04x, %u words)\n",
                iq_mode, amp, calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len());
-    printf("pont : en attente de l'ARM sur %s (API RAM : /dev/shm%s)\n"
-           "       cote QEMU : CALYPSO_DSP_EXTERN=1 qemu-system-arm -M calypso ...\n",
+    printf("pont : waiting for the ARM on %s (API RAM: /dev/shm%s)\n"
+           "       QEMU side: CALYPSO_DSP_EXTERN=1 qemu-system-arm -M calypso ...\n",
            socket_path, CALYPSO_PONT_SHM);
     fflush(stdout);
 

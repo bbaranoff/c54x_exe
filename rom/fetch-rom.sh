@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
         --version) VERSION="${2:?}"; shift ;;
         --force)   FORCE=1 ;;
         -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "option inconnue : $1" >&2; exit 2 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
 done
@@ -39,28 +39,28 @@ bon() {   # $1 = directory
 }
 if [ "$FORCE" = 0 ]; then
     tout=1; for d in "${DESTS[@]}"; do bon "$d" || tout=0; done
-    [ "$tout" = 1 ] && { echo "ROM DSP $VERSION deja en place et verifiee"; exit 0; }
+    [ "$tout" = 1 ] && { echo "DSP ROM $VERSION already in place and verified"; exit 0; }
 fi
 
 TMP="$(mktemp -d)"; mkdir -p "$TMP/bin"; trap 'rm -rf "$TMP"' EXIT
-echo "telechargement : $URL"
+echo "downloading: $URL"
 if   command -v curl >/dev/null 2>&1; then curl -fsS --retry 2 -o "$TMP/dump.txt" "$URL"
 elif command -v wget >/dev/null 2>&1; then wget -q -O "$TMP/dump.txt" "$URL"
-else echo "ni curl ni wget" >&2; exit 1; fi || { echo "telechargement impossible : $URL" >&2; exit 1; }
+else echo "neither curl nor wget" >&2; exit 1; fi || { echo "download failed: $URL" >&2; exit 1; }
 # tools/dsp_txt2bin.py: one output per section (calypso_dsp.<SECTION>.bin); only the six
 # ROM sections are kept below, not "Registers" (register snapshot).
 python3 "$ICI/../tools/dsp_txt2bin.py" "$TMP/dump.txt" "$TMP/bin/calypso_dsp.bin" >/dev/null \
-    || { echo "conversion du dump impossible" >&2; exit 1; }
+    || { echo "dump conversion failed" >&2; exit 1; }
 if [ -f "$SOMMES" ]; then
     ( cd "$TMP/bin" && sha256sum -c --quiet "$SOMMES" ) \
-        || { echo "ROM $VERSION : somme de controle differente de SHA256SUMS.$VERSION - abandon" >&2; exit 1; }
-    echo "somme de controle verifiee (SHA256SUMS.$VERSION)"
+        || { echo "ROM $VERSION: checksum differs from SHA256SUMS.$VERSION - aborting" >&2; exit 1; }
+    echo "checksum verified (SHA256SUMS.$VERSION)"
 else
-    echo "attention : pas de SHA256SUMS.$VERSION, conversion non verifiee" >&2
+    echo "warning: no SHA256SUMS.$VERSION, conversion not verified" >&2
 fi
 for d in "${DESTS[@]}"; do
     mkdir -p "$d"
     for r in $ROMS; do install -m644 "$TMP/bin/calypso_dsp.$r.bin" "$d/calypso_dsp.$r.bin"; done
     [ -f "$ICI/calypso_dsp.Registers.bin" ] && [ "$d" != "$ICI" ] && install -m644 "$ICI/calypso_dsp.Registers.bin" "$d/"
-    echo "ROM DSP $VERSION ecrite dans $d"
+    echo "DSP ROM $VERSION written to $d"
 done

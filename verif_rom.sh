@@ -2,111 +2,111 @@
 # Copyright (C) 2026 Bastien Baranoff
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# verif_rom.sh - preuve que les copies de la mask-ROM DSP Calypso 3606 servies par
-# les miroirs (et toute copie locale) sont, octet pour octet, le dump publie par
-# FreeCalypso : https://www.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
+# verif_rom.sh - proof that the copies of the Calypso 3606 DSP mask-ROM served by
+# the mirrors (and any local copy) are, byte for byte, the dump published by
+# FreeCalypso: https://www.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
 #
-# Le script ne fait confiance a personne, pas meme a lui-meme : il retelecharge
-# l'original chez FreeCalypso, calcule SHA-256 et SHA-512 de chaque copie, et
-# compare chaque copie a l'original avec cmp (octet par octet).
+# The script trusts nobody, not even itself: it downloads the original from
+# FreeCalypso again, computes SHA-256 and SHA-512 of each copy, and compares
+# each copy with the original using cmp (byte by byte).
 #
-#   ./verif_rom.sh                       miroirs par defaut
-#   ./verif_rom.sh --local FICHIER       verifie aussi une copie locale (repetable)
-#   ./verif_rom.sh --mirror URL          ajoute un miroir (repetable)
-#   ./verif_rom.sh --garder DIR          conserve les fichiers telecharges dans DIR
+#   ./verif_rom.sh                       default mirrors
+#   ./verif_rom.sh --local FILE          also check a local copy (repeatable)
+#   ./verif_rom.sh --mirror URL          add a mirror (repeatable)
+#   ./verif_rom.sh --garder DIR          keep the downloaded files in DIR
 #
-# Code de sortie : 0 tout identique ; 1 au moins une copie differe ou manque ;
-# 2 original FreeCalypso injoignable (comparaison au SHA-256 de reference seule).
+# Exit code: 0 all identical; 1 at least one copy differs or is missing;
+# 2 FreeCalypso original unreachable (comparison with the reference SHA-256 only).
 #
-# A la main, sans ce script :
+# By hand, without this script:
 #   curl -fsSL https://www.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt | sha256sum
-#   curl -fsSL <miroir> | sha256sum        # meme somme attendue
+#   curl -fsSL <mirror> | sha256sum        # same digest expected
 set -u
 
 ORIGINAL=https://www.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt
-# SHA-256 releve sur l'original le 2026-10-29 (721860 octets).
+# SHA-256 taken from the original on 2026-10-29 (721860 bytes).
 REF_SHA256=e35798f50fd0a29aa61cd53e417c010d7f172582c7bc055211daab8af1e05470
 MIRRORS=(
-    # gist epingle sur sa revision : le contenu de cette URL ne peut plus changer
+    # gist pinned to its revision: the content of this URL can no longer change
     https://gist.githubusercontent.com/bbaranoff/ba2746dd4fe6117475d95f791bf7df35/raw/16a4e486776315ecdf6c8972c58e877fa19785c5/calypso_dsp.txt
     https://raw.githubusercontent.com/bbaranoff/fc-magnetite/main/freecalypso-env/dsp-rom-3606-dump.txt
 )
 LOCAUX=(); GARDER=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --local)  LOCAUX+=("${2:?--local FICHIER}"); shift ;;
+        --local)  LOCAUX+=("${2:?--local FILE}"); shift ;;
         --mirror) MIRRORS+=("${2:?--mirror URL}"); shift ;;
         --garder) GARDER="${2:?--garder DIR}"; shift ;;
         -h|--help) sed -n '5,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "option inconnue : $1 (--help)" >&2; exit 2 ;;
+        *) echo "unknown option: $1 (--help)" >&2; exit 2 ;;
     esac
     shift
 done
-command -v curl >/dev/null || { echo "curl manquant" >&2; exit 2; }
+command -v curl >/dev/null || { echo "curl missing" >&2; exit 2; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 sha256() { sha256sum "$1" | cut -d' ' -f1; }
 sha512() { sha512sum "$1" | cut -d' ' -f1; }
 taille() { wc -c < "$1" | tr -d ' '; }
 
-echo "== Original : $ORIGINAL"
+echo "== Original: $ORIGINAL"
 orig="$TMP/original.txt"
 if curl -fsSL --retry 2 -o "$orig" "$ORIGINAL"; then
     o256=$(sha256 "$orig")
-    echo "   $(taille "$orig") octets"
+    echo "   $(taille "$orig") bytes"
     echo "   SHA-256 $o256"
     echo "   SHA-512 $(sha512 "$orig")"
     if [ "$o256" = "$REF_SHA256" ]; then
-        echo "   = SHA-256 de reference du depot"
+        echo "   = reference SHA-256 of the repository"
     else
-        echo "   ATTENTION : l'original FreeCalypso a change depuis la reference ($REF_SHA256)"
+        echo "   WARNING: the FreeCalypso original changed since the reference ($REF_SHA256)"
     fi
     attendu="$o256"; code=0
 else
-    echo "   injoignable : comparaison au SHA-256 de reference seule ($REF_SHA256)"
+    echo "   unreachable: comparison with the reference SHA-256 only ($REF_SHA256)"
     orig=""; attendu="$REF_SHA256"; code=2
 fi
 
 ko=0; n=0
-verifier() {   # $1 = libelle, $2 = fichier
+verifier() {   # $1 = label, $2 = file
     n=$((n + 1))
     local s; s=$(sha256 "$2")
-    echo "   $(taille "$2") octets"
+    echo "   $(taille "$2") bytes"
     echo "   SHA-256 $s"
     echo "   SHA-512 $(sha512 "$2")"
     if [ "$s" != "$attendu" ]; then
-        echo "   DIFFERENT de l'original"; ko=$((ko + 1)); return
+        echo "   DIFFERENT from the original"; ko=$((ko + 1)); return
     fi
     if [ -n "$orig" ]; then
-        if cmp -s "$orig" "$2"; then echo "   IDENTIQUE a l'original (SHA-256 et cmp octet par octet)"
-        else echo "   DIFFERENT de l'original (cmp)"; ko=$((ko + 1)); fi
+        if cmp -s "$orig" "$2"; then echo "   IDENTICAL to the original (SHA-256 and byte-by-byte cmp)"
+        else echo "   DIFFERENT from the original (cmp)"; ko=$((ko + 1)); fi
     else
-        echo "   identique au SHA-256 de reference"
+        echo "   identical to the reference SHA-256"
     fi
 }
 
 i=0
 for url in "${MIRRORS[@]}"; do
     i=$((i + 1)); f="$TMP/miroir$i.txt"
-    echo; echo "== Miroir $i : $url"
-    if curl -fsSL --retry 2 -o "$f" "$url"; then verifier "miroir $i" "$f"
-    else n=$((n + 1)); ko=$((ko + 1)); echo "   injoignable"; fi
+    echo; echo "== Mirror $i: $url"
+    if curl -fsSL --retry 2 -o "$f" "$url"; then verifier "mirror $i" "$f"
+    else n=$((n + 1)); ko=$((ko + 1)); echo "   unreachable"; fi
 done
 for l in "${LOCAUX[@]}"; do
-    echo; echo "== Local : $l"
+    echo; echo "== Local: $l"
     if [ -r "$l" ]; then verifier "$l" "$l"
-    else n=$((n + 1)); ko=$((ko + 1)); echo "   illisible"; fi
+    else n=$((n + 1)); ko=$((ko + 1)); echo "   unreadable"; fi
 done
 
 if [ -n "$GARDER" ]; then
-    mkdir -p "$GARDER" && cp "$TMP"/*.txt "$GARDER"/ && echo && echo "fichiers conserves dans $GARDER"
+    mkdir -p "$GARDER" && cp "$TMP"/*.txt "$GARDER"/ && echo && echo "files kept in $GARDER"
 fi
 
 echo
 if [ "$ko" -gt 0 ]; then
-    echo "VERDICT : ECHEC - $ko copie(s) sur $n differente(s) ou indisponible(s)"; exit 1
+    echo "VERDICT: FAILED - $ko of $n copies differ or are unavailable"; exit 1
 elif [ "$code" = 2 ]; then
-    echo "VERDICT : $n copie(s) au SHA-256 de reference, original FreeCalypso non joint"; exit 2
+    echo "VERDICT: $n copies match the reference SHA-256, FreeCalypso original not reached"; exit 2
 else
-    echo "VERDICT : OK - $n copie(s) identiques octet pour octet au dump FreeCalypso"; exit 0
+    echo "VERDICT: OK - $n copies identical byte for byte to the FreeCalypso dump"; exit 0
 fi

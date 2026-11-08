@@ -83,7 +83,7 @@ def nombre(t):
     m = re.fullmatch(r'(\d+)\s*-\s*(\d+)', t)
     if m:
         return int(m.group(1)) - int(m.group(2))
-    raise ValueError("nombre: %r" % t)
+    raise ValueError("number: %r" % t)
 
 class Smem:
     """Parsed single data-memory operand."""
@@ -114,7 +114,7 @@ class Smem:
             self.code = MMR[t.upper()]; return
         v = nombre(t)
         if not 0 <= v <= 0x7F:
-            raise ValueError("Smem direct hors 0..7F: %r" % txt)
+            raise ValueError("Smem direct outside 0..7F: %r" % txt)
         self.code = v
 
 def xmem(txt):
@@ -124,7 +124,7 @@ def xmem(txt):
         raise ValueError("Xmem: %r" % txt)
     n = int(m.group(1))
     if not 2 <= n <= 5:
-        raise ValueError("Xmem AR%d hors AR2..AR5" % n)
+        raise ValueError("Xmem AR%d outside AR2..AR5" % n)
     return (XMOD[m.group(2)] << 2) | (n - 2)
 
 def conds(tokens):
@@ -160,7 +160,7 @@ def assembler(tab, texte):
     texte = norm(texte.split(";")[0])
     m = re.match(r'([A-Za-z][A-Za-z0-9]*)\s*(.*)$', texte)
     if not m:
-        raise ValueError("syntaxe")
+        raise ValueError("syntax")
     nom, reste = m.group(1).lower(), m.group(2)
     ops = split_operands(reste) if reste else []
     erreurs = []
@@ -171,7 +171,7 @@ def assembler(tab, texte):
             return encoder(tnom, mots, opc, masque, types, list(ops))
         except ValueError as e:
             erreurs.append("%s%s: %s" % (tnom, types, e))
-    raise ValueError("; ".join(erreurs) if erreurs else "mnemonique inconnu %s" % nom)
+    raise ValueError("; ".join(erreurs) if erreurs else "unknown mnemonic %s" % nom)
 
 def encoder(nom, mots, opc, masque, types, ops):
     word = opc
@@ -190,7 +190,7 @@ def encoder(nom, mots, opc, masque, types, ops):
         if ti >= len(ops):
             if optional[k]:
                 continue
-            raise ValueError("operande manquant pour %s" % ty)
+            raise ValueError("missing operand for %s" % ty)
         o = ops[ti]
         if ty in ("OP_Smem", "OP_Sind", "OP_Lmem", "OP_MMR"):
             if ty == "OP_MMR" and norm(o).upper() in MMR:
@@ -205,14 +205,14 @@ def encoder(nom, mots, opc, masque, types, ops):
         elif ty == "OP_Ymem":
             word |= xmem(o)
         elif ty == "OP_SRC":
-            if not est_acc(o): raise ValueError("src attendu, %r" % o)
+            if not est_acc(o): raise ValueError("src expected, %r" % o)
             src = 1 if norm(o).upper() == "B" else 0
             word |= src << 9
         elif ty == "OP_SRC1":
-            if not est_acc(o): raise ValueError("src attendu, %r" % o)
+            if not est_acc(o): raise ValueError("src expected, %r" % o)
             word |= (1 if norm(o).upper() == "B" else 0) << 8
         elif ty == "OP_DST":
-            if not est_acc(o): raise ValueError("dst attendu, %r" % o)
+            if not est_acc(o): raise ValueError("dst expected, %r" % o)
             dst = 1 if norm(o).upper() == "B" else 0
             word |= dst << 8
         elif ty in ("OP_lk", "OP_lku", "OP_pmad", "OP_dmad", "OP_PA"):
@@ -231,24 +231,24 @@ def encoder(nom, mots, opc, masque, types, ops):
             word |= nombre(o) & 0x7
         elif ty == "OP_SHIFT":
             v = nombre(o)
-            if not -16 <= v <= 15: raise ValueError("SHIFT hors -16..15")
+            if not -16 <= v <= 15: raise ValueError("SHIFT outside -16..15")
             word |= v & 0x1F
         elif ty == "OP_SHFT":
             v = nombre(o)
-            if not 0 <= v <= 15: raise ValueError("SHFT hors 0..15")
+            if not 0 <= v <= 15: raise ValueError("SHFT outside 0..15")
             word |= v & 0xF
         elif ty == "OP_031":
             v = nombre(o)
             if not 0 <= v <= 31: raise ValueError("0..31")
             word |= v & 0x1F
         elif ty == "OP_16":
-            if norm(o) != "16": raise ValueError("16 attendu")
+            if norm(o) != "16": raise ValueError("16 expected")
         elif ty in ("OP_T", "OP_TS", "OP_ASM", "OP_DP", "OP_ARP", "OP_TRN", "OP_A", "OP_B"):
             attendu = {"OP_T": "T", "OP_TS": "TS", "OP_ASM": "ASM", "OP_DP": "DP", "OP_ARP": "ARP",
                        "OP_TRN": "TRN", "OP_A": "A", "OP_B": "B"}[ty]
-            if norm(o).upper() != attendu: raise ValueError("%s attendu" % attendu)
+            if norm(o).upper() != attendu: raise ValueError("%s expected" % attendu)
         elif ty == "OP_RND":
-            raise ValueError("OP_RND non gere")
+            raise ValueError("OP_RND not handled")
         elif ty in ("OP_CC", "OP_CC3"):
             # remaining operands are all conditions
             word |= conds(ops[ti:])
@@ -257,27 +257,27 @@ def encoder(nom, mots, opc, masque, types, ops):
         elif ty == "OP_CC2":
             u = norm(o).upper()
             if nom in ("saccd", "srccd", "strcd"):  # 4-bit accumulator condition, bits 3-0
-                if u not in COND or not (COND[u] & 0x40): raise ValueError("cond acc attendue")
+                if u not in COND or not (COND[u] & 0x40): raise ValueError("acc cond expected")
                 word |= COND[u] & 0x0F
             else:                                    # CMPR CC, ARx : cc in bits 9-8
                 v = nombre(o) if not u.isalpha() else {"EQ": 0, "LT": 1, "GT": 2, "NEQ": 3}[u]
                 word |= (v & 3) << 8
         elif ty == "OP_ARX":
             m = re.fullmatch(r'AR(\d)', norm(o).upper())
-            if not m: raise ValueError("ARx attendu")
+            if not m: raise ValueError("ARx expected")
             word |= int(m.group(1)) & 7
         elif ty in ("OP_MMRX", "OP_MMRY"):       # AR0..AR7 = 0..7, SP = 8 ; X bits 7-4, Y bits 3-0
             u = norm(o).upper()
             m = re.fullmatch(r'AR(\d)', u)
             v = int(m.group(1)) if m else (8 if u == "SP" else None)
-            if v is None: raise ValueError("ARx/SP attendu")
+            if v is None: raise ValueError("ARx/SP expected")
             word |= v << (4 if ty == "OP_MMRX" else 0)
         elif ty == "OP_N":
             u = norm(o).upper()
             if u in SBITS:                         # RSBX SXM : N and SBIT from the name
                 n, b = SBITS[u]; word |= (n << 9) | b
                 ti += 1
-                if ti < len(ops): raise ValueError("SBIT apres nom")
+                if ti < len(ops): raise ValueError("SBIT after name")
                 return [word] + extra
             word |= (nombre(o) & 1) << 9
         elif ty == "OP_SBIT":
@@ -290,16 +290,16 @@ def encoder(nom, mots, opc, masque, types, ops):
         elif ty == "OP_12":
             word |= ((nombre(o) - 1) & 1) << 9
         else:
-            raise ValueError("type %s non gere" % ty)
+            raise ValueError("type %s not handled" % ty)
         ti += 1
     if ti != len(ops):
-        raise ValueError("operandes en trop: %r" % ops[ti:])
+        raise ValueError("too many operands: %r" % ops[ti:])
     # optional dst omitted: dst = src
     if "OP_DST" in types and dst is None and src is not None:
         word |= src << 8
     if len(extra) + 1 != mots and not (len(extra) + 1 == mots + 1):
         # the table's word count does not include the Smem lk word
-        raise ValueError("longueur %d != %d" % (len(extra) + 1, mots))
+        raise ValueError("length %d != %d" % (len(extra) + 1, mots))
     return [word & 0xFFFF] + extra
 
 # -------------------------------------------------------- example parsing ----
@@ -323,7 +323,7 @@ def valeur(tokens):
         return None, 1
     if toks and HEX.match(toks[0]) and len(toks[0]) in (1, 2, 3):
         return int(toks[0], 16), 16
-    raise ValueError("valeur: %r" % toks)
+    raise ValueError("value: %r" % toks)
 
 def nettoyer_nom(t):
     return re.sub(r'[†‡†‡*]+$', '', norm(t)).upper()
@@ -442,7 +442,7 @@ def main():
             print("# %s" % w)
         print("E")
         n_ok += 1
-    sys.stderr.write("%d exemples assembles, %d non assembles\n" % (n_ok, n_skip))
+    sys.stderr.write("%d examples assembled, %d not assembled\n" % (n_ok, n_skip))
 
 if __name__ == "__main__":
     main()

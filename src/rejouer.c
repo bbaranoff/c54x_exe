@@ -174,11 +174,11 @@ static int g_reel_pour_fn[64];           /* which frame received which burst */
 static int reels_charger(const char *chemin)
 {
     FILE *f = fopen(chemin, "rb");
-    if (!f) { fprintf(stderr, "SCH reels : %s illisible\n", chemin); return -1; }
+    if (!f) { fprintf(stderr, "real SCH: %s unreadable\n", chemin); return -1; }
     uint32_t n = 0, nsym = 0, ncode = 0;
     if (fread(&n, 4, 1, f) != 1 || fread(&nsym, 4, 1, f) != 1 ||
         fread(&ncode, 4, 1, f) != 1 || nsym != 148 || ncode != 78 || !n) {
-        fprintf(stderr, "SCH reels : entete invalide\n"); fclose(f); return -1; }
+        fprintf(stderr, "real SCH: invalid header\n"); fclose(f); return -1; }
     g_reels = calloc(n, sizeof *g_reels);
     g_reels_code = calloc(n, sizeof *g_reels_code);
     g_reels_fn = calloc(n, sizeof *g_reels_fn);
@@ -193,7 +193,7 @@ static int reels_charger(const char *chemin)
     }
     fclose(f); g_n_reels = n;
     for (int i = 0; i < 64; i++) g_reel_pour_fn[i] = -1;
-    printf("SCH reels : %u bursts charges depuis %s (BSIC attendu %u)\n",
+    printf("real SCH: %u bursts loaded from %s (expected BSIC %u)\n",
            n, chemin, n ? g_reels_bsic[0] : 0);
     return n ? 0 : -1;
 }
@@ -303,8 +303,8 @@ static void fbdet_resp(int attempt)
         int dframe = (int)(f - fb_cmd_fn);                 /* FCCH frame inside the window */
         int toa_attendu = dframe * BITS_PER_TDMA + 23;      /* what the firmware can read */
         int ntdma_lu = (fb.toa - 23) / BITS_PER_TDMA;
-        printf("  FB%d att=%d fn=%u TOA=%d (df=%d) | cmd=%u FCCH reelle=%u (+%d trames) "
-               "=> TOA attendu ~%d, ntdma lu=%d au lieu de %d\n",
+        printf("  FB%d att=%d fn=%u TOA=%d (df=%d) | cmd=%u real FCCH=%u (+%d frames) "
+               "=> expected TOA ~%d, ntdma read=%d instead of %d\n",
                fb_mode, attempt, fn_cur, fb.toa, fb.freq_diff,
                fb_cmd_fn, f, dframe, toa_attendu, ntdma_lu, dframe);
     }
@@ -350,7 +350,7 @@ static void fbdet_resp(int attempt)
                 { static int d = -2; if (d == -2) { const char *e = calypso_getenv("REJEU_SB_DECALAGE");
                                                     d = e ? atoi(e) : -1; }
                   delay += d; if (delay < 0) delay = 0; }
-                if (trace) printf("    [force] SB vise fn=%u (p51=%u), delay=%d\n", f, f % 51, delay);
+                if (trace) printf("    [force] SB targeted fn=%u (p51=%u), delay=%d\n", f, f % 51, delay);
             }
             plan_sb_set(delay);
         } else plan_fb_set(1, 1);
@@ -362,7 +362,7 @@ static void sbdet_cmd(int attempt)
     g_sb_cmd_fn = fn_cur;
     if (trace) { unsigned p = fn_cur % 51;
         printf("  SBcmd att=%d fn=%u p51=%u %s\n", attempt, fn_cur, p,
-               (p % 10 == 1 && p <= 41) ? "<- trame SCH (bon)" : "<- PAS une trame SCH"); }
+               (p % 10 == 1 && p <= 41) ? "<- SCH frame (good)" : "<- NOT an SCH frame"); }
     dbw()[W_TASK_MD] = SB_DSP_TASK;
     api[NDB_FB_MODE] = 0;
     if (trace) printf("  [SBcmd W] page=%u W=%04x %04x %04x %04x %04x ..%04x %04x  NDB page=%04x fb_mode=%04x fb_det=%04x\n",
@@ -406,8 +406,8 @@ static void sbdet_resp(int attempt)
                     if (sh == 0) n0 = m;
                     if (m > bestn) { bestn = m; best = sh; }
                 }
-                printf("    [feed] fn=%u (livre fn=%u type=%c) addr=0x%04x len=%u nl=%d"
-                       "  identiques a shift0=%d/%d  meilleur shift=%d avec %d/%d\n",
+                printf("    [feed] fn=%u (delivered fn=%u type=%c) addr=0x%04x len=%u nl=%d"
+                       "  identical at shift0=%d/%d  best shift=%d with %d/%d\n",
                        fn_cur, g_livre_fn, g_livre_type ? g_livre_type : '?', ad,
                        calypso_bsp_get_daram_len(), nl, n0, nl, best, bestn, nl);
             }
@@ -429,12 +429,12 @@ static void sbdet_resp(int attempt)
                     if (dsp->data[(ad + k) & 0x3fff]) nz0++;
                     if (dsp->data[(0x2a00 + k) & 0x3fff]) nz2++;
                 }
-                printf("    [zone] depot 0x%04x : %d/296 non nuls | zone 0x2a00 : %d/296 non nuls\n",
+                printf("    [zone] deposit 0x%04x: %d/296 non-zero | zone 0x2a00: %d/296 non-zero\n",
                        ad, nz0, nz2);
                 printf("      0x%04x : %04x %04x %04x %04x %04x %04x\n", ad,
                        dsp->data[ad&0x3fff], dsp->data[(ad+1)&0x3fff], dsp->data[(ad+2)&0x3fff],
                        dsp->data[(ad+3)&0x3fff], dsp->data[(ad+4)&0x3fff], dsp->data[(ad+5)&0x3fff]);
-                printf("      0x2a8e : %04x %04x %04x %04x %04x %04x   (entree lue par FIRS)\n",
+                printf("      0x2a8e : %04x %04x %04x %04x %04x %04x   (input read by FIRS)\n",
                        dsp->data[0x2a8e], dsp->data[0x2a8f], dsp->data[0x2a90],
                        dsp->data[0x2a91], dsp->data[0x2a92], dsp->data[0x2a93]);
             }
@@ -484,22 +484,22 @@ static void sbdet_resp(int attempt)
                             if (n >= 60 && m > bv) { bv = m; bs = sh; bp = pol; }
                         }
                     }
-                    printf("    [align] meilleur decalage=%+d polarite=%d -> %d/78\n", bs, bp, bv);
+                    printf("    [align] best offset=%+d polarity=%d -> %d/78\n", bs, bp, bv);
                 }
                 int best = acc[1] > acc[0] ? 1 : 0;
-                printf("    [profil] fn_demod=%u (p51=%u) pic=%u : concordance pol0=%d/78 pol1=%d/78\n"
-                       "      premiers39 |%.39s|\n"
-                       "      derniers39 |%s|\n",
+                printf("    [profil] fn_demod=%u (p51=%u) peak=%u: match pol0=%d/78 pol1=%d/78\n"
+                       "      first39 |%.39s|\n"
+                       "      last39 |%s|\n",
                        g_sb_cmd_fn, g_sb_cmd_fn % 51, dsp->data[0x2f06],
                        acc[0], acc[1], map[best], map[best] + 39);
             }
             if (calypso_getenv("REJEU_DUMP_SOUPLES")) {
-                printf("    [souples] fn=%u pic=%u :", fn_cur, dsp->data[0x2f06]);
+                printf("    [souples] fn=%u peak=%u:", fn_cur, dsp->data[0x2f06]);
                 for (int k = 0; k < 78; k++) printf(" %04x", dsp->data[0x2c72 + k]);
                 printf("\n");
             }
-            printf("    [sb-int] pic(2f06)=%u  crc(2bf8)=%u  souples(2c72)[0..5]=%04x %04x %04x %04x %04x %04x"
-                   "  non nuls=%d/78  etendue=[%d..%d]\n",
+            printf("    [sb-int] peak(2f06)=%u  crc(2bf8)=%u  softs(2c72)[0..5]=%04x %04x %04x %04x %04x %04x"
+                   "  non-zero=%d/78  range=[%d..%d]\n",
                    dsp->data[0x2f06], dsp->data[0x2bf8],
                    dsp->data[0x2c72], dsp->data[0x2c73], dsp->data[0x2c74],
                    dsp->data[0x2c75], dsp->data[0x2c76], dsp->data[0x2c77], nnul, mn, mx);
@@ -510,7 +510,7 @@ static void sbdet_resp(int attempt)
          * burst (a_serv_demod: TOA, PM, ANGLE, SNR): the material for comparing
          * decoded SCHs against missed ones. */
         printf("  SBresp att=%d fn=%u p51=%u crc=%s a_sch=%04x %04x %04x %04x %04x toa=%d pm=%d angle=%d snr=%d sb_cmd_fn=%u\n", attempt, fn_cur, p,
-               (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "FAUX" : "OK",
+               (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) ? "BAD" : "OK",
                dbr()[R_SCH + 0], dbr()[R_SCH + 1], dbr()[R_SCH + 2], dbr()[R_SCH + 3], dbr()[R_SCH + 4],
                (int16_t)dbr()[R_SERV + 0], (int16_t)dbr()[R_SERV + 1], (int16_t)dbr()[R_SERV + 2], (int16_t)dbr()[R_SERV + 3], g_sb_cmd_fn); }
     if (dbr()[R_SCH + 0] & (1 << B_SCH_CRC)) {
@@ -543,13 +543,13 @@ static void sbdet_resp(int attempt)
     int fn_ok = (sb_fn == g_sb_cmd_fn);
     n_crc_ok++;
     if (bsic_ok && t3_ok && fn_ok) n_sb_vraies++;
-    printf("  SB%d fn=%u : sb=0x%08x BSIC=%d (injecte %d) T1=%u T2=%u T3=%u -> FN=%u (burst demodule fn=%u)  %s%s\n",
+    printf("  SB%d fn=%u : sb=0x%08x BSIC=%d (injected %d) T1=%u T2=%u T3=%u -> FN=%u (demodulated burst fn=%u)  %s%s\n",
            attempt, fn_cur, sb_word, sb_bsic, g_bsic_injecte, t1, t2, t3, sb_fn, g_sb_cmd_fn,
-           (bsic_ok && t3_ok && fn_ok) ? "** VRAIE **"
-           : !bsic_ok ? "FAUX POSITIF (BSIC ne colle pas)"
-           : !t3_ok   ? "FAUX POSITIF (T3 > 50, impossible)"
-           :            "FAUX POSITIF (FN != trame du burst demodule)",
-           cellule_sch_partout ? "  [FN non qualifiable sous SCH_PARTOUT]" : "");
+           (bsic_ok && t3_ok && fn_ok) ? "** TRUE **"
+           : !bsic_ok ? "FALSE POSITIVE (BSIC does not match)"
+           : !t3_ok   ? "FALSE POSITIVE (T3 > 50, impossible)"
+           :            "FALSE POSITIVE (FN != demodulated burst frame)",
+           cellule_sch_partout ? "  [FN cannot be qualified under SCH_PARTOUT]" : "");
     if (drapeau_env("REJEU_ARRET_1ER") || ((bsic_ok && t3_ok && fn_ok) && !drapeau_env("REJEU_CONTINUER"))) { verdict = 1; return; }
     if (bsic_ok && t3_ok && fn_ok) { sched_reset(); plan_fb_set(1, 0); return; }   /* REJEU_CONTINUER: restart the acquisition */
     /* [2026-09-18] An unqualified CRC OK (false positive) must reschedule, or the
@@ -598,7 +598,7 @@ static void arm_dsp_init(void)
     while (api[BL_STATUS_W] != 1 && b < 8000000) {
         int ex = c54x_run(dsp, 256); if (ex <= 0) break; b += ex;
     }
-    printf("  bootloader DSP : BL_STATUS=%u apres %ld insn\n", api[BL_STATUS_W], b);
+    printf("  DSP bootloader: BL_STATUS=%u after %ld insn\n", api[BL_STATUS_W], b);
 
     /* dsp_set_params(): NDB first */
     api[NDB + 8]  = 0x0074;  api[NDB + 9]  = 0x0001;
@@ -620,7 +620,7 @@ static void arm_dsp_init(void)
     api[BL_ADDR_HI_W] = 0; api[BL_ADDR_LO_W] = DSP_START; api[BL_SIZE_W] = 0;
     api[BL_STATUS_W]  = 2;                               /* BL_CMD_COPY_BLOCK */
     b = pump(4000000, 1);
-    printf("  DSP demarre : %ld insn, idle=%d, version=0x%04x%04x\n",
+    printf("  DSP started: %ld insn, idle=%d, version=0x%04x%04x\n",
            b, dsp->idle, api[NDB + 6], api[NDB + 7]);
 
     /* dsp_ndb_init(): what matters for FB/SB */
@@ -638,7 +638,7 @@ static void arm_dsp_init(void)
      * the DSP has started, to compare with the live bench's shared API RAM
      * (od on /dev/shm/calypso_api_ram at word 0x431). */
     if (drapeau_env("REJEU_DUMP_PARAM"))
-        printf("  PARAM apres demarrage : %04x %04x %04x %04x %04x %04x %04x %04x  (attendu 6666 000f 000c 0005 0004 7002 0001 000e)\n",
+        printf("  PARAM after start: %04x %04x %04x %04x %04x %04x %04x %04x  (expected 6666 000f 000c 0005 0004 7002 0001 000e)\n",
                api[PARAM], api[PARAM+1], api[PARAM+2], api[PARAM+3], api[PARAM+4], api[PARAM+5], api[PARAM+6], api[PARAM+7]);
 }
 
@@ -702,10 +702,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
       if (r && *r && reels_charger(r) == 0) g_bsic_injecte = g_reels_bsic[0]; }
     memset(&fb, 0, sizeof fb);
 
-    if (drapeau_env("REJEU_SCH_PARTOUT")) { cellule_sch_partout = 1; printf("  [stimulus] SCH sur toutes les trames non-FCCH (masque le cadencage)\n"
-               "  [stimulus] ATTENTION : t3p = p51/10 n'est juste que sur p51 in {1,11,21,31,41},\n"
-               "             donc la FN reconstruite ne peut PAS etre validee sous ce drapeau.\n"); }
-    printf("rejeu deterministe : %ld trames max, %ld insn/trame, cellule BSIC=%d, iq=%s\n",
+    if (drapeau_env("REJEU_SCH_PARTOUT")) { cellule_sch_partout = 1; printf("  [stimulus] SCH on all non-FCCH frames (hides the timing)\n"
+               "  [stimulus] WARNING: t3p = p51/10 is only right for p51 in {1,11,21,31,41},\n"
+               "             so the rebuilt FN can NOT be validated under this flag.\n"); }
+    printf("deterministic replay: %ld frames max, %ld insn/frame, cell BSIC=%d, iq=%s\n",
            trames, insns, bsic, iq_mode ? iq_mode : "cell");
     /* firmware dsp_power_on(): bootloader boot + parameters + NDB */
     arm_dsp_init();
@@ -729,8 +729,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             n_err_dsp++;
             if (e & 8) n_err8++;
             if (n_err_dsp <= 8)
-                printf("  [erreur DSP] status=%u%s a fn=%u\n", e,
-                       (e & 8) ? " (bit 3 = DSP_ERR_DMA_PROG, anneau DMA 0x4330 sature)" : "",
+                printf("  [DSP error] status=%u%s at fn=%u\n", e,
+                       (e & 8) ? " (bit 3 = DSP_ERR_DMA_PROG, DMA ring 0x4330 saturated)" : "",
                        fn_cur);
             api[NDB_ERRSTAT] = 0;
         }
@@ -752,7 +752,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             { static int da = -1; static unsigned nd;
               if (da < 0) da = calypso_getenv("REJEU_ADR") ? 1 : 0;
               if (da && nd < 14) { nd++;
-                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
+                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> deposit 0x%04x len=%u\n",
                          fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
                          calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
             calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
@@ -817,7 +817,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                 /* Check: is the burst dropped really the REAL one? */
                 static unsigned nv;
                 if (nv < 4) { nv++;
-                    printf("  [reel] trame %u <- burst #%u (fn reelle %u, BSIC %u) I/Q %d %d %d %d\n",
+                    printf("  [reel] frame %u <- burst #%u (real fn %u, BSIC %u) I/Q %d %d %d %d\n",
                            fn_cur, r, g_reels_fn[r], g_reels_bsic[r],
                            iq[2*m], iq[2*m+1], iq[2*m+2], iq[2*m+3]); }
                 g_reel_pour_fn[fn_cur & 63] = (int)r;
@@ -865,7 +865,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             { static int da = -1; static unsigned nd;
               if (da < 0) da = calypso_getenv("REJEU_ADR") ? 1 : 0;
               if (da && nd < 14) { nd++;
-                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> depot 0x%04x len=%u\n",
+                  printf("  [adr] fn=%-4u type=%c n_iq=%-4d -> deposit 0x%04x len=%u\n",
                          fn_cur, g_livre_type ? g_livre_type : '?', n_iq,
                          calypso_bsp_get_daram_addr(), calypso_bsp_get_daram_len()); } }
             /* [2026-09-20] PAGE-BY-PAGE DELIVERY (REJEU_PAGES=<words>, e.g. 96).
@@ -887,7 +887,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       calypso_bsp_rx_burst(0, fn_cur, iq + pos, m);
                       pos += m; npage++;
                       { static unsigned nb; if (nb < 40 && fn_cur >= 2 && fn_cur <= 14) { nb++;
-                          printf("  [bloc] fn=%u page %d (%d mots) : 0x3fb4=%04x 0x3fb5=%04x avant", fn_cur, npage, m, b34, b35); } }
+                          printf("  [bloc] fn=%u page %d (%d words): 0x3fb4=%04x 0x3fb5=%04x before", fn_cur, npage, m, b34, b35); } }
                       /* completion interrupt already pending: let the DSP serve it */
                       if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
                       long slice = 0;
@@ -895,10 +895,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int ex = c54x_run(dsp, 64); if (ex <= 0) break; slice += ex;
                       }
                       { static unsigned nb2; if (nb2 < 40 && fn_cur >= 2 && fn_cur <= 14) { nb2++;
-                          printf(" -> apres 0x3fb4=%04x 0x3fb5=%04x (idle=%d, %ld insn)\n", dsp->data[0x3fb4], dsp->data[0x3fb5], dsp->idle, slice); } }
+                          printf(" -> after 0x3fb4=%04x 0x3fb5=%04x (idle=%d, %ld insn)\n", dsp->data[0x3fb4], dsp->data[0x3fb5], dsp->idle, slice); } }
                   }
                   { static unsigned np; if (np < 3) { np++;
-                      printf("  [pages] fn=%u : %d mots livres en %d pages de %ld\n", fn_cur, n_iq, npage, pages_mots); } }
+                      printf("  [pages] fn=%u: %d words delivered in %d pages of %ld\n", fn_cur, n_iq, npage, pages_mots); } }
               } else
                   calypso_bsp_rx_burst(0, fn_cur, iq, n_iq);
             }
@@ -918,23 +918,23 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
             if (calypso_getenv("CALYPSO_BSP_VERIF")) {
                 static int dit;
                 if (!dit) { dit = 1;
-                    printf("  [mem] api est-il un alias de data[0x0800] ? %s\n",
-                           (void *)api == (void *)&dsp->data[0x0800] ? "OUI" : "NON — deux memoires distinctes");
+                    printf("  [mem] is api an alias of data[0x0800]? %s\n",
+                           (void *)api == (void *)&dsp->data[0x0800] ? "YES" : "NO — two separate memories");
                     printf("        api[0x0cce-0x0800]=%04x   data[0x0cce]=%04x\n",
                            api[0x0cce - 0x0800], dsp->data[0x0cce]); }
                 static unsigned nvr;
                 uint32_t vfn; uint16_t vad; int vn, vage;
                 int id = calypso_bsp_verif_compare(&vfn, &vad, &vn, &vage);
                 if (id >= 0 && nvr < 8) { nvr++;
-                    printf("  [ref] fn=%-4u type=%c age=%d : %d/%d identiques en 0x%04x%s\n",
+                    printf("  [ref] fn=%-4u type=%c age=%d: %d/%d identical at 0x%04x%s\n",
                            vfn, g_livre_type ? g_livre_type : '?', vage, id, vn, vad,
-                           id == vn ? "   VALIDE" : "   <<< ECRITURE FAUSSE"); }
+                           id == vn ? "   VALID" : "   <<< WRONG WRITE"); }
             }
             { static int vv = -1; static unsigned nv;
               if (vv < 0) vv = calypso_getenv("REJEU_VIE") ? 1 : 0;
               if (vv && g_livre_type == 'S' && nv < 6) { nv++;
                   uint16_t ad = calypso_bsp_get_daram_addr();
-                  printf("  [vie] fn=%-4u adresse APRES l'appel : 0x%04x (avant : 0x%04x)\n",
+                  printf("  [vie] fn=%-4u address AFTER the call: 0x%04x (before: 0x%04x)\n",
                          fn_cur, ad, g_ad_avant);
                   int ex = 0, best = 0, bex = -1;
                   for (int sh = -8; sh <= 44; sh++) {
@@ -946,7 +946,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       if (e > bex) { bex = e; best = sh; }
                       if (sh == 0) ex = e;
                   }
-                  printf("  [vie] fn=%-4u APRES depot en 0x%04x : shift0=%d/280  meilleur shift=%+d avec %d/280\n",
+                  printf("  [vie] fn=%-4u AFTER deposit at 0x%04x: shift0=%d/280  best shift=%+d with %d/280\n",
                          fn_cur, ad, ex, best, bex);
                   if (bex < 200) {   /* not there: locate the burst */
                       int ba = -1, bn = 0;
@@ -960,15 +960,15 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int tot = 0;
                           for (int k = 0; k < 280; k++)
                               if ((int16_t)dsp->data[(ba + k) & 0x3fff] == iq[k]) tot++;
-                          printf("        -> burst TROUVE en 0x%04x : %d/280 identiques\n", ba, tot);
-                      } else printf("        -> burst introuvable en DARAM (meilleur %d/64 en 0x%04x)\n", bn, ba);
+                          printf("        -> burst FOUND at 0x%04x: %d/280 identical\n", ba, tot);
+                      } else printf("        -> burst not found in DARAM (best %d/64 at 0x%04x)\n", bn, ba);
                   }
                   g_vie_fn = fn_cur; g_vie_ad = ad; } }
             if (dsp->idle && (dsp->ifr & dsp->imr) && !(dsp->st1 & 0x800)) dsp->idle = false;
         }
         { static int tf = -1; if (tf < 0) tf = calypso_getenv("REJEU_TRACE_FB") ? 1 : 0;
           if (tf && fn_cur < 60)
-              printf("  [fb] fn=%-3u apres pompe : 0x3fb4=%04x 0x3fb3=%04x d_fb_det=%u fb_mode=%u task_md=%u/%u idle=%d insn_trame=%u  sync=%04x %04x %04x %04x\n",
+              printf("  [fb] fn=%-3u after pump: 0x3fb4=%04x 0x3fb3=%04x d_fb_det=%u fb_mode=%u task_md=%u/%u idle=%d insn_trame=%u  sync=%04x %04x %04x %04x\n",
                      fn_cur, dsp->data[0x3fb4], dsp->data[0x3fb3], api[NDB_FB_DET], api[NDB_FB_MODE],
                      api[W_PAGE(0) + W_TASK_MD], api[W_PAGE(1) + W_TASK_MD], dsp->idle, dsp->insn_count - insn_debut_trame,
                      api[NDB_SYNC], api[NDB_SYNC+1], api[NDB_SYNC+2], api[NDB_SYNC+3]); }
@@ -1028,9 +1028,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                         uint16_t dv = dsp->data[(uint16_t)((dp << 7) | 0x0B)];
                         static unsigned nd;
                         if (nd < 12) { nd++;
-                            printf("    [div] avant : dividende A=%010llx  diviseur=0x%04x (%d)%s\n",
+                            printf("    [div] before: dividend A=%010llx  divisor=0x%04x (%d)%s\n",
                                    (unsigned long long)(dsp->a & 0xffffffffffULL), dv, (int16_t)dv,
-                                   dv == 0 ? "   <<< DIVISEUR NUL" : ""); }
+                                   dv == 0 ? "   <<< ZERO DIVISOR" : ""); }
                     }
                     break;
                 case 0x7d1d: hit_7d1d++; break;
@@ -1038,7 +1038,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     if (env_div) {
                         static unsigned nq;
                         if (nq < 12) { nq++;
-                            printf("    [div] apres : quotient A=%010llx  (mot bas = %d)\n",
+                            printf("    [div] after: quotient A=%010llx  (low word = %d)\n",
                                    (unsigned long long)(dsp->a & 0xffffffffffULL),
                                    (int16_t)(dsp->a & 0xffff)); }
                     }
@@ -1068,17 +1068,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                               if (k % 5 == 0 && v == 0x8000) {
                                   const uint16_t *b = &dsp->data[adr[k]];
                                   printf("    [crcok] fn=%u  a_sch = %04x %04x %04x %04x %04x"
-                                         "  -> mot 0x%04x%04x  crc_interne(2bf8)=%u\n",
+                                         "  -> word 0x%04x%04x  internal_crc(2bf8)=%u\n",
                                          fn_cur, b[0], b[1], b[2], b[3], b[4],
                                          b[4], b[3], dsp->data[0x2bf8]);
                               }
                               if (nqa < 4000) { nqa++;
                                   int j = k % 5;
                                   printf("    [asch] a_sch[%d] (page %d, 0x%04x) : %04x -> %04x"
-                                         "   ecrit juste avant pc=%04x  fn=%u%s\n",
+                                         "   written just before pc=%04x  fn=%u%s\n",
                                          j, k/5, adr[k], sh[k], v, pc, fn_cur,
                                          (j==0 && v && v!=0x0100 && v!=0x8000 && v!=0x8100)
-                                           ? "   <<< PAS UN DRAPEAU" : ""); }
+                                           ? "   <<< NOT A FLAG" : ""); }
                               sh[k] = v;
                           }
                       }
@@ -1098,12 +1098,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       if (pin && !pin0 && armA) parpc[pcp]++;
                       aprec = a40; pcp = pc; armA = 1;
                       if (++tA % 400000 == 0) {
-                          printf("  [quiA] PC qui amenent A a +-0x40000000 :\n");
+                          printf("  [quiA] PCs that bring A to +-0x40000000:\n");
                           for (int rang=0; rang<8; rang++) {
                               unsigned best=0; unsigned long bv=0;
                               for (unsigned i=0;i<0x10000;i++) if (parpc[i]>bv){bv=parpc[i];best=i;}
                               if (!bv) break;
-                              printf("    pc=%04x op=%04x : %lu fois\n", best,
+                              printf("    pc=%04x op=%04x: %lu times\n", best,
                                      prog_ovly(dsp,(uint16_t)best), bv);
                               parpc[best]=0;
                           }
@@ -1129,13 +1129,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           }
                       }
                       if (++tot2 % 300000 == 0) {
-                          printf("  [2ac0] PC ecrivains (butee +-16384 | autres) :\n");
+                          printf("  [2ac0] writer PCs (limit +-16384 | others):\n");
                           for (int rang=0; rang<8; rang++) {
                               unsigned best=0; unsigned long bv=0;
                               for (unsigned i=0;i<0x10000;i++)
                                   if (par_pc_butee[i]+par_pc_autre[i] > bv) { bv=par_pc_butee[i]+par_pc_autre[i]; best=i; }
                               if (!bv) break;
-                              printf("    pc=%04x op=%04x : butee=%lu  autres=%lu\n",
+                              printf("    pc=%04x op=%04x: limit=%lu  others=%lu\n",
                                      best, prog_ovly(dsp,(uint16_t)best),
                                      par_pc_butee[best], par_pc_autre[best]);
                               par_pc_butee[best]=0; par_pc_autre[best]=0;
@@ -1156,11 +1156,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       int ri = g_reel_pour_fn[g_sb_cmd_fn & 63];
                       const int16_t *bi = g_reels[ri];
                       int m = 0;
-                      printf("  [cmp] burst reel #%d (fn %u, BSIC %u) vs tampons de travail\n", ri, g_reels_fn[ri], g_reels_bsic[ri]);
-                      printf("    I injecte : "); for (int k=0;k<10;k++) printf(" %6d", bi[2*(m+k)]);
+                      printf("  [cmp] real burst #%d (fn %u, BSIC %u) vs work buffers\n", ri, g_reels_fn[ri], g_reels_bsic[ri]);
+                      printf("    I injected: "); for (int k=0;k<10;k++) printf(" %6d", bi[2*(m+k)]);
                       printf("\n    0x2a00    : "); for (int k=0;k<10;k++) printf(" %6d", (int16_t)dsp->data[0x2a00+k]);
                       printf("\n    0x2ac0    : "); for (int k=0;k<10;k++) printf(" %6d", (int16_t)dsp->data[0x2ac0+k]);
-                      printf("\n    Q injecte : "); for (int k=0;k<10;k++) printf(" %6d", bi[2*(m+k)+1]);
+                      printf("\n    Q injected: "); for (int k=0;k<10;k++) printf(" %6d", bi[2*(m+k)+1]);
                       printf("\n");
                       /* normalized correlation between each buffer and each channel */
                       /* how far the constancy goes: how many words are identical? */
@@ -1173,7 +1173,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                               if(v<mn)mn=v;
                               if(v>mx)mx=v;
                               n++; }
-                          printf("    0x%04x : %d/%d mots egaux au premier (%d) ; etendue [%d..%d]\n",
+                          printf("    0x%04x: %d/%d words equal to the first (%d); range [%d..%d]\n",
                                  base, same, n, v0, mn, mx);
                       }
                       for (int buf=0; buf<2; buf++) {
@@ -1207,12 +1207,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                         int t2 = 0; for (unsigned q = 0; q < nvv; q++) if (vu_v[q] == v) t2 = 1;
                         if (!t2 && nvv < 32) vu_v[nvv++] = v;
                         if (++nval % 4000 == 0) {
-                            printf("    [mul] %u valeurs distinctes lues via AR5 :", nvv);
+                            printf("    [mul] %u distinct values read via AR5:", nvv);
                             for (unsigned q = 0; q < nvv && q < 12; q++) printf(" %04x", vu_v[q]);
                             printf("\n"); } }
                       static unsigned long tot;
                       if (++tot % 4000 == 0)
-                          printf("    [ar5] apres %lu pas : plage 0x%04x..0x%04x, %u cellules distinctes\n",
+                          printf("    [ar5] after %lu steps: range 0x%04x..0x%04x, %u distinct cells\n",
                                  tot, lo, hi, nv);
                   }
                   if (rc && n < 16 && pc >= 0x81c8 && pc <= 0x81e0) {
@@ -1235,14 +1235,14 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   if (d8 < 0) d8 = calypso_getenv("REJEU_DUMP832") ? 1 : 0;
                   if (d8 && !fait && pc == 0x8320) {
                       fait = 1;
-                      printf("  [832] programme 0x8318-0x8340 (alias OVLY compris) :\n");
+                      printf("  [832] program 0x8318-0x8340 (OVLY alias included):\n");
                       for (unsigned a = 0x8318; a <= 0x8340; a += 8) {
                           printf("    %04x:", a);
                           for (int k = 0; k < 8 && a + k <= 0x8340; k++)
                               printf(" %04x", prog_ovly(dsp, (uint16_t)(a + k)));
                           printf("\n");
                       }
-                      printf("    registres : A=%010llx B=%010llx T=%04x\n",
+                      printf("    registers: A=%010llx B=%010llx T=%04x\n",
                              (unsigned long long)(dsp->a & 0xffffffffffULL),
                              (unsigned long long)(dsp->b & 0xffffffffffULL), dsp->t);
                       printf("    AR0=%04x AR1=%04x AR2=%04x AR3=%04x AR4=%04x AR5=%04x AR6=%04x AR7=%04x\n",
@@ -1261,9 +1261,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           if (!vu_dec) { vu_dec = 1; }
                           else {
                               fini = 1;
-                              printf("  [bloc] correlateur 0x84a0-0x84df sur UN decodage :\n");
+                              printf("  [bloc] correlator 0x84a0-0x84df over ONE decode:\n");
                               for (int k = 0; k < 0x40; k++)
-                                  if (cnt[k]) printf("    pc=%04x  op=%04x  %6lu fois\n",
+                                  if (cnt[k]) printf("    pc=%04x  op=%04x  %6lu times\n",
                                                      0x84a0 + k, prog_ovly(dsp, 0x84a0 + k), cnt[k]);
                           }
                       }
@@ -1335,9 +1335,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                             dsp->data[(uint16_t)(sa + k)] = (uint16_t)(int16_t)v;
                         }
                         static unsigned ns; if (ns < 3) { ns++;
-                            printf("  [softs] fn_demod=%u : 78 souples IDEAUX ecrits en 0x%04lx "
+                            printf("  [softs] fn_demod=%u: 78 IDEAL softs written at 0x%04lx "
                                    "(amp=%d pol=%d, source=%s)\n", g_sb_cmd_fn, sa, amp, pol,
-                                   ri >= 0 ? "burst reel" : "fixture"); }
+                                   ri >= 0 ? "real burst" : "fixture"); }
                     }
                 }
                 /* [2026-09-19] WHO WRITES THE EQUALIZER INPUT WINDOW? FIRS reads
@@ -1353,7 +1353,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           uint16_t v = dsp->data[0x2a80 + k];
                           if (v != shadow[k]) {
                               if (nq < 4000) { nq++;
-                                  printf("    [qui] 0x%04x : %04x -> %04x   ecrit juste avant pc=%04x (fn=%u)\n",
+                                  printf("    [qui] 0x%04x: %04x -> %04x   written just before pc=%04x (fn=%u)\n",
                                          0x2a80 + k, shadow[k], v, pc, fn_cur); }
                               shadow[k] = v;
                           }
@@ -1382,18 +1382,18 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   if (cf == -2) { const char *e = calypso_getenv("REJEU_CHRONO"); cf = e ? atol(e) : -1; }
                   if (cf >= 0 && (long)fn_cur == cf) {
                       if (!ini2) { for (int k=0;k<380;k++) sh2[k]=dsp->data[0x0cce + k]; ini2=1;
-                                   printf("  [chrono] trame %ld\n", cf); }
+                                   printf("  [chrono] frame %ld\n", cf); }
                       unsigned chg=0;
                       for (int k=0;k<380;k++) { uint16_t v=dsp->data[0x0cce + k];
                           if (v!=sh2[k]) { chg++; sh2[k]=v; } }
                       if (chg && nl < 24) { nl++;
-                          printf("      insn=%-8u pc=%04x  %4u mots changes\n",
+                          printf("      insn=%-8u pc=%04x  %4u words changed\n",
                                  dsp->insn_count, pc, chg); }
                       if (pc == 0x84a0 && nl < 30) { nl++;
-                          printf("      insn=%-8u pc=84a0  <== ENTREE DU CORRELATEUR SB\n",
+                          printf("      insn=%-8u pc=84a0  <== SB CORRELATOR ENTRY\n",
                                  dsp->insn_count); }
                       if (pc == 0x7c31 && nl < 30) { nl++;
-                          printf("      insn=%-8u pc=7c31  <== entree du demodulateur SB\n",
+                          printf("      insn=%-8u pc=7c31  <== SB demodulator entry\n",
                                  dsp->insn_count); }
                   } }
                 { static int qc = -1; static uint16_t sh[380]; static int ini;
@@ -1408,12 +1408,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       }
                       if (chg) { par_pc[pc] += chg; nfr[fn_cur & 63] += chg; }
                       if (++tot % 500000 == 0) {
-                          printf("  [cce] ecrivains de 0x0cce (mots modifies) :\n");
+                          printf("  [cce] writers of 0x0cce (modified words):\n");
                           for (int r=0;r<6;r++) {
                               unsigned best=0; unsigned long bv=0;
                               for (unsigned i=0;i<0x10000;i++) if (par_pc[i]>bv){bv=par_pc[i];best=i;}
                               if (!bv) break;
-                              printf("      pc=%04x op=%04x : %lu mots\n", best,
+                              printf("      pc=%04x op=%04x: %lu words\n", best,
                                      prog_ovly(dsp,(uint16_t)best), bv);
                               par_pc[best]=0;
                           }
@@ -1426,7 +1426,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       int ex = 0;
                       for (int k = 0; k < 296; k++)
                           if ((int16_t)dsp->data[(g_vie_ad + k) & 0x3fff] == g_livre_iq[2*marge_tete() + k]) ex++;
-                      printf("  [vie] fn=%-4u ENTREE CORRELATEUR (depot de fn=%u) : %d/296 identiques\n",
+                      printf("  [vie] fn=%-4u CORRELATOR ENTRY (deposit of fn=%u): %d/296 identical\n",
                              fn_cur, g_vie_fn, ex); } }
                 { static int db = -1; static FILE *fb;
                   if (db < 0) { const char *e = calypso_getenv("REJEU_DUMP_BUF");
@@ -1453,11 +1453,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   if (q4 < 0) q4 = calypso_getenv("REJEU_Q4485") ? 1 : 0;
                   if (q4) {
                       if (arme) { arme = 0;
-                          printf("        -> A apres = %010llx\n",
+                          printf("        -> A after = %010llx\n",
                                  (unsigned long long)(dsp->a & 0xffffffffffULL)); }
                       if ((pc == 0x847c || pc == 0x8498) && n4 < 6) {
                           n4++; avant = dsp->a; arme = 1;
-                          printf("    [4485] pc=%04x op=%04x  A avant = %010llx\n",
+                          printf("    [4485] pc=%04x op=%04x  A before = %010llx\n",
                                  pc, prog_ovly(dsp, pc), (unsigned long long)(avant & 0xffffffffffULL));
                           for (int k = 0; k < 8; k++)
                               printf("        AR%d=%04x -> %04x\n", k, dsp->ar[k],
@@ -1527,17 +1527,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int ovly = (dsp->pmst & 0x0020) != 0;
                           int alias = ovly && pmad >= 0x0060 && pmad < 0x2800;
                           printf("    [firs] pc=%04x pmad=%04x PMST=%04x OVLY=%d alias=%s"
-                                 " -> FIRS lit", pc, pmad, dsp->pmst, ovly,
-                                 alias ? "data[] (scratch-pad visible)" : "prog[] (PAS d'alias)");
+                                 " -> FIRS reads", pc, pmad, dsp->pmst, ovly,
+                                 alias ? "data[] (scratch-pad visible)" : "prog[] (NO alias)");
                           for (int k = 0; k < 6; k++)
                               printf(" %04x", alias ? dsp->data[(pmad + k) & 0x3fff]
                                                     : dsp->prog[(pmad + k) & 0xffff]);
                           printf("\n");
                           printf("    [firs] pc=%04x pmad=%04x | prog[pmad..+5]=", pc, pmad);
                           for (int k = 0; k < 6; k++) printf(" %04x", dsp->prog[(pmad + k) & 0xffff]);
-                          printf(" (%d non nuls)\n                      | data[pmad..+5]=", nzp);
+                          printf(" (%d non-zero)\n                      | data[pmad..+5]=", nzp);
                           for (int k = 0; k < 6; k++) printf(" %04x", dsp->data[(pmad + k) & 0x3fff]);
-                          printf(" (%d non nuls)\n", nzd);
+                          printf(" (%d non-zero)\n", nzd);
                           n_firs_vus++;
                       }
                   } else if (h == 0x8E || h == 0x8F) n_cmps_hors++;
@@ -1560,11 +1560,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   else if (nav == 1 && pc == 0x838a) {
                       static int n=0;
                       if (n < 4) {
-                          printf("    [add-4594] B avant=%010llx  B apres=%010llx  A=%010llx  %s\n",
+                          printf("    [add-4594] B before=%010llx  B after=%010llx  A=%010llx  %s\n",
                                  (unsigned long long)(bavant & 0xffffffffffULL),
                                  (unsigned long long)(dsp->b & 0xffffffffffULL),
                                  (unsigned long long)(dsp->a & 0xffffffffffULL),
-                                 (dsp->b == bavant) ? "B INCHANGE => instruction NON EXECUTEE" : "B modifie");
+                                 (dsp->b == bavant) ? "B UNCHANGED => instruction NOT EXECUTED" : "B modified");
                           n++;
                       }
                       nav = 0;
@@ -1613,19 +1613,19 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       }
                   }
                   if (pc == 0x9841 && arme6 && n_2a0 < 3) {
-                      printf("    [qui-2a00] modifications de 0x2a00..0x2a8d pendant le job SB :\n");
+                      printf("    [qui-2a00] changes to 0x2a00..0x2a8d during the SB job:\n");
                       long tot = 0;
                       for (int b = 0; b < 64; b++)
                           if (ecr[b]) {
-                              printf("        region 0x%04x : %ld modifs (dont %ld vers zero), PC 0x%04x a 0x%04x\n",
+                              printf("        region 0x%04x: %ld changes (%ld of them to zero), PC 0x%04x to 0x%04x\n",
                                      b << 10, ecr[b], vers0[b], pmin[b], pmax[b]);
                               tot += ecr[b];
                           }
-                      if (!tot) printf("        AUCUNE : rien n'ecrit jamais dans 0x2a00\n");
-                      printf("        par PC exact (PC imprime = instruction SUIVANTE) :\n");
+                      if (!tot) printf("        NONE: nothing ever writes to 0x2a00\n");
+                      printf("        by exact PC (printed PC = NEXT instruction):\n");
                       for (int t = 0; t < 12; t++)
                           if (parpc2[t].pc)
-                              printf("            pc=%04x (donc ecrivain %04x) : %ld valeurs, %ld mises a ZERO\n",
+                              printf("            pc=%04x (so writer %04x): %ld values, %ld set to ZERO\n",
                                      parpc2[t].pc, parpc2[t].pc - 1, parpc2[t].v, parpc2[t].z);
                       n_2a0++;
                   } }
@@ -1662,10 +1662,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           }
                       }
                   } else if (arme5 && n_ecr < 2) {
-                      printf("    [ecrit-2c72] sites qui modifient les 78 bits souples :\n");
+                      printf("    [ecrit-2c72] sites that modify the 78 soft bits:\n");
                       for (int b = 0; b < 64; b++)
                           if (parpc[b])
-                              printf("        region 0x%04x : %ld ecritures, PC de 0x%04x a 0x%04x\n",
+                              printf("        region 0x%04x: %ld writes, PC from 0x%04x to 0x%04x\n",
                                      b << 10, parpc[b], pcmin[b], pcmax[b]);
                       n_ecr++; arme5 = 0;
                       for (int b = 0; b < 64; b++) parpc[b] = 0;
@@ -1686,9 +1686,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       if (dsp->st0 & 0x0200) novb++;      /* OVB */
                       if (dsp->st1 & 0x0200) ovm_vu = 1;  /* OVM: saturation mode */
                   } else if ((nsat || nova || novb) && n_sat_vus < 3) {
-                      printf("    [saturation] demod SB : %ld depassements 32 bits,"
-                             " OVA pose %ld fois, OVB %ld fois, mode OVM %s\n",
-                             nsat, nova, novb, ovm_vu ? "ACTIF" : "inactif");
+                      printf("    [saturation] SB demod: %ld 32-bit overflows,"
+                             " OVA set %ld times, OVB %ld times, OVM mode %s\n",
+                             nsat, nova, novb, ovm_vu ? "ACTIVE" : "inactive");
                       n_sat_vus++; nsat = nova = novb = 0;
                   } }
                 /* [2026-09-18] WHERE DOES THE FIXED WINDOW ADDRESS COME FROM? Watch
@@ -1712,10 +1712,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           }
                       }
                   } else if (arme4 && n_bal < 3) {
-                      printf("    [tampon-AR] parcours de 0x0cce pendant le demod SB (BK=%u) :\n", dsp->bk);
+                      printf("    [tampon-AR] walk of 0x0cce during the SB demod (BK=%u):\n", dsp->bk);
                       for (int k = 0; k < 8; k++)
                           if (an[k])
-                              printf("        AR%d : echantillons %u..%u (%u larges), %ld acces, 1er a pc=%04x\n",
+                              printf("        AR%d: samples %u..%u (%u wide), %ld accesses, 1st at pc=%04x\n",
                                      k, amin[k], amax[k], amax[k] - amin[k] + 1, an[k], apc[k]);
                       n_bal++; arme4 = 0;
                   } }
@@ -1728,12 +1728,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                    * keep the last 4 PCs and the ST0 before each. */
                   { static uint16_t ring_pc[4], ring_op[4], ring_st0[4]; static int ri;
                     if ((h == 0xFD || h == 0xFF) && pc >= 0x8400 && pc < 0x8800 && n_xc_vus < 10) {
-                        printf("    [xc] pc=%04x op=%04x cc=%02x | 3 precedentes :", pc, o, o & 0xff);
+                        printf("    [xc] pc=%04x op=%04x cc=%02x | 3 previous:", pc, o, o & 0xff);
                         for (int k = 3; k >= 1; k--) {
                             int q = (ri - k) & 3;
                             printf("  %04x:%04x(ST0=%04x)", ring_pc[q], ring_op[q], ring_st0[q]);
                         }
-                        printf(" | ST0 au XC=%04x\n", dsp->st0);
+                        printf(" | ST0 at XC=%04x\n", dsp->st0);
                         n_xc_vus++;
                     }
                     ring_pc[ri] = pc; ring_op[ri] = o; ring_st0[ri] = dsp->st0;
@@ -1748,19 +1748,19 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                     static unsigned nd;
                     { static unsigned nt;
                       if (pc == 0x9a7f && nt < 6) { nt++;
-                          printf("  [dec] apres `sth @0x0e,B` (pc=9a7e) : T=%04x  B=%010llx (hi=%04x)  DP=%03x CPL=%d  ST0=%04x ST1=%04x  AR1=%04x\n",
+                          printf("  [dec] after `sth @0x0e,B` (pc=9a7e): T=%04x  B=%010llx (hi=%04x)  DP=%03x CPL=%d  ST0=%04x ST1=%04x  AR1=%04x\n",
                                  dsp->t, (unsigned long long)(dsp->b & 0xffffffffffULL), (unsigned)((dsp->b >> 16) & 0xffff),
                                  dsp->st0 & 0x1ff, !!(dsp->st1 & 0x4000), dsp->st0, dsp->st1, dsp->ar[1]); } }
                     { static int cpl_prev = -1; static uint16_t pc_prev; static unsigned ncpl;
                       int cpl = !!(dsp->st1 & 0x4000);
                       if (cpl_prev >= 0 && cpl != cpl_prev && ncpl < 16) { ncpl++;
-                          printf("  [cpl] CPL %d -> %d apres l'instruction pc=%04x op=%04x  (fn=%u ST1=%04x SP=%04x)\n",
+                          printf("  [cpl] CPL %d -> %d after instruction pc=%04x op=%04x  (fn=%u ST1=%04x SP=%04x)\n",
                                  cpl_prev, cpl, pc_prev, prog_ovly(dsp, pc_prev), fn_cur, dsp->st1, dsp->sp); }
                       cpl_prev = cpl; pc_prev = pc; }
                     if (pc == 0x9866 && nd < 3) {
-                        printf("  [dec] fn_demod=%u ACS termine : TRN[0..38] @0x2c82 =", g_sb_cmd_fn);
+                        printf("  [dec] fn_demod=%u ACS done: TRN[0..38] @0x2c82 =", g_sb_cmd_fn);
                         for (int k = 0; k < 39; k++) printf(" %04x", dsp->data[0x2c82 + k]);
-                        printf("\n        metriques @0x2c00..0x2c1f =");
+                        printf("\n        metrics @0x2c00..0x2c1f =");
                         for (int k = 0; k < 32; k++) printf(" %04x", dsp->data[0x2c00 + k]);
                         printf("\n        softs @0x2a00[0..7] = %04x %04x %04x %04x %04x %04x %04x %04x  BK=%04x AR0=%04x ST1=%04x\n",
                                dsp->data[0x2a00], dsp->data[0x2a01], dsp->data[0x2a02], dsp->data[0x2a03],
@@ -1787,12 +1787,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                         }
                         unsigned long long um = 0, ul = 0;
                         for (int k = 0; k < 35; k++) { um = (um << 1) | u[k]; ul |= (unsigned long long)u[k] << k; }
-                        printf("  [dec] traceback termine : mots @0x2c00 = %04x %04x %04x %04x | attendu u[0..34] MSB-first=0x%09llx LSB-first=0x%09llx\n",
+                        printf("  [dec] traceback done: words @0x2c00 = %04x %04x %04x %04x | expected u[0..34] MSB-first=0x%09llx LSB-first=0x%09llx\n",
                                dsp->data[0x2c00], dsp->data[0x2c01], dsp->data[0x2c02], dsp->data[0x2c03], um, ul);
                         printf("        u = "); for (int k = 0; k < 35; k++) printf("%d", u[k]); printf("\n");
                     }
                     if (pc == 0x98a2 && nd < 3) {
-                        printf("  [dec] CRC : drapeau 0x2bf8=%u  A=%010llx  mots @0x2c00 = %04x %04x %04x\n",
+                        printf("  [dec] CRC: flag 0x2bf8=%u  A=%010llx  words @0x2c00 = %04x %04x %04x\n",
                                dsp->data[0x2bf8], (unsigned long long)(dsp->a & 0xffffffffffULL),
                                dsp->data[0x2c00], dsp->data[0x2c01], dsp->data[0x2c02]);
                         nd++;
@@ -1819,10 +1819,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   } else if (pc == 0x9841 && arme && np < 6) {
                       int diff = 0;
                       for (int k = 0; k < 8; k++) if (dsp->data[0x2a00 + k] != apres_demod[k]) diff = 1;
-                      printf("    [2a00] apres demod: %04x %04x %04x %04x | a l'entree du decodeur: %04x %04x %04x %04x  => %s\n",
+                      printf("    [2a00] after demod: %04x %04x %04x %04x | at decoder entry: %04x %04x %04x %04x  => %s\n",
                              apres_demod[0], apres_demod[1], apres_demod[2], apres_demod[3],
                              dsp->data[0x2a00], dsp->data[0x2a01], dsp->data[0x2a02], dsp->data[0x2a03],
-                             diff ? "ECRASE" : "intact");
+                             diff ? "OVERWRITTEN" : "intact");
                       np++; arme = 0;
                   } }
                 /* [2026-09-17] Proof that the samples carry the message: demodulate
@@ -1841,8 +1841,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           if ((int16_t)dsp->data[0x0cce + k] == g_livre_iq[k]) ident++;
                           else if (prem_diff < 0) prem_diff = k;
                       }
-                      printf("    [tampon] identique aux echantillons livres : %d/%d mots"
-                             " (1re difference au mot %d)\n", ident, n, prem_diff);
+                      printf("    [tampon] identical to the delivered samples: %d/%d words"
+                             " (1st difference at word %d)\n", ident, n, prem_diff);
                       nx++;
                   } }
                 /* [2026-09-18] At the decoder entry, measure what it actually READS,
@@ -1871,8 +1871,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           if (meilleur > meil_s) { meil_s = meilleur; meil_f = (int)f; }
                           if (df == 0) s0 = ok;
                       }
-                      printf("    [2a00-lu] job %d : zeros=%d/78 etendue=[%d..%d] |"
-                             " signes trame livree %d/78 | meilleure trame %d avec %d/78\n",
+                      printf("    [2a00-lu] job %d: zeros=%d/78 range=[%d..%d] |"
+                             " signs of delivered frame %d/78 | best frame %d with %d/78\n",
                              nb2 + 1, nz, mn, mx, s0, meil_f, meil_s);
                       nb2++;
                   } }
@@ -1924,8 +1924,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                               if (ok2 > meil_s) { meil_s = ok2; meil_f = (int)f; }
                               if (df == 0) { okdat = ok2; ndat = n2; }
                           }
-                          printf("    [d-brut] midambule %d/63 (inverse %d) | DONNEES trame livree %d/%d"
-                                 " | meilleure trame %d avec %d/%d\n",
+                          printf("    [d-brut] midamble %d/63 (inverse %d) | DATA of delivered frame %d/%d"
+                                 " | best frame %d with %d/%d\n",
                                  okd, okdd, okdat, ndat, meil_f, meil_s, ndat);
                           /* the midamble is IDENTICAL for every SCH frame: if it locks
                            * but the data does not, the buffer holds the burst of ANOTHER
@@ -1942,12 +1942,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           int ok = 0;
                           for (int i = 0; i < 39; i++) if (b148[3 + i] == att[i]) ok++;
                           for (int i = 0; i < 39; i++) if (b148[106 + i] == att[39 + i]) ok++;
-                          printf("    [ref] fn livree=%u offset=%d | midambule %d/64 |"
-                                 " mot de code de la trame livree %d/78 |"
-                                 " MEILLEURE trame = %d avec %d/78\n",
+                          printf("    [ref] delivered fn=%u offset=%d | midamble %d/64 |"
+                                 " codeword of the delivered frame %d/78 |"
+                                 " BEST frame = %d with %d/78\n",
                                  g_livre_fn, off, okm, ok, meilleure, meilleur_score);
                       } else {
-                          printf("    [ref] fn=%u  demod de reference : pas de pic exploitable\n", g_livre_fn);
+                          printf("    [ref] fn=%u  reference demod: no usable peak\n", g_livre_fn);
                       }
                       nr++;
                   } }
@@ -2046,7 +2046,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                     if (tot >= 50 && ok * 100 / tot > bs) { bs = ok * 100 / tot; bo = o; bp = pol; }
                                 }
                             }
-                            printf("    [tranche] sortie DSP vs burst complet : max %d%% a l'offset %d (polarite %d)\n",
+                            printf("    [tranche] DSP output vs full burst: max %d%% at offset %d (polarity %d)\n",
                                    bs, bo, bp); }
                       /* [2026-09-18] Peak and agreement on the SAME line, so they can
                        * be correlated frame by frame: if the frames whose peak is 21 (the
@@ -2080,8 +2080,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                         if (cible2 == -2) { const char *e = calypso_getenv("REJEU_EMPREINTE_FN");
                                             cible2 = e ? atol(e) : -1; }
                         if (nemp < 3 && (cible2 < 0 || (long)g_livre_fn == cible2)) {
-                            printf("    [empreinte] fn=%u (trame courante %u%s) pic=%u :", g_livre_fn, fn_cur,
-                                   g_livre_fn == fn_cur ? "" : " DESALIGNE", dsp->data[0x2f06]);
+                            printf("    [empreinte] fn=%u (current frame %u%s) peak=%u:", g_livre_fn, fn_cur,
+                                   g_livre_fn == fn_cur ? "" : " MISALIGNED", dsp->data[0x2f06]);
                             for (int k = 0; k < 78; k++) printf(" %04x", dsp->data[0x2c72 + k]);
                             printf("\n"); nemp++;
                         } }
@@ -2153,10 +2153,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                 uint16_t v = dsp->data[0x2a00 + k];
                                 if (v == 0) nz++; else if (v == 0xffff) nff++; else naut++;
                             }
-                            printf("    [2a00] COMPACTE (0x2a00+b) : %d%% (polarite %d) | "
-                                   "BRUT (saut de 64) : %d%% (polarite %d)\n",
+                            printf("    [2a00] COMPACT (0x2a00+b): %d%% (polarity %d) | "
+                                   "RAW (jump of 64): %d%% (polarity %d)\n",
                                    meil_c, pol_c, meil_b, pol_b);
-                            printf("    [2a00] contenu sur 142 mots : %d nuls, %d a 0xffff, %d autres |",
+                            printf("    [2a00] contents over 142 words: %d zero, %d at 0xffff, %d other |",
                                    nz, nff, naut);
                             for (int k = 0; k < 10; k++) printf(" %04x", dsp->data[0x2a00 + k]);
                             printf("\n");
@@ -2164,7 +2164,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                         } }
                       { static int n2d;
                         if (n2d < 1) {
-                            printf("    [2ad5] pic=%u valeurs aux positions de burst 0..147 :\n      ",
+                            printf("    [2ad5] peak=%u values at burst positions 0..147:\n      ",
                                    dsp->data[0x2f06]);
                             for (int k = 0; k < 148; k++) {
                                 printf(" %04x", dsp->data[0x2ad5 + k]);
@@ -2197,9 +2197,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                             break;
                                         }
                                 }
-                            printf("    [chasse] meilleure zone : base 0x%04x %s pol %d -> %d%%"
+                            printf("    [chasse] best zone: base 0x%04x %s pol %d -> %d%%"
                                    "   (2e: 0x%04x %d%%, 3e: 0x%04x %d%%)\n",
-                                   top[0].base, top[0].disp ? "burst" : "contigu", top[0].pol, top[0].sc,
+                                   top[0].base, top[0].disp ? "burst" : "contiguous", top[0].pol, top[0].sc,
                                    top[1].base, top[1].sc, top[2].base, top[2].sc);
                             nch++;
                         } }
@@ -2220,10 +2220,10 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                       if (pc2 > meil) { meil = pc2; mo = o; mp = pol; } }
                               }
                             int nz = 0; for (int k = 0; k < 148; k++) if (dsp->data[0x2a00 + k]) nz++;
-                            printf("    [2a00] indexe par position de burst : concordance max %d%%"
-                                   " (decalage %d, polarite %d) | %d/148 mots non nuls\n",
+                            printf("    [2a00] indexed by burst position: max match %d%%"
+                                   " (offset %d, polarity %d) | %d/148 non-zero words\n",
                                    meil, mo, mp, nz);
-                            printf("    [2a00] valeurs :");
+                            printf("    [2a00] values:");
                             for (int k = 0; k < 14; k++) printf(" %04x", dsp->data[0x2a00 + k]);
                             printf("\n");
                             n2a++;
@@ -2252,11 +2252,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                     if (n2 >= 30) { int pc2 = ok2 * 100 / n2;
                                         if (pc2 > m2b) { m2b = pc2; m2o = o; m2s = sens * (pol ? -2 : 1); } }
                                 }
-                            printf("    [2c56] moitie 1 : meilleur %d%% a l'offset %d (code %d) | "
-                                   "moitie 2 : meilleur %d%% a l'offset %d (code %d)\n",
+                            printf("    [2c56] half 1: best %d%% at offset %d (code %d) | "
+                                   "half 2: best %d%% at offset %d (code %d)\n",
                                    m1b, m1o, m1s, m2b, m2o, m2s);
                             int nz = 0; for (int k = 0; k < 100; k++) if (dsp->data[0x2c56 + k]) nz++;
-                            printf("    [2c56] %d/100 mots non nuls, carte des nuls (. = nul, X = non nul) :\n      ", nz);
+                            printf("    [2c56] %d/100 non-zero words, zero map (. = zero, X = non-zero):\n      ", nz);
                             for (int k = 0; k < 100; k++) {
                                 printf("%c", dsp->data[0x2c56 + k] ? 'X' : '.');
                                 if (k % 50 == 49) printf("\n      ");
@@ -2269,15 +2269,15 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                             }
                             nv++;
                         } }
-                      printf("    [pic-conc] pic=%u concordance=%d%%\n", dsp->data[0x2f06], best);
-                      printf("    [bits] fn=%u  0x2c72 non-nuls=%d/78 : %04x %04x %04x %04x %04x %04x\n"
-                             "           concordance max = %d%% (decalage %d, polarite %d, ordre %s)\n",
+                      printf("    [pic-conc] peak=%u match=%d%%\n", dsp->data[0x2f06], best);
+                      printf("    [bits] fn=%u  0x2c72 non-zero=%d/78: %04x %04x %04x %04x %04x %04x\n"
+                             "           max match = %d%% (offset %d, polarity %d, order %s)\n",
                              g_livre_fn, nznb, dsp->data[0x2c72], dsp->data[0x2c73], dsp->data[0x2c74],
                              dsp->data[0x2c75], dsp->data[0x2c76], dsp->data[0x2c77],
                              best, bestd, bestv & 1,
-                             (bestv >> 1) == 1 ? "moities echangees"
-                             : (bestv >> 1) == 2 ? "pairs d'abord"
-                             : (bestv >> 1) == 3 ? "impairs d'abord" : "identite");
+                             (bestv >> 1) == 1 ? "halves swapped"
+                             : (bestv >> 1) == 2 ? "even first"
+                             : (bestv >> 1) == 3 ? "odd first" : "identity");
                       nb++;
                   } }
                 /* [2026-09-18] The `sb` word returned is IDENTICAL for BSIC 7, 14 and
@@ -2293,12 +2293,12 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   } else if (nw < 12) {
                       for (int k = 0; k < 5; k++) {
                           if (dsp->data[A0 + k] != vu0[k]) {
-                              printf("    [a_sch] page0 mot %d : %04x -> %04x  ecrit par pc=%04x\n",
+                              printf("    [a_sch] page0 word %d: %04x -> %04x  written by pc=%04x\n",
                                      k, vu0[k], dsp->data[A0 + k], pc);
                               vu0[k] = dsp->data[A0 + k]; nw++;
                           }
                           if (dsp->data[A1 + k] != vu1[k]) {
-                              printf("    [a_sch] page1 mot %d : %04x -> %04x  ecrit par pc=%04x\n",
+                              printf("    [a_sch] page1 word %d: %04x -> %04x  written by pc=%04x\n",
                                      k, vu1[k], dsp->data[A1 + k], pc);
                               vu1[k] = dsp->data[A1 + k]; nw++;
                           }
@@ -2319,13 +2319,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   }
                 { static int nq;
                   if (pc == 0x84ef && nq < 5) {
-                      printf("    [balayage] registres d'adresse pendant 0x84c8-0x84ef :");
+                      printf("    [balayage] address registers during 0x84c8-0x84ef:");
                       for (int k = 0; k < 8; k++)
                           if (armax[k] >= armin[k] && armax[k] > armin[k])
                               printf(" AR%d=[0x%04x..0x%04x]", k, armin[k], armax[k]);
                       printf("\n");
                       arme2 = 0;
-                      printf("    [magn@84ef] plages non nulles entre 0x2b00 et 0x2d00 :\n");
+                      printf("    [magn@84ef] non-zero ranges between 0x2b00 and 0x2d00:\n");
                       int deb = -1, fin = -1;
                       for (int a = 0x2b00; a <= 0x2d00; a++) {
                           int nz = (a <= 0x2cff) && dsp->data[a] != 0;
@@ -2348,8 +2348,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                                   if (v > vmax) { vmax = v; imax = k - deb; }
                                   if (a > amax) { amax = a; iamax = k - deb; }
                               }
-                              printf("        0x%04x-0x%04x : %3d mots, max signe=%d au rang %d,"
-                                     " max |v|=%d au rang %d\n",
+                              printf("        0x%04x-0x%04x: %3d words, signed max=%d at index %d,"
+                                     " max |v|=%d at index %d\n",
                                      deb, fin, n, vmax, imax, amax, iamax);
                               deb = -1;
                           }
@@ -2367,19 +2367,19 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                       armec = 1;
                   } else if (pc == 0x7e94 && armec) {
                       int deb = -1, fin = -1, nch = 0;
-                      printf("    [ecrit] plages modifiees par le correlateur SB :\n");
+                      printf("    [ecrit] ranges modified by the SB correlator:\n");
                       for (int k = 0; k < 0x4000; k++) {
                           int d = (dsp->data[k] != snap[k]);
                           if (d && deb < 0) deb = k;
                           if (d) { fin = k; nch++; }
                           if (!d && deb >= 0 && k > fin + 8) {
-                              printf("        0x%04x-0x%04x (%d mots)  ex: %04x->%04x\n",
+                              printf("        0x%04x-0x%04x (%d words)  e.g.: %04x->%04x\n",
                                      deb, fin, fin - deb + 1, snap[deb], dsp->data[deb]);
                               deb = -1;
                           }
                       }
                       if (deb >= 0) printf("        0x%04x-0x%04x\n", deb, fin);
-                      printf("        total %d mots changes\n", nch);
+                      printf("        total %d words changed\n", nch);
                       armec = 0; ns++;
                   } }
                 /* [2026-09-17] With a REAL SCH burst on the input, the soft bits at
@@ -2397,8 +2397,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                           if (v > samax) { samax = v; isamax = k; }
                       }
                       int nzin = 0; for (int k = 0; k < 380; k++) if (dsp->data[0x0cce + k]) nzin++;
-                      printf("    [corr] entree 0x0cce non-nuls=%d/380 | 0x2be4 non-nuls=%d/64"
-                             " | max |v|=%d au rang %d, max signe=%d au rang %d"
+                      printf("    [corr] input 0x0cce non-zero=%d/380 | 0x2be4 non-zero=%d/64"
+                             " | max |v|=%d at index %d, signed max=%d at index %d"
                              " | argmax 0x2f06=%u | 0x2be4: %04x %04x %04x %04x %04x %04x\n",
                              nzin, nzc, emax, iemax, samax, isamax, dsp->data[0x2f06],
                              dsp->data[0x2be4], dsp->data[0x2be5], dsp->data[0x2be6],
@@ -2410,8 +2410,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   if (pc == 0x7c31 && ne < 6) {
                       int nz = 0; for (int k = 0; k < 380; k++) if (dsp->data[0x0cce + k]) nz++;
                       int z0 = 0; while (z0 < 380 && !dsp->data[0x0cce + z0]) z0++;
-                      printf("    [in-sb] fn=%u p51=%u  DERNIER BURST LIVRE: type=%c fn=%u n=%d\n"
-                             "            0x0cce non-nuls=%d/380 zeros_tete=%d : %04x %04x %04x %04x %04x %04x\n",
+                      printf("    [in-sb] fn=%u p51=%u  LAST BURST DELIVERED: type=%c fn=%u n=%d\n"
+                             "            0x0cce non-zero=%d/380 leading_zeros=%d: %04x %04x %04x %04x %04x %04x\n",
                              fn_cur, fn_cur % 51, g_livre_type ? g_livre_type : '?', g_livre_fn, g_livre_n,
                              nz, z0, dsp->data[0x0cce], dsp->data[0x0ccf], dsp->data[0x0cd0],
                              dsp->data[0x0cd1], dsp->data[0x0cd2], dsp->data[0x0cd3]);
@@ -2440,7 +2440,7 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
                   if (dsp->t != tprev) { tpc = ppc; tprev = dsp->t; }
                   ppc = pc;
                   if (pc == 0x7947 && tn < 10 && env_probe_t) {
-                      printf("    [T] au mpya (0x7947) : T=%04x (%u), dernier ecrit par pc=%04x\n",
+                      printf("    [T] at mpya (0x7947): T=%04x (%u), last written by pc=%04x\n",
                              dsp->t, dsp->t, tpc); tn++; } }
                 if (!env_probe_t && pc >= 0x7940 && pc <= 0x795c && nlog < 60) {
                     printf("    [toa] pc=%04x A=%010llx B=%010llx T=%04x 3fb4=%04x AR4=%04x\n",
@@ -2458,17 +2458,17 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
     }
     {   /* [2026-09-18] Raw dump of the program words around the soft-bit writer,
          * to read the ADDRESS COMPUTATION of both passes. */
-        printf("  mots programme 0x8378-0x8396 (l'ecrivain 0x838d qui met 142 zeros) :\n");
+        printf("  program words 0x8378-0x8396 (the writer 0x838d that puts 142 zeros):\n");
         for (uint16_t a = 0x8378; a <= 0x8396; a++)
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x8378) % 8 == 7) ? "\n" : "");
-        printf("\n  mots programme 0x81c8-0x81e0 (les ecrivains des 142 valeurs) :\n");
+        printf("\n  program words 0x81c8-0x81e0 (the writers of the 142 values):\n");
         for (uint16_t a = 0x81c8; a <= 0x81e0; a++)
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x81c8) % 8 == 7) ? "\n" : "");
         printf("\n");
-        printf("  mots programme 0x84a0-0x84d8 (correlateur de midambule) :\n");
+        printf("  program words 0x84a0-0x84d8 (midamble correlator):\n");
         for (uint16_t a = 0x84a0; a <= 0x84d8; a++)
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x84a0) % 8 == 7) ? "\n" : "");
-        printf("\n  mots programme 0x7cb0-0x7cc0 (site qui remet a zero) :\n");
+        printf("\n  program words 0x7cb0-0x7cc0 (site that resets to zero):\n");
         for (uint16_t a = 0x7cb0; a <= 0x7cc0; a++)
             printf("    %04x: %04x%s", a, dsp->prog[a], ((a - 0x7cb0) % 8 == 7) ? "\n" : "");
         printf("\n");
@@ -2476,11 +2476,11 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
     { const char *e = calypso_getenv("REJEU_OPCODES_TOUS");
       if (e && *e) { FILE *fo = fopen(e, "w");
           if (fo) { for (unsigned o = 0; o < 65536; o++) if (g_op_tous[o]) fprintf(fo, "%04x %lu\n", o, g_op_tous[o]);
-                    fclose(fo); printf("  opcodes executes ecrits dans %s\n", e); } } }
-    printf("\n─── bilan rejeu (deterministe) ───\n");
+                    fclose(fo); printf("  executed opcodes written to %s\n", e); } } }
+    printf("\n─── replay summary (deterministic) ───\n");
     {
-        printf("  instructions DSP executees : %lu\n", insn_total);
-        printf("  histogramme des PC (plages de 1024 mots, non vides) :\n");
+        printf("  DSP instructions executed : %lu\n", insn_total);
+        printf("  PC histogram (1024-word ranges, non-empty):\n");
         for (int b = 0; b < 64; b++)
             if (histo_pc[b])
                 printf("      0x%04x-0x%04x : %10lu  (%4.1f%%)\n",
@@ -2489,8 +2489,8 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
     }
     if (vu_sb && vu_hors) {
         int n = 0;
-        printf("  opcodes executes UNIQUEMENT par le demodulateur SB (suspects d'ISA,\n"
-               "  jamais valides par le chemin FB qui, lui, fonctionne) :\n    ");
+        printf("  opcodes executed ONLY by the SB demodulator (ISA suspects,\n"
+               "  never validated by the FB path, which does work):\n    ");
         int fam[256] = {0}, famt[256] = {0};
         for (int o = 0; o < 65536; o++) {
             if (vu_sb[o]) famt[o >> 8]++;
@@ -2498,9 +2498,9 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
         }
         printf("\n");
         for (int f = 0; f < 256; f++)
-            if (fam[f]) printf("    famille %02x.. : %3d opcodes exclusifs SB / %3d executes en SB\n",
+            if (fam[f]) printf("    family %02x..: %3d SB-only opcodes / %3d executed in SB\n",
                                f, fam[f], famt[f]);
-        printf("    (%d opcodes distincts exclusifs au demodulateur SB)\n", n);
+        printf("    (%d distinct opcodes exclusive to the SB demodulator)\n", n);
     }
     /* [2026-09-19] WHERE DOES 0x01dbf46a COME FROM? The same word is returned by
    * the synthetic fixture, by the real capture in replay and by the bridge: three
@@ -2509,13 +2509,13 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
   if (calypso_getenv("REJEU_CHERCHER_MOT")) {
       unsigned long v = strtoul(calypso_getenv("REJEU_CHERCHER_MOT"), NULL, 0);
       uint16_t lo = (uint16_t)(v & 0xffff), hi = (uint16_t)(v >> 16);
-      printf("  recherche de 0x%04x%04x (lo=%04x hi=%04x) :\n", hi, lo, lo, hi);
+      printf("  search for 0x%04x%04x (lo=%04x hi=%04x):\n", hi, lo, lo, hi);
       int n = 0;
       for (unsigned a = 0; a + 1 < 0x4000; a++) {
           if (dsp->data[a] == lo && dsp->data[a+1] == hi && n < 12) {
-              printf("    data[0x%04x] = %04x %04x   (lo puis hi)\n", a, lo, hi); n++; }
+              printf("    data[0x%04x] = %04x %04x   (lo then hi)\n", a, lo, hi); n++; }
           if (dsp->data[a] == hi && dsp->data[a+1] == lo && n < 12) {
-              printf("    data[0x%04x] = %04x %04x   (hi puis lo)\n", a, hi, lo); n++; }
+              printf("    data[0x%04x] = %04x %04x   (hi then lo)\n", a, hi, lo); n++; }
       }
       for (unsigned a = 0; a + 1 < 0x10000; a++) {
           if (dsp->prog[a] == lo && dsp->prog[a+1] == hi && n < 24) {
@@ -2523,23 +2523,23 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
       }
       int nlo = 0, nhi = 0;
       for (unsigned a = 0; a < 0x4000; a++) { if (dsp->data[a]==lo) nlo++; if (dsp->data[a]==hi) nhi++; }
-      printf("    occurrences isolees en data : lo(%04x) x%d, hi(%04x) x%d\n", lo, nlo, hi, nhi);
-      if (!n) printf("    motif absent de la memoire : le mot est CALCULE, pas stocke\n");
+      printf("    isolated occurrences in data: lo(%04x) x%d, hi(%04x) x%d\n", lo, nlo, hi, nhi);
+      if (!n) printf("    pattern absent from memory: the word is COMPUTED, not stored\n");
   }
   if (calypso_getenv("REJEU_OPCODES")) {
-      printf("  %lu decodages\n", g_n_dec);
-      printf("  opcodes de l'EGALISEUR (0x8400-0x84ff), par decodage :\n");
+      printf("  %lu decodes\n", g_n_dec);
+      printf("  EQUALIZER opcodes (0x8400-0x84ff), per decode:\n");
       for (int rang = 0; rang < 16; rang++) {
           unsigned best = 0; unsigned long bv = 0;
           for (unsigned i = 0; i < 65536; i++) if (g_op_eq[i] > bv) { bv = g_op_eq[i]; best = i; }
           if (!bv) break;
           double q = g_n_dec ? (double)bv / g_n_dec : 0;
           printf("    op=%04x  %8lu   /dec = %8.2f %s\n", best, bv, q,
-                 (g_n_dec && bv % g_n_dec == 0) ? "  (entier)" : "  <<< NON ENTIER");
+                 (g_n_dec && bv % g_n_dec == 0) ? "  (integer)" : "  <<< NOT INTEGER");
           g_op_eq[best] = 0;
       }
       printf("\n");
-      printf("  opcodes du DECODEUR (0x9800-0x9bff) :\n");
+      printf("  DECODER opcodes (0x9800-0x9bff):\n");
       { unsigned long st_trn = 0, cmps = 0;
         for (unsigned i = 0; i < 65536; i++) {
             if ((i & 0xFF00) == 0x8D00) st_trn += g_op_dec[i];
@@ -2550,47 +2550,47 @@ int rejouer(C54xState *d, uint16_t *api_ram, long trames, long insns,
           unsigned best = 0; unsigned long bv = 0;
           for (unsigned i = 0; i < 65536; i++) if (g_op_dec[i] > bv) { bv = g_op_dec[i]; best = i; }
           if (!bv) break;
-          printf("    op=%04x  %8lu fois\n", best, bv);
+          printf("    op=%04x  %8lu times\n", best, bv);
           g_op_dec[best] = 0;
       }
-      printf("  opcodes du demod SB, par nombre de passages :\n");
+      printf("  SB demod opcodes, by number of passes:\n");
       for (int rang = 0; rang < 26; rang++) {
           unsigned best = 0; unsigned long bv = 0;
           for (unsigned i = 0; i < 65536; i++) if (g_op_n[i] > bv) { bv = g_op_n[i]; best = i; }
           if (!bv) break;
-          printf("    op=%04x  %8lu fois   vu en pc=%04x\n", best, bv, g_op_pc[best]);
+          printf("    op=%04x  %8lu times   seen at pc=%04x\n", best, bv, g_op_pc[best]);
           g_op_n[best] = 0;
       }
   }
-  printf("  division 16 pas : rpt(7d1c)=%lu subc(7d1d)=%lu quotient(7d1e)=%lu mpy(81e4)=%lu\n",
+  printf("  16-step division: rpt(7d1c)=%lu subc(7d1d)=%lu quotient(7d1e)=%lu mpy(81e4)=%lu\n",
          hit_7d1c, hit_7d1d, hit_7d1e, hit_81e4);
-  printf("  sites FIRS du SB : 0x8478=%lu  0x8492(rpt)=%lu  0x8493=%lu  0x8497(sth B->softs)=%lu\n",
+  printf("  SB FIRS sites: 0x8478=%lu  0x8492(rpt)=%lu  0x8493=%lu  0x8497(sth B->softs)=%lu\n",
          hit_8478, hit_8492, hit_8493, hit_8497);
-  printf("  trames jouees      : %u\n", fn_cur + 1);
-    printf("  chaine SB (pas-a-pas) : job b219=%lu  fcall 7a16=%lu  demod 7c31=%lu  corr 84a1=%lu  decodeur 9841=%lu  | corr FB 770a=%lu\n",
+  printf("  frames played      : %u\n", fn_cur + 1);
+    printf("  SB chain (step by step): job b219=%lu  fcall 7a16=%lu  demod 7c31=%lu  corr 84a1=%lu  decoder 9841=%lu  | corr FB 770a=%lu\n",
            hit_b219, hit_7a16, hit_7c31, hit_84a1, hit_9841, hit_770a);
-    printf("  FB acceptes (ARM)  : %d\n", n_fb_ok);
-    printf("  SB tentees / CRC KO: %d / %d\n", n_sb_try, n_sb_crcfail);
-    printf("  CMPS (0x8E/0x8F) : %ld fois dans le demod SB, %ld hors | famille 0xE0-0xE3 en SB : %ld | ST TRN : %ld\n",
+    printf("  FB accepted (ARM)  : %d\n", n_fb_ok);
+    printf("  SB tried / CRC KO : %d / %d\n", n_sb_try, n_sb_crcfail);
+    printf("  CMPS (0x8E/0x8F) : %ld times in the SB demod, %ld outside | family 0xE0-0xE3 in SB: %ld | ST TRN: %ld\n",
            n_cmps_sb, n_cmps_hors, n_e0_sb, n_sttrn_sb);
     {
-        printf("  XC (0xFD/0xFF) par region de PC :");
+        printf("  XC (0xFD/0xFF) by PC region:");
         for (int b = 0; b < 64; b++) if (n_xc_reg[b]) printf(" 0x%04x=%ld", b << 10, n_xc_reg[b]);
         printf("\n");
-        printf("  CMPS (0x8E/0x8F) par region de PC :");
+        printf("  CMPS (0x8E/0x8F) by PC region:");
         for (int b = 0; b < 64; b++)
             if (n_cmps_reg[b]) printf(" 0x%04x=%ld", b << 10, n_cmps_reg[b]);
         printf("\n");
     }
-    printf("      detail : FIRS(E0)=%ld  LMS(E1)=%ld  SQDST(E2)=%ld  ABDST(E3)=%ld"
-           "   <- inertes si CALYPSO_ISA_E0_FAM=1\n",
+    printf("      detail: FIRS(E0)=%ld  LMS(E1)=%ld  SQDST(E2)=%ld  ABDST(E3)=%ld"
+           "   <- inert if CALYPSO_ISA_E0_FAM=1\n",
            n_e0x_sb[0], n_e0x_sb[1], n_e0x_sb[2], n_e0x_sb[3]);
-    printf("  erreurs DSP signalees: %d, dont erreur 8 (anneau DMA): %d\n", n_err_dsp, n_err8);
-    printf("  CRC OK: %d, dont VRAIES (BSIC injecte + T3 valide + FN = trame): %d%s\n",
+    printf("  DSP errors reported: %d, of which error 8 (DMA ring): %d\n", n_err_dsp, n_err8);
+    printf("  CRC OK: %d, of which TRUE (injected BSIC + valid T3 + FN = frame): %d%s\n",
            n_crc_ok, n_sb_vraies,
-           cellule_sch_partout ? "   [FN non qualifiable : SCH_PARTOUT actif]" : "");
-    if (verdict == 1) printf("  VERDICT : SB DECODEE  BSIC=%d FN=%u (sb=0x%08x)\n", sb_bsic, sb_fn, sb_word);
-    else if (verdict == -1) printf("  VERDICT : ABANDON (le firmware a renonce)\n");
-    else printf("  VERDICT : AUCUNE SB (ni decodee ni abandon) en %ld trames\n", trames);
+           cellule_sch_partout ? "   [FN cannot be qualified: SCH_PARTOUT active]" : "");
+    if (verdict == 1) printf("  VERDICT: SB DECODED  BSIC=%d FN=%u (sb=0x%08x)\n", sb_bsic, sb_fn, sb_word);
+    else if (verdict == -1) printf("  VERDICT: GAVE UP (the firmware abandoned)\n");
+    else printf("  VERDICT: NO SB (neither decoded nor abandoned) in %ld frames\n", trames);
     return verdict == 1 ? 0 : 1;
 }

@@ -77,35 +77,35 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "usage: %s [options]\n"
-        "  --rom-dir DIR     ou sont calypso_dsp.*.bin   (defaut /opt/GSM)\n"
-        "  --trames N        nombre de trames TDMA       (defaut 100, 4000 avec --rejouer)\n"
-        "  --insns N         instructions par trame      (defaut 2300, 200000 avec --arm)\n"
-        "  --verbeux         une ligne par trame\n"
-        "  --iq MODE         avec --arm : injecter un burst I/Q a chaque trame :\n"
-        "                    fcch (rotation +pi/2/ech.), noise, tone:<dphi>, none,\n"
-        "                    cell[:bsic[:decalage]] = FCCH+SCH+factice GMSK (multitrame 51)\n"
-        "  --amp N           amplitude int16 des echantillons injectes (defaut 30000)\n"
-        "  --rejouer         rejeu DETERMINISTE de l'acquisition FB/SB (sans QEMU)\n"
-        "  --bsic N          BSIC de la cellule injectee en rejeu (defaut 7)\n"
-        "  --arm [SOCKET]    servir l'ARM de QEMU (qosmo, CALYPSO_DSP_EXTERN=1) :\n"
-        "                    API RAM partagee dans /dev/shm%s, trame verrouillee\n"
-        "                    sur %s\n"
-        "  --plan FICHIER    plusieurs DSP independants a la fois : une tache par\n"
-        "                    ligne (VAR=val ... puis options de c54x_exe), un\n"
-        "                    processus par tache ; '-' = entree standard\n"
-        "  --coeurs N        avec --plan : N taches en parallele (defaut : tous les\n"
-        "                    CPU du masque d'affinite, ou $COEURS), une par CPU\n"
-        "  --sortie DIR      avec --plan : DIR/NNNNN.log (stdout), DIR/NNNNN.err\n"
-        "                    (stderr), DIR/bilan.tsv (defaut c54x_multi)\n"
-        "  --delai S         avec --plan : tuer une tache apres S secondes\n"
-        "  -v .. -vvvvvv     traces du coeur C54x (stderr), par niveau :\n"
-        "                    (rien)  erreurs seulement\n"
-        "                    -v      + avertissements\n"
-        "                    -vv     + cycle de vie : boot, reset, gates ACTIF/INACTIVE\n"
-        "                    -vvv    + taches, API RAM, interruptions, chemins FB/SB\n"
-        "                    -vvvv   + sondes memoire : WATCH, DUMP, SCAN, MAP, SP-*\n"
-        "                    -vvvvv  + pas a pas : BRANCH-TRACE, LOOPTRACE, TERM, CYCLE\n"
-        "                    -vvvvvv tout, stderr brut\n",
+        "  --rom-dir DIR     where calypso_dsp.*.bin are (default /opt/GSM)\n"
+        "  --trames N        number of TDMA frames       (default 100, 4000 with --rejouer)\n"
+        "  --insns N         instructions per frame      (default 2300, 200000 with --arm)\n"
+        "  --verbeux         one line per frame\n"
+        "  --iq MODE         with --arm: inject an I/Q burst every frame:\n"
+        "                    fcch (rotation +pi/2/sample), noise, tone:<dphi>, none,\n"
+        "                    cell[:bsic[:offset]] = FCCH+SCH+dummy GMSK (51-multiframe)\n"
+        "  --amp N           int16 amplitude of the injected samples (default 30000)\n"
+        "  --rejouer         DETERMINISTIC replay of the FB/SB acquisition (no QEMU)\n"
+        "  --bsic N          BSIC of the cell injected in replay (default 7)\n"
+        "  --arm [SOCKET]    serve the QEMU ARM (qosmo, CALYPSO_DSP_EXTERN=1):\n"
+        "                    API RAM shared in /dev/shm%s, frame locked\n"
+        "                    on %s\n"
+        "  --plan FILE       several independent DSPs at once: one task per\n"
+        "                    line (VAR=val ... then c54x_exe options), one\n"
+        "                    process per task; '-' = standard input\n"
+        "  --coeurs N        with --plan: N tasks in parallel (default: all the\n"
+        "                    CPUs of the affinity mask, or $COEURS), one per CPU\n"
+        "  --sortie DIR      with --plan: DIR/NNNNN.log (stdout), DIR/NNNNN.err\n"
+        "                    (stderr), DIR/bilan.tsv (default c54x_multi)\n"
+        "  --delai S         with --plan: kill a task after S seconds\n"
+        "  -v .. -vvvvvv     C54x core traces (stderr), by level:\n"
+        "                    (none)  errors only\n"
+        "                    -v      + warnings\n"
+        "                    -vv     + life cycle: boot, reset, gates ACTIF/INACTIVE\n"
+        "                    -vvv    + tasks, API RAM, interrupts, FB/SB paths\n"
+        "                    -vvvv   + memory probes: WATCH, DUMP, SCAN, MAP, SP-*\n"
+        "                    -vvvvv  + single-step: BRANCH-TRACE, LOOPTRACE, TERM, CYCLE\n"
+        "                    -vvvvvv everything, raw stderr\n",
         prog, CALYPSO_PONT_SHM, CALYPSO_PONT_SOCK);
 }
 
@@ -151,7 +151,7 @@ int main(int argc, char **argv)
         if (!coeurs && getenv("COEURS")) coeurs = atoi(getenv("COEURS"));
         return multi_executer(plan, coeurs, sortie, delai);
     }
-    if (coeurs) { fprintf(stderr, "--coeurs sans --plan\n"); return 2; }
+    if (coeurs) { fprintf(stderr, "--coeurs without --plan\n"); return 2; }
     if (insns < 0) {
         /* [2026-09-20] 200000 under --arm: the FB search over whole 1250-symbol
          * frames costs the ROM 24-36k instructions per frame, and a frame cut
@@ -200,7 +200,7 @@ int main(int argc, char **argv)
         api_ram = &dsp->data[C54X_API_BASE];
     } else {
         dsp = c54x_init();
-        if (!dsp) { fprintf(stderr, "c54x_init a echoue\n"); return 1; }
+        if (!dsp) { fprintf(stderr, "c54x_init failed\n"); return 1; }
     }
     c54x_set_api_ram(dsp, api_ram);
 
@@ -210,19 +210,19 @@ int main(int argc, char **argv)
         snprintf(chemin, sizeof(chemin), "%s/calypso_dsp.%s.bin", rom_dir, ROMS[i].suffixe);
         int n = c54x_load_section(dsp, chemin, ROMS[i].adresse, ROMS[i].programme);
         if (n < 0) {
-            fprintf(stderr, "ROM manquante : %s\n", chemin);
+            fprintf(stderr, "ROM missing: %s\n", chemin);
             return 1;
         }
-        printf("  %-6s %-5s 0x%05x  %6d mots\n", ROMS[i].suffixe,
+        printf("  %-6s %-5s 0x%05x  %6d words\n", ROMS[i].suffixe,
                ROMS[i].programme ? "prog" : "data", ROMS[i].adresse, n);
         charges++;
     }
     { char chemin[512];
       snprintf(chemin, sizeof(chemin), "%s/calypso_dsp.Registers.bin", rom_dir);
       int n = c54x_load_registers(dsp, chemin);
-      printf("  %-6s %-5s %-7s  %6d mots\n", "Regs", "mmr", "", n); }
+      printf("  %-6s %-5s %-7s  %6d words\n", "Regs", "mmr", "", n); }
 
-    printf("%d sections chargees, reset...\n", charges);
+    printf("%d sections loaded, reset...\n", charges);
     c54x_reset(dsp);
 
     if (rejeu) {
@@ -254,7 +254,7 @@ int main(int argc, char **argv)
     uint16_t sch3_premier = 0; bool sch3_varie = false, sch3_vu = false;
 
     if (verbeux) {
-        printf("\n  trame    d_fb_det   a_sch[0]  a_sch[1]  a_sch[2]  a_sch[3]\n");
+        printf("\n  frame    d_fb_det   a_sch[0]  a_sch[1]  a_sch[2]  a_sch[3]\n");
     }
     for (long t = 0; t < trames; t++) {
         g_c54x_exe_fn = (uint32_t)t;
@@ -280,21 +280,21 @@ int main(int argc, char **argv)
     }
 
     verbosite_retirer();
-    printf("\n─── bilan sur %ld trames ───\n", trames);
-    printf("  AUCUN burst injecte : le DSP tourne sur une API RAM vierge, sans\n"
-           "  ARM ni TPU. Les valeurs ci-dessous disent que la mask-ROM EXECUTE,\n"
-           "  pas encore qu'elle decode. Injecter des bursts est l'etape suivante.\n\n");
-    printf("  d_fb_det leve      : %u transition(s) 0 -> 1\n", fb_vus);
-    printf("  a_sch change       : %u fois\n", sch_ecrits);
+    printf("\n─── summary over %ld frames ───\n", trames);
+    printf("  NO burst injected: the DSP runs on a blank API RAM, with no\n"
+           "  ARM and no TPU. The values below say the mask-ROM EXECUTES,\n"
+           "  not yet that it decodes. Injecting bursts is the next step.\n\n");
+    printf("  d_fb_det raised    : %u transition(s) 0 -> 1\n", fb_vus);
+    printf("  a_sch changed      : %u times\n", sch_ecrits);
     if (sch3_vu) {
         printf("  a_sch[3]           : 0x%04x%s\n", sch3_premier,
-               sch3_varie ? " puis VARIE" : " CONSTANT sur toutes les ecritures");
+               sch3_varie ? " then VARIES" : " CONSTANT across all writes");
         if (!sch3_varie) {
-            printf("\n  ^ c'est le symptome du README : une sortie qui ne depend\n"
-                   "    pas de l'entree. Ici l'entree est vide, donc attendu.\n");
+            printf("\n  ^ this is the README symptom: an output that does not depend\n"
+                   "    on the input. Here the input is empty, so expected.\n");
         }
     } else {
-        printf("  a_sch              : jamais ecrit (la tache SB n'a pas tourne)\n");
+        printf("  a_sch              : never written (the SB task did not run)\n");
     }
     verbosite_bilan(stdout);
     return 0;

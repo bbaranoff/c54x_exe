@@ -28,7 +28,7 @@ EXE="$HERE/c54x_exe"
 OUT="${OUT:-$HERE/balayage.tsv}"
 TRAMES="${TRAMES:-600}"
 COEURS="${COEURS:-0}"
-[ -x "$EXE" ] || { echo "binaire absent : $EXE" >&2; exit 1; }
+[ -x "$EXE" ] || { echo "binary missing: $EXE" >&2; exit 1; }
 
 if [ "${1:-}" = "--rapide" ]; then
     DECALAGES="-1 0";           UNIQUES="0 1"
@@ -56,8 +56,8 @@ for d in $MARGES; do for e in $RXAVANT; do for f in $LENS; do
            "$a" "$b" "$c" "$d" "$e" "$f" "$TRAMES"
 done; done; done; done; done; done > "$TRAV/plan"
 
-printf 'decalage\tunique\tphase\tmarge\trx_avant\tdaram_len\tvraies\tmots_distincts\tcrc_ok\tsb_tentees\n' > "$OUT"
-echo "[balayage] $total combinaisons, $TRAMES trames chacune -> $OUT"
+printf 'offset\tunique\tphase\tmargin\trx_before\tdaram_len\ttrue_sbs\tdistinct_words\tcrc_ok\tsb_tried\n' > "$OUT"
+echo "[balayage] $total combinations, $TRAMES frames each -> $OUT"
 "$EXE" --plan "$TRAV/plan" --coeurs "$COEURS" --delai 180 --sortie "$TRAV/journaux" | sed 's/^\[multi\]/[balayage]/'
 n=0
 for a in $DECALAGES; do
@@ -68,13 +68,13 @@ for a in $DECALAGES; do
      for f in $LENS; do
       n=$((n+1))
       res=$(cat "$TRAV/journaux/$(printf '%05d' "$n").log" 2>/dev/null)
-      vraies=$(printf '%s' "$res" | sed -n 's/.*VRAIES ([^)]*): \([0-9]*\).*/\1/p' | head -1)
+      vraies=$(printf '%s' "$res" | sed -n 's/.*\(VRAIES\|TRUE\) ([^)]*): \([0-9]*\).*/\2/p' | head -1)
       crc=$(   printf '%s' "$res" | sed -n 's/.*CRC OK: \([0-9]*\).*/\1/p' | head -1)
-      tent=$(  printf '%s' "$res" | sed -n 's#.*SB tentees / CRC KO: \([0-9]*\) /.*#\1#p' | head -1)
+      tent=$(  printf '%s' "$res" | sed -n 's#.*SB \(tentees\|tried\) / CRC KO *: \([0-9]*\) /.*#\2#p' | head -1)
       mots=$(  printf '%s' "$res" | grep -oE '^  SB[0-9] fn=[0-9]+ : sb=0x[0-9a-f]+' | grep -oE '0x[0-9a-f]+' | sort -u | wc -l)
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
              "$a" "$b" "$c" "$d" "$e" "$f" "${vraies:-0}" "${mots:-0}" "${crc:-0}" "${tent:-0}" >> "$OUT"
      done; done; done; done; done; done
-echo "[balayage] termine, $n essais."
-echo "--- 15 meilleures combinaisons (vraies, puis mots distincts) ---"
+echo "[balayage] done, $n trials."
+echo "--- 15 best combinations (true SBs, then distinct words) ---"
 { head -1 "$OUT"; tail -n +2 "$OUT" | sort -t$'\t' -k7,7nr -k8,8nr | head -15; } | column -t -s$'\t'

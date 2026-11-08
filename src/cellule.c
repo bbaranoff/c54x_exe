@@ -125,7 +125,7 @@ static const uint8_t *cellule_l2(int tc)
             int n = 0, ok = 0;
             for (int i = 0; i < 1024; i++) if (f[i].mask) { n++; if (i == arfcn) ok = 1; }
             if (!ok || n != 1)
-                printf("cellule : SI1 cell channel description FAUSSE (%d ARFCN decodes, %d attendu %s)\n",
+                printf("cell: SI1 cell channel description WRONG (%d ARFCN decoded, %d expected %s)\n",
                        n, arfcn, ok ? "present" : "ABSENT");
         }
 
@@ -174,7 +174,7 @@ static const uint8_t *cellule_l2(int tc)
         static const uint8_t vide[] = { 0x15, 0x06, 0x21, 0x00, 0x01, 0xf0 };
         memcpy(pag, vide, sizeof vide);
 
-        printf("cellule : BCCH SI1-4 MCC=%03u MNC=%02u LAC=%u CI=%u ARFCN=%d, CCCH = paging vide\n",
+        printf("cell: BCCH SI1-4 MCC=%03u MNC=%02u LAC=%u CI=%u ARFCN=%d, CCCH = empty paging\n",
                lai.plmn.mcc, lai.plmn.mnc, lai.lac, ci, arfcn);
     }
     if (tc < 0) return pag;

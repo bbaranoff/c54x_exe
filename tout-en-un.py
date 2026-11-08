@@ -32,7 +32,7 @@ EXT = os.environ.get("EXT", "").split()             # empty: every text file
 SEUIL = int(os.environ.get("SEUIL", "3"))
 FORMAT = os.environ.get("FORMAT", "qmd")           # qmd (Quarto) or md
 SORTIE = os.environ.get("SORTIE") or "/root/c54x_exe-%s.%s" % (time.strftime("%Y%m%d-%H%M%S"), FORMAT)
-AUTEUR = os.environ.get("AUTEUR", "Banc GSM émulé — banc-max")
+AUTEUR = os.environ.get("AUTEUR", "Emulated GSM bench — banc-max")
 IGNORES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv", "venv",
            "rom", "roms",                              # ROM dumps (Calypso DSP): not ours, not in the bundle
            "osmo-operator-qmd",                        # the repository compiled by another tool: all duplicated
@@ -45,7 +45,7 @@ BINAIRES = set("png jpg jpeg gif bmp ico webp pdf zip gz tgz bz2 xz 7z tar bin e
 DSP_DUMP = re.compile(r"(^calypso_dsp.*\.txt|^dsp-rom-.*\.txt|\.dis)$")   # DSP ROM dumps (not ours, megabytes of hex)
 SAUVEGARDES = re.compile(r"(~|\.orig|\.rej|\.swp|\.bak(-\w+)?)$")
 TITRE_SORTIE = (b"generator: tout-en-un.py",                         # a previous output of this script
-                "title: \"Banc GSM émulé — dossier de run\"".encode())
+                "title: \"Banc GSM émulé — dossier de run\"".encode())   # (title of older outputs, kept to skip them)
 HTML_SANS_COULEUR = 2_500_000                      # bytes: larger bundles get no syntax highlighting in html
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TELNET = re.compile(rb"\xff[\xfb-\xfe].|\xff.")           # telnet negotiation (IAC) of VTY captures
@@ -55,18 +55,18 @@ NUM = re.compile(r"\d+")
 # measures the whole code block before splitting it), unwrapped code lines,
 # Mermaid diagrams wider than the page, missing glyphs.
 PDF_PREAMBULE = "".join("        %s\n" % l for l in r"""
-% Code : police reduite, retour a la ligne (y compris dans les mots longs)
+% Code: smaller font, line wrapping (including inside long words)
 \usepackage{fvextra}
 \fvset{fontsize=\small,breaklines,breakanywhere}
 \RecustomVerbatimEnvironment{verbatim}{Verbatim}{fontsize=\small,breaklines,breakanywhere}
-% Images (diagrammes Mermaid) : jamais plus larges que la ligne ni plus hautes que la page
+% Images (Mermaid diagrams): never wider than the line nor taller than the page
 \usepackage{adjustbox}
 \usepackage{letltxmacro}
 \LetLtxMacro\ORIGincludegraphics\includegraphics
 \renewcommand{\includegraphics}[2][]{\adjustimage{#1,max width=\linewidth,max totalheight=.85\textheight}{#2}}
-% Sans cadre : framed/snugshade mesure tout le bloc et plante ("Dimension too large")
+% No frame: framed/snugshade measures the whole block and fails ("Dimension too large")
 \renewenvironment{Shaded}{\medskip}{\medskip}
-% Glyphes absents de Latin Modern Roman -> DejaVu Sans
+% Glyphs missing from Latin Modern Roman -> DejaVu Sans
 \usepackage{newunicodechar}
 \newfontfamily\fallbackfont{DejaVu Sans}
 \newunicodechar{↔}{{\fallbackfont ↔}}
@@ -233,15 +233,15 @@ def synthese(tous):
         for l in txt.splitlines():
             l = re.sub(r"\s+", " ", l.strip())
             if l.startswith("ELEMENT MAX"):
-                lignes.append((0, "| %s | échelle | %s |" % (run, l)))
+                lignes.append((0, "| %s | scale | %s |" % (run, l)))
             elif l.startswith("bilan :"):
-                lignes.append((2, "| %s | couverture | %s |" % (run, l[8:])))
+                lignes.append((2, "| %s | coverage | %s |" % (run, l[8:])))
             elif l.startswith("couverture couche 1"):
                 lignes.append((1, "| %s | mode, date | %s |" % (run, l.split("—", 1)[-1].strip())))
             else:
                 m = re.match(r"(\d+) (\S+) (ECHEC|SAUTE) ?(.*)", l)
                 if m:
-                    lignes.append((3, "| %s | barreau %s %s | %s %s |" % (run, m.group(1), m.group(2), m.group(3), m.group(4))))
+                    lignes.append((3, "| %s | rung %s %s | %s %s |" % (run, m.group(1), m.group(2), m.group(3), m.group(4))))
     return [l for _, l in sorted(lignes, key=lambda x: x[0])]
 
 
@@ -395,13 +395,13 @@ def main():
     total_in = total_out = 0
     # Order: test results (.txt .md .mmd: verdicts, coverage, reports, grafcets) first,
     # the bench files (sources, scripts, configs...) next, the .log files last
-    CATEGORIES = (("Verdict et couverture", ()), ("Resultats des tests", ("txt", "md", "mmd", "tsv", "csv")),
-                  ("Fichiers", None), ("Logs", ("log",)))          # Fichiers: everything else
+    CATEGORIES = (("Verdict and coverage", ()), ("Test results", ("txt", "md", "mmd", "tsv", "csv")),
+                  ("Files", None), ("Logs", ("log",)))          # Files: everything else
     EN_TETE = ("verdict.txt", "couverture.txt")     # at the very top, in this order
     tous = []
     for d in dossiers:
         if not os.path.isdir(d):
-            table.append("| (absent) %s | | | | |" % d)
+            table.append("| (missing) %s | | | | |" % d)
             continue
         tous.extend(fichiers(d))
     def rang(f):
@@ -411,7 +411,7 @@ def main():
         for i, (_, exts) in enumerate(CATEGORIES):
             if exts and e in exts:
                 return i
-        return 2                                  # Fichiers
+        return 2                                  # Files
     categorie_courante = None
     def cle(f):
         r = rang(f)
@@ -419,13 +419,13 @@ def main():
     for f in sorted(tous, key=cle):
         if rang(f) != categorie_courante:
             categorie_courante = rang(f)
-            nom = CATEGORIES[categorie_courante][0] if categorie_courante < len(CATEGORIES) else "Autres"
+            nom = CATEGORIES[categorie_courante][0] if categorie_courante < len(CATEGORIES) else "Other"
             sections.append("## %s\n" % nom)
         if True:
             try:
                 brut = open(f, "rb").read()
             except OSError as e:
-                table.append("| %s | | | | illisible : %s |" % (f, e))
+                table.append("| %s | | | | unreadable: %s |" % (f, e))
                 continue
             texte = ANSI.sub("", TELNET.sub(b"", brut).decode("utf-8", "replace")).replace("\r", "")
             texte = CONTROLE.sub("", texte)
@@ -438,7 +438,7 @@ def main():
             h = hashlib.sha1(texte.encode()).hexdigest()
             total_in += len(brut)
             if h in vus:
-                sections.append("### %s\n\nidentique à %s\n" % (reference(f), reference(vus[h])))
+                sections.append("### %s\n\nidentical to %s\n" % (reference(f), reference(vus[h])))
                 continue
             vus[h] = f
             ext = extension(os.path.basename(f))
@@ -447,18 +447,18 @@ def main():
                 # are included as they are (headings demoted under the file title,
                 # mermaid blocks rendered, {r}/{python} blocks neutralised). No compaction.
                 total_out += len(texte) + 1
-                sections.append("### %s\n\n%d octets, %d lignes\n\n%s\n"
+                sections.append("### %s\n\n%d bytes, %d lines\n\n%s\n"
                                 % (reference(f), len(brut), len(lignes), rendre_md(lignes, f) if ext in ("md", "qmd") else rendre_mmd(lignes)))
                 continue
             compact, groupes = compacter(lignes)
             total_out += sum(len(l) + 1 for l in compact)
-            note = "%d groupes compactés" % groupes if groupes else ""
+            note = "%d groups compacted" % groupes if groupes else ""
             # fence longer than any run of ` in the content: a ``` inside a .py
             # or a .md cannot close the block (pandoc would read what follows
             # as Markdown: "Could not fetch resource")
             plus_long = max((len(m) for m in re.findall(r"`+", "\n".join(compact))), default=0)
             cloture = "`" * max(3, plus_long + 1)
-            sections.append("### %s\n\n%d octets, %d lignes → %d lignes%s\n\n%s%s\n%s\n%s\n"
+            sections.append("### %s\n\n%d bytes, %d lines → %d lines%s\n\n%s%s\n%s\n%s\n"
                             % (reference(f), len(brut), len(lignes), len(compact), (" (%s)" % note) if note else "",
                                cloture, langage(f), "\n".join(compact), cloture))
     runs = sorted({os.path.basename(os.path.dirname(f)) for f in tous if os.path.basename(f) == "verdict.txt"})
@@ -469,7 +469,7 @@ def main():
         o.write("subtitle: \"%s\"\n" % (", ".join(runs) if runs else ", ".join(dossiers)))
         o.write("author: \"%s\"\n" % AUTEUR)
         o.write("date: \"%s\"\n" % time.strftime("%Y-%m-%d %H:%M"))
-        o.write("lang: fr\n")
+        o.write("lang: en\n")
         if FORMAT == "qmd":
             o.write("engine: markdown\n")
             o.write("code-annotations: false\n")  # a "<100>" in a comment is not an annotation     # pandoc only: knitr stops on ```{r} in included reports
@@ -484,36 +484,36 @@ def main():
             if total_out > HTML_SANS_COULEUR:
                 o.write("    highlight-style: none\n")
             o.write("  pdf:\n    toc: true\n    toc-depth: 3\n    number-sections: true\n"
-                    "    shift-heading-level-by: -1\n"      # ## Synthese = section 1, not 0.1
+                    "    shift-heading-level-by: -1\n"      # ## Summary = section 1, not 0.1
                     "    papersize: a4\n    geometry: margin=2cm\n    fontsize: 10pt\n"
                     "    monofont: DejaVu Sans Mono\n"      # box drawing, ✓ ✗ ⟨⟩ ⚠ missing from Latin Modern Mono
                     "    include-in-header:\n      text: |\n" + PDF_PREAMBULE)
         o.write("---\n\n")
-        o.write("## Synthèse\n\n")
-        o.write("| run | élément | valeur |\n|---|---|---|\n")
+        o.write("## Summary\n\n")
+        o.write("| run | item | value |\n|---|---|---|\n")
         lignes_syn = synthese(tous)
-        o.write("\n".join(lignes_syn) + "\n\n" if lignes_syn else "| (pas de verdict.txt) | | |\n\n")
-        o.write("| dossier de run | contenu | |\n|---|---|---|\n")
-        o.write("| Verdict et couverture | échelle des barreaux et tableau de couverture couche 1 | |\n")
-        o.write("| Résultats des tests | captures VTY, diagnostics, rapports pytest, grafcets (.txt .md .mmd) | |\n")
-        o.write("| Fichiers | sources, scripts, configs et docs du banc (tout fichier texte) | |\n")
-        o.write("| Logs | journaux (.log), en dernier | |\n\n")
-        o.write("::: {.callout-note collapse=\"true\"}\n## Méthode\n\n" if FORMAT == "qmd" else "### Méthode\n\n")
-        o.write("Dossiers : %s. Extensions : %s. Entrée %d Ko, sortie %d Ko.\n\n"
-                % (", ".join(dossiers), " ".join(EXT) if EXT else "tous les fichiers texte (hors .git, caches, "
-                   "binaires, sauvegardes, LICENSE et sorties précédentes)", total_in // 1024, total_out // 1024))
-        o.write("Compactage sans perte : fichiers identiques cités une fois ; lignes consécutives identiques "
-                "« ×N » ; lignes ne différant que par des nombres : gabarit avec ⟨k⟩ puis la liste ordonnée "
-                "des valeurs (k-uplets), chaque ligne se reconstruit en remettant les valeurs dans l'ordre. "
-                "Seuls les codes couleur, la négociation telnet des captures VTY et les caractères de commande "
-                "sont retirés ; les lignes de plus de %d caractères sont coupées en morceaux terminés par ↩. Les .md sont inclus tels quels (titres rétrogradés) et les .mmd rendus en "
-                "diagrammes Mermaid, sans compactage.\n" % LIGNE_MAX)
+        o.write("\n".join(lignes_syn) + "\n\n" if lignes_syn else "| (no verdict.txt) | | |\n\n")
+        o.write("| run folder | content | |\n|---|---|---|\n")
+        o.write("| Verdict and coverage | rung scale and layer 1 coverage table | |\n")
+        o.write("| Test results | VTY captures, diagnostics, pytest reports, grafcets (.txt .md .mmd) | |\n")
+        o.write("| Files | bench sources, scripts, configs and docs (every text file) | |\n")
+        o.write("| Logs | logs (.log), last | |\n\n")
+        o.write("::: {.callout-note collapse=\"true\"}\n## Method\n\n" if FORMAT == "qmd" else "### Method\n\n")
+        o.write("Folders: %s. Extensions: %s. Input %d KB, output %d KB.\n\n"
+                % (", ".join(dossiers), " ".join(EXT) if EXT else "every text file (except .git, caches, "
+                   "binaries, backups, LICENSE and previous outputs)", total_in // 1024, total_out // 1024))
+        o.write("Lossless compaction: identical files cited once; identical consecutive lines "
+                "\"×N\"; lines differing only by numbers: a template with ⟨k⟩ then the ordered list "
+                "of values (k-tuples), each line is rebuilt by putting the values back in order. "
+                "Only colour codes, the telnet negotiation of VTY captures and control characters "
+                "are removed; lines longer than %d characters are cut into pieces ending with ↩. The .md files are included as they are (headings demoted) and the .mmd files rendered as "
+                "Mermaid diagrams, without compaction.\n" % LIGNE_MAX)
         o.write(":::\n\n" if FORMAT == "qmd" else "\n")
         for t in table:                      # only missing directories / unreadable files remain
             o.write(t.strip("| ").split(" |")[0] + "\n")
         o.write("\n")
         o.write("\n".join(sections))
-    print("%s : %d fichiers (%d uniques), %d Ko -> %d Ko" % (SORTIE, len(tous), len(vus), total_in // 1024,
+    print("%s: %d files (%d unique), %d KB -> %d KB" % (SORTIE, len(tous), len(vus), total_in // 1024,
                                                             os.path.getsize(SORTIE) // 1024))
 
 
