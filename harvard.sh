@@ -575,7 +575,7 @@ cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp]: first the ARM under gd
               cmd_gdb demo "$@"; arm_tourne; demo_pause; echo
               demo_dsp
               echo; gras "===== FIN DE LA DEMO : ARM en marche, DSP relance, rien de casse ====="; demo_pause ;;
-        *) echo "usage : demo [tout | dsp | arm [etat|trame|hello|go]]"; return 1 ;;
+        *) echo "usage : demo [tout | dsp | arm [etat|trame|hello|go|dit <texte>]]"; return 1 ;;
     esac
 }
 
@@ -730,6 +730,7 @@ aide() {
     stop              pause du DSP vivant + adresses   demo [tout|arm|dsp]  la main sur l'ARM (gdb) puis le DSP
     go                reprise                          gdb <cmd>   une commande du panneau (fn, l1, help_osmo)
     dsp               instantane sans arreter                      (demo arm etat|trame|hello|go : etape par etape)
+                                                   dit <texte>  le firmware l'ecrit (puts -> osmocon.log)
     sb                DEAD BEEF dans a_sch (SB)        si3 [id]    relabellise le cell_id de SI3 (defaut 777)
     lac [id]          force le LAC du SI3 EN VIF (shm, sans relance ; course avec le DSP)
     ombre [id|off]    relance le banc, LAC du SI3 force a la SOURCE (deterministe ; mobile.log CGI 3e groupe)
@@ -754,6 +755,7 @@ dispatch() { # dispatch <command line>
         cours) cmd_cours "$@" ;;  arret) cmd_arret "$@" ;;
         stop) cmd_stop ;;         go) cmd_go ;;             dsp) cmd_dsp ;;
         demo) cmd_demo "$@" ;;    gdb) cmd_gdb "$@" ;;
+        dit) [ $# -ge 1 ] || { echo "usage : dit <texte>   (ex : dit hello 40c3)"; return 1; }; cmd_demo arm dit "$@" ;;
         sb|demo_sb) demo_sb ;;   si3|demo_si3) demo_si3 "$@" ;;   lac|demo_lac) demo_lac "$@" ;;
         demo_dsp) demo_dsp ;;    demo_arm) cmd_gdb demo "$@" ;;
         journal) cmd_journal "$@" ;; log) cmd_log "$@" ;;
@@ -827,7 +829,7 @@ FIN
             14) cmd_dsp; pause ;;
             15) demander "adresse, nom, page W0|W1|R0|R1, ou noms <motif>" "W0"; a=$REP; demander "nombre de mots" 8; case $a in noms*) cmd_d_chaud $a ;; *) cmd_d_chaud "$a" "$REP" ;; esac; pause ;;
             16) demander "adresse ou nom" "d_task_d"; a=$REP; demander "mots hex (separes par des espaces)"; cmd_d_chaud_ecrire "$a" $REP; pause ;;
-            17) demander "demo tout | dsp | arm [etat|trame|hello|go]" "tout"; cmd_demo $REP; pause ;;
+            17) demander "demo tout | dsp | arm [etat|trame|hello|go|dit <texte>]" "tout"; cmd_demo $REP; pause ;;
             18) demander "commande gdb (fn, l1, dsp, help_osmo...)" "help_osmo"; cmd_gdb $REP; pause ;;
             19) demander "trames" 200; t=$REP; demander "verbosite (-v .. -vvvvvv, vide = aucune)" ""; cmd_rejeu "$t" $REP; pause ;;
             20) cmd_banc --list; demander "test (nom, --all, ou vide)" ""; [ -n "$REP" ] && { demander "options (--trace N, -v, --insns N...)" ""; o=$REP; cmd_banc $REP $o; }; pause ;;
