@@ -555,13 +555,24 @@ demo_dsp() { # live DSP, WITHOUT restart: forces the SI3 LAC live (shm), CGI pro
         gras "===== FIN DEMO DSP : LAC force en vif. stop/go : harvard sous le compte du banc ====="
     fi
 }
+arm_tourne() { # after the gdb session: does the ARM write its pages for the DSP again? (measured, not assumed)
+    # gdb only lets the ARM go once the command returns: measured here, outside gdb, in the shared API RAM.
+    # W pages = ARM 0xffd00000..0xffd0004f (BASE_API_W_PAGE_0/1, 2 x 20 words) = DSP 0x0800..0x0827.
+    [ -r "$API_SHM" ] || { rouge "  mesure impossible : $API_SHM illisible"; return 1; }
+    sleep 0.5
+    t=$(mktemp); od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.a"; sleep 0.5
+    od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.b"
+    n=$(paste -d' ' "$t.a" "$t.b" | awk '$1 != $2' | wc -l); rm -f "$t" "$t.a" "$t.b"
+    if [ "$n" -gt 0 ]; then echo "  mesure, gdb rendu : $n mots des pages ARM->DSP (0xffd00000, 40 mots) ont change en 0,5 s : l'ARM tourne"
+    else rouge "  mesure, gdb rendu : aucun mot des pages ARM->DSP n'a change en 0,5 s : l'ARM n'ecrit plus"; fi
+}
 cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp]: first the ARM under gdb (hello world from ram), then the live DSP
     quoi=${1:-tout}; [ $# -gt 0 ] && shift
     case $quoi in
         dsp) demo_dsp ;;
-        arm) gras "===== DEMO ARM (firmware layer1 dans QEMU, gdb par le telnet $GDB_TELNET) ====="; cmd_gdb demo "$@" ;;
+        arm) gras "===== DEMO ARM (firmware layer1 dans QEMU, gdb par le telnet $GDB_TELNET) ====="; cmd_gdb demo "$@"; arm_tourne ;;
         tout) gras "===== DEMO ARM D'ABORD (firmware layer1 dans QEMU, gdb par le telnet $GDB_TELNET : hello world from ram) ====="
-              cmd_gdb demo "$@"; demo_pause; echo
+              cmd_gdb demo "$@"; arm_tourne; demo_pause; echo
               demo_dsp
               echo; gras "===== FIN DE LA DEMO : ARM en marche, DSP relance, rien de casse ====="; demo_pause ;;
         *) echo "usage : demo [tout | dsp | arm [etat|trame|hello|go]]"; return 1 ;;
