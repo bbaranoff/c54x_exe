@@ -560,12 +560,17 @@ arm_tourne() { # after the gdb session: does the ARM write its pages for the DSP
     # gdb only lets the ARM go once the command returns: measured here, outside gdb, in the shared API RAM.
     # W pages = ARM 0xffd00000..0xffd0004f (BASE_API_W_PAGE_0/1, 2 x 20 words) = DSP 0x0800..0x0827.
     [ -r "$API_SHM" ] || { rouge "  cannot measure: $API_SHM unreadable"; return 1; }
+    # In idle mode the ARM writes its W pages only on some frames: one 0.5 s window can be quiet (measured on
+    # 2026-11-08: 9, 13, 1, 0, 2 words per window). Up to 6 windows (3 s): running as soon as one shows a change.
     sleep 0.5
-    t=$(mktemp); od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.a"; sleep 0.5
-    od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.b"
-    n=$(paste -d' ' "$t.a" "$t.b" | awk '$1 != $2' | wc -l); rm -f "$t" "$t.a" "$t.b"
-    if [ "$n" -gt 0 ]; then echo "  measured after gdb released: $n words of the ARM->DSP pages (0xffd00000, 40 words) changed in 0.5 s: the ARM is running"
-    else rouge "  measured after gdb released: no word of the ARM->DSP pages changed in 0.5 s: the ARM no longer writes"; fi
+    t=$(mktemp); n=0; k=0
+    while [ "$k" -lt 6 ] && [ "$n" -eq 0 ]; do
+        od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.a"; sleep 0.5
+        od -An -v -tx2 -N80 "$API_SHM" | tr -s ' ' '\n' | grep . > "$t.b"
+        n=$(paste -d' ' "$t.a" "$t.b" | awk '$1 != $2' | wc -l); k=$((k + 1))
+    done; rm -f "$t" "$t.a" "$t.b"
+    if [ "$n" -gt 0 ]; then echo "  measured after gdb released: $n words of the ARM->DSP pages (0xffd00000, 40 words) changed in 0.5 s (window $k of 6): the ARM is running"
+    else rouge "  measured after gdb released: no word of the ARM->DSP pages changed in 6 windows of 0.5 s: the ARM no longer writes"; fi
 }
 cmd_demo() { # demo [tout|arm [etat|trame|hello|go]|dsp]: first the ARM under gdb (hello world from ram), then the live DSP
     quoi=${1:-tout}; [ $# -gt 0 ] && shift
