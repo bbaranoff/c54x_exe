@@ -406,7 +406,8 @@ cmd_go() { # go: resume the running DSP
     case $mode in SIGUSR1*) kill -USR2 $pid; i=0; while [ $i -lt 30 ] && ! grep -q '^ETAT reprise' "$PAUSE_FICHIER" 2>/dev/null; do sleep 0.1; i=$(( i + 1 )); done ;;
                   *) kill -CONT $pid ;; esac
     avant_insn=$(awk '$1=="INSN"{print $2}' "$VIVANT" 2>/dev/null); avant_fn=$(awk '$1=="FN"{print $2}' "$VIVANT" 2>/dev/null)
-    echo "  go: resumed ($mode)"; sleep 0.3
+    case $mode in SIGUSR1*) reprise="SIGUSR2" ;; *) reprise="SIGCONT" ;; esac
+    echo "  go: resumed with $reprise (the pause was $mode)"; sleep 0.3
     vivant_lire $pid "0.3 s after resuming" || return 1
     v() { awk -v k="$1" '$1==k {print $2}' "$VIVANT"; }
     printf '  0.3 s later: fn=%s (+%d frames)  PC=%x:%s idle=%s  insn=%s (+%d)\n' "$(v FN)" $(( $(v FN) - ${avant_fn:-0} )) $(( 0x$(v XPC) )) "$(v PC)" "$(v IDLE)" "$(v INSN)" $(( $(v INSN) - ${avant_insn:-0} ))

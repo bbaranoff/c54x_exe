@@ -19,7 +19,7 @@ whether the run did it in the ROM or on the host (`/opt/GSM/tests/modules/99-cou
 
 ## Known issues
 
-- The ROM flags every downlink speech frame as bad (BFI) although speech is intelligible.
+- The ROM flags some downlink speech frames as bad (BFI): 144 of 3,800 in the verdict run of 8 Nov 2026 (`[a_dd] ... seen=3800 ko=0 bfi=144`); speech is intelligible.
 - SACCH/8 downlink often fails its FIRE check.
 - The SB window is armed rarely enough that synchronisation takes a few tries.
 - Real-time margin in TCH is thin (about 4.2 to 4.6 ms of DSP work per 4.62 ms frame).

@@ -28,6 +28,17 @@ on the FB path). Find them with `git log -G'toa -= 23'` (`-S` misses `cb71b972`)
 | `0x7cbd` | `sub #11236,a` | TOA = index of the retained lag |
 | `0x7a1c` | 64 data words | SB extended training sequence, GSM 05.02 §5.2.5, 64/64 bits |
 
+**TI TCS211 layer 1** (FreeCalypso `fc-magnetite`, hg `8cd8fd15a095` on freecalypso.org, Copyright 2003 Texas Instruments), `src/cs/layer1/`
+| file:line | what |
+|---|---|
+| `include/l1_time.h:150-151` | `SB_MARGIN (23L * 4L) // = 92`, `NB_MARGIN (3L * 4L) // = 12` |
+| `include/l1_time.h:154, 169-170` | `SB_BURST_DURATION // = 580`; `SB_ACQUIS_DURATION // = 796 + DMA delay`, `NB_ACQUIS_DURATION // = 636 + DMA delay` |
+| `include/l1_time.h:201` | `RX_DOWN_TABLE[0]`: "special case: only 1 RX, 151 IQ samples" |
+| `include/l1_time.h:111` | `PROVISION_TIME (66L)`, = OsmocomBB's `DSP_SETUP_TIME` |
+| `cfile/l1_cmplx.c:11016-11018` | `l1s_read_fb`: "the 23 bit guard for next SB receive window", `modif_toa = toa - (SB_MARGIN/4)` |
+| `cfile/l1_cmplx.c:11171-11172` | `l1s_read_sb`: `modif_toa = (toa - (SB_MARGIN/4)) * 4` |
+| `cfile/l1_cmplx.c:11379-11381` | `l1s_read_fbsb`: `toa_qbit = (fb_toa + toa) * 4 + TPU_CLOCK_RANGE - SB_MARGIN` |
+
 **Hardware logs** (baseband-devel)
 - [1] 2011-09-26, DSP API 0x3606: https://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html
 - [2] 2024-10-02, Motorola C115: https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html

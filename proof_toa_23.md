@@ -11,13 +11,15 @@ expects.
 
 ## Rules of evidence and sources
 
-The evidence rests on three sources:
+The evidence rests on four sources (the fourth, TI's own layer 1, was added on 2026-11-09, after the detached
+signature of 2026-11-07, which covers the previous text and must be renewed; see §4.5 and §8 item 5):
 
 | source | what it is | where |
 |---|---|---|
 | **ROM** | TI Calypso DSP mask-ROM, version 3606, disassembled (binutils `tic54x`) | public dump: `ftp://ftp.freecalypso.org/pub/GSM/Calypso/dsp-rom-3606-dump.txt` (Pirelli DP-L10, Calypso PD751992AZHH, OsmocomBB dump tool). The PROM0 (0x7000-0xdfff, 28,672 words) of that dump is **identical word for word** to the PROM0 used here (0 differences out of 28,672). |
 | **layer1** | OsmocomBB firmware sources, `src/target/firmware/layer1/{prim_fbsb.c,tpu_window.c,sync.c,toa.c}` and their git history | `osmocom-bb` repository; every file:line in this document is at HEAD `168b8c5f` (2026-10-08), checked on 2026-11-07 against `github.com/osmocom/osmocom-bb` |
 | **hardware logs** | firmware output from real Calypso phones, posted to the baseband-devel list | [1] Aegean Chou, 2011-09-26, *Re: About sniff multi bursts in a frame, CCCH_CONF* (DSP API 0x3606, firmware without TX): https://lists.osmocom.org/pipermail/baseband-devel/2011-September/002526.html — [2] nish079858, 2024-10-02, *Osmocom bb mobile station cannot register to YateBTS basestation* (Motorola C115, `layer1.highram.bin` e88): https://www.mail-archive.com/baseband-devel@lists.osmocom.org/msg01046.html |
+| **TI layer 1** | TI's own TCS211 layer 1 sources (Copyright 2003 Texas Instruments), published by FreeCalypso: `src/cs/layer1/include/l1_time.h`, `src/cs/layer1/cfile/l1_cmplx.c` | `fc-magnetite`, hg changeset `8cd8fd15a095` (freecalypso.org; `l1_time.h` sha256 `eb3014a4…`, `l1_cmplx.c` `b192c293…`, checked 2026-11-09) |
 
 The emulation bench (`c54x_exe`, `dsp_tester`) is **not** a source of evidence: it served to find out where
 to look (§7), and every time it is cited this is stated.
@@ -266,6 +268,33 @@ reliably"), which introduces `fbinfo2cellinfo()` without removing the `toa -= 23
 the initial import (`fbe7b94c`, 2010-02-18) the FB path subtracted 23 only once. `L1_SB_MARGIN_Q`,
 `L1_NB_MARGIN_Q`, both `toa -= 23` and `tpu_shift += 75` with its comment are all in the initial import.
 
+### 4.5 TI's own layer 1: the margin, and the subtraction — PROVEN (static reading of TI's source)
+
+Added 2026-11-09 (§8 item 5 was open at the signature of 2026-11-07). FreeCalypso publishes TI's TCS211 layer 1
+(`fc-magnetite`, hg `8cd8fd15a095`, Copyright 2003 Texas Instruments).
+
+`src/cs/layer1/include/l1_time.h`: `SB_MARGIN (23L * 4L) // = 92` (l.150), `NB_MARGIN (3L * 4L) // = 12` (l.151),
+`TAIL_WIDTH (3L * 4L)` (l.106), `SB_BURST_DURATION (TAIL_WIDTH + (142L * 4L)) // = 580, required for Demodulation`
+(l.154), `SB_ACQUIS_DURATION (SB_MARGIN + SB_BURST_DURATION + SB_MARGIN + DL_ABB_DELAY + RX_DMA_DELAY) // = 796 +
+DMA delay` (l.169), `NB_ACQUIS_DURATION // = 636 + DMA delay` (l.170), `RX_DOWN_TABLE[0]` "special case: only 1 RX,
+151 IQ samples" (l.201), `PROVISION_TIME (66L)` (l.111). 92 + 580 + 92 = 764 qbits = 191 bits and 12 + 580 + 12 =
+604 qbits = 151 bits: the two ROM immediates of §1, from the maker's source. The extra 8.25 bits of the firmware's TPU
+windows (§4.1) are, in TI's header, the receive ABB filter delay (`DL_ABB_DELAY`, 32 qbits): 796 = 764 + 32.
+
+`src/cs/layer1/cfile/l1_cmplx.c`: in `l1s_read_fb` (l.10985), under the comment "Compute NTDMA & TOA taking into
+account the 23 bit guard for next SB receive window" (l.11016), `modif_toa = toa - (SB_MARGIN/4);` (l.11018, "Rem:
+TOA cannot be less than SB_MARGIN/4", l.11025); in `l1s_read_sb` (l.11119), `modif_toa = (toa - (SB_MARGIN/4)) * 4;`
+(l.11172); in `l1s_read_fbsb` (l.11338), `toa_qbit = (fb_toa + toa) * 4 + TPU_CLOCK_RANGE - SB_MARGIN;` (l.11381).
+TI subtracts the margin once per burst read, and names it. OsmocomBB's `toa -= 23` is TI's `toa - SB_MARGIN/4` without
+the name and without the comment. Whether the second subtraction of the FB path (§4.4) mirrors TI's one-per-read is
+not established here.
+
+Cross-check with `tpu_window.c` (168b8c5f): `L1_SB/NB/PW/FB_DURATION_Q` = 797, 637, 289, 57057 qbits against TI's
+comments 796, 636, 288, 57056 (one qbit apart, the comments being computed for `RX_DMA_THRES` = 1); `L1_FB26_DURATION_Q`
+= 5798 = TI's FB26 formula for the chip (`D_NSUBB_DEDIC` 30 × 192 + `DL_ABB_DELAY` 36 + `RX_DMA_DELAY` 2); `DSP_SETUP_TIME`
+66 = `PROVISION_TIME` 66. The firmware's windows come from TI's figures, and the 23 with them: a deduction, CONSISTENT,
+not a proof.
+
 ## 5. Hardware logs: the predictions land — PROVEN
 
 Relevant lines, verbatim, from log [1] (2011, four complete synchronisations) and log [2] (2024, one
@@ -356,6 +385,7 @@ granularity.
 | The DSP's TOA is a position within the window (index of the retained lag, leading edge of the channel estimate, §2.4), not an offset from nominal time | PROVEN | §2 |
 | The SB (191) and NB (151) windows are hard-wired in the ROM and equal 148 + 2·23 − 3 and 148 + 2·3 − 3 | PROVEN | §1, §4.1 |
 | The 23 of `prim_fbsb.c` is `L1_SB_MARGIN_Q`: same originating commit, same value, and it is the only margin that reproduces TI's window | PROVEN for the equality and the common origin; the author's intent is not documented | §4.1, §4.4 |
+| TI's own layer 1 defines `SB_MARGIN = 23 × 4` and subtracts `SB_MARGIN/4` from the TOA, calling it "the 23 bit guard for next SB receive window" | PROVEN (static reading of TI's source) | §4.5 |
 | "TOA = 23" is, in the firmware's model, an SB at its nominal position, 23 bits after the window opens; in the ROM an SB centred in its 191 samples yields TOA ≈ 24.5 (21.5 + 3) | PROVEN (numbers); the 1-to-2-bit gap is absorbed by the +75 and by `toa.c` | §2.5, §4.3 |
 | The +75 qbits (= 23 − 4.25 bits) move the burst from the nominal SB position to the centre of the NB window, 40 samples shorter; `toa.c` then holds 16 qbits | PROVEN (code) and verified (logs: 13 to 20 qbits) | §4.3, §5.4 |
 | FB path: −23 twice, +75; the SB arrives at 27.25 | PROVEN (code, git) and verified (logs: 24 to 29, mean 27.2) | §4.4, §5.1, §5.3 |
@@ -409,8 +439,9 @@ code predicts.*
 3. **The ROM's choice between lags**: closed by static reading (§2.4, leading edge above 2.5 % of the mean
    energy). The behaviour on a real RF chain (how much energy at lag k + 2) is out of scope.
 4. **N, p and the −5 of the FB formula** (§3): not worked out, no bearing on the conclusion.
-5. **FreeCalypso / TI**: the TI sources (TCS211) may contain the SB window constant and its comment; not
-   consulted here, status to be assessed.
+5. **FreeCalypso / TI**: consulted on 2026-11-09 (§4.5). TI's `l1_time.h` defines `SB_MARGIN = 23 × 4` and
+   `l1_cmplx.c` subtracts `SB_MARGIN/4` from the TOA under the comment "the 23 bit guard for next SB receive window".
+   Closed for the value and for the reason; the author's intent (item 1) is untouched.
 
 ## Reproducing
 
