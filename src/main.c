@@ -158,7 +158,7 @@ int main(int argc, char **argv)
          * short by the budget leaves the ARM reading half-written results (a
          * zeroed a_sch read as a CRC-OK SB). Silicon has ~360k cycles per frame
          * at 78 MHz; 32000 was a bench constant, not a hardware one. */
-        insns = arm_sock ? 120000 : 2300;
+        insns = arm_sock ? 130000 : 2300;
     }
     if (trames < 0) {
         trames = rejeu ? 4000 : 100;       /* an explicit --trames is honoured as is */
