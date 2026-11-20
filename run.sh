@@ -49,6 +49,18 @@
 # Details, expectations and checks: LAUNCH.md alongside. Noise (BRUIT_MODE, inactive by default): BRUIT_ block at the end.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ISOLATION (./isoler.sh on): the desktop and the services are confined to the non-reserved cpus by
+# their cgroup, and so is this shell when it comes from a terminal: taskset onto the reserved cpus
+# would be refused. A launch therefore moves itself once into banc.slice (no cpu restriction), keeps
+# the helpers (BTS, panel...) on the ordinary cpus, and hands the reserved ones to the chain through
+# RT_CPUS / RT_FIFO (the environment keeps priority). ISOL_FAIT=1 ./run.sh: ignore the isolation.
+if [ -r /run/c54x-isol.env ] && [ -z "${ISOL_FAIT:-}" ] && [ "$(id -u)" = 0 ] && command -v systemd-run >/dev/null; then
+    case "${1:-}" in ""|--step)
+        . /run/c54x-isol.env
+        export ISOL_FAIT=1 RT_CPUS="${RT_CPUS:-$ISOL_CPUS}" RT_FIFO="${RT_FIFO-$ISOL_FIFO}"
+        exec systemd-run --scope --quiet --collect --slice=banc.slice -- taskset -c "$ISOL_AUTRES" bash "$0" "$@" ;;
+    esac
+fi
 MODE="${MODE:-dsp}"
 PONT="${PONT:-0}"
 # INSTANCE=N (N != 1): private /dev/shm = the host's /dev/shm/calypsoN; the real /dev/shm stays
