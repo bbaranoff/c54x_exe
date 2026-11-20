@@ -57,6 +57,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -r /run/c54x-isol.env ] && [ -z "${ISOL_FAIT:-}" ] && [ "$(id -u)" = 0 ] && command -v systemd-run >/dev/null; then
     case "${1:-}" in ""|--step)
         . /run/c54x-isol.env
+        # Instance 1, RT_CPUS not forced: the DSP alone on one thread of the first reserved core, QEMU on
+        # the second core, the rest of the chain on what is left. Measured 2026-11-20 (camped, idle): on
+        # 12-15 as a whole the DSP and the QEMU vCPU sat on the two threads of the SAME core 45 % of the
+        # time; split, "DSP >4.62 ms" goes from ~23 to ~10 frames per 1000. The other instances share
+        # the whole reserved set.
+        # The bridge (pont_dsp.py / pont.py / air.py) alone on its own reserved core, and the BTS that
+        # step 4b restarts on the core network's cpus (isoler.sh CPUS_RESEAU), unless RT_CPUS is forced.
+        [ -z "${RT_CPUS:-}" ] && export RT_CPUS_PONT="${RT_CPUS_PONT:-${ISOL_CPUS_PONT:-}}"
+        export RT_CPUS_CN="${RT_CPUS_CN:-${ISOL_CPUS_CN:-}}"
+        if [ -z "${RT_CPUS:-}" ] && [ "${INSTANCE:-1}" = 1 ] && [ -n "${ISOL_CPUS_DSP:-}" ]; then
+            export RT_CPUS_DSP="${RT_CPUS_DSP:-$ISOL_CPUS_DSP}" RT_CPUS_QEMU="${RT_CPUS_QEMU:-$ISOL_CPUS_QEMU}" RT_CPUS="$ISOL_CPUS_RESTE"
+        fi
         export ISOL_FAIT=1 RT_CPUS="${RT_CPUS:-$ISOL_CPUS}" RT_FIFO="${RT_FIFO-$ISOL_FIFO}"
         exec systemd-run --scope --quiet --collect --slice=banc.slice -- taskset -c "$ISOL_AUTRES" bash "$0" "$@" ;;
     esac
@@ -269,9 +281,20 @@ RT_NICE="${RT_NICE--10}"
 RT_FIFO="${RT_FIFO:-}"
 RT_CPUS="${RT_CPUS:-}"
 RT_RENICE_AUTRES="${RT_RENICE_AUTRES:-}"
-PRIO=()
+# RT_CPUS_DSP / RT_CPUS_QEMU: their own cpus for c54x_exe and QEMU (default: RT_CPUS, like the rest).
+RT_CPUS_DSP="${RT_CPUS_DSP:-$RT_CPUS}"
+RT_CPUS_QEMU="${RT_CPUS_QEMU:-$RT_CPUS}"
+# RT_CPUS_PONT: the cpus of the bridge and of the air (default: RT_CPUS). RT_CPUS_CN: the cpus of the core
+# network, where step 4b restarts the BTS (default: no pinning).
+RT_CPUS_PONT="${RT_CPUS_PONT:-$RT_CPUS}"
+RT_CPUS_CN="${RT_CPUS_CN:-}"
+PRIO=(); PRIO_DSP=(); PRIO_QEMU=(); PRIO_PONT=()
 [ -n "$RT_CPUS" ] && PRIO+=(taskset -c "$RT_CPUS")
-if [ -n "$RT_FIFO" ]; then PRIO+=(chrt -f "$RT_FIFO"); elif [ -n "$RT_NICE" ]; then PRIO+=(nice -n "$RT_NICE"); fi
+[ -n "$RT_CPUS_DSP" ] && PRIO_DSP+=(taskset -c "$RT_CPUS_DSP")
+[ -n "$RT_CPUS_QEMU" ] && PRIO_QEMU+=(taskset -c "$RT_CPUS_QEMU")
+[ -n "$RT_CPUS_PONT" ] && PRIO_PONT+=(taskset -c "$RT_CPUS_PONT")
+if [ -n "$RT_FIFO" ]; then _pol=(chrt -f "$RT_FIFO"); elif [ -n "$RT_NICE" ]; then _pol=(nice -n "$RT_NICE"); else _pol=(); fi
+PRIO+=(${_pol[@]+"${_pol[@]}"}); PRIO_DSP+=(${_pol[@]+"${_pol[@]}"}); PRIO_QEMU+=(${_pol[@]+"${_pol[@]}"}); PRIO_PONT+=(${_pol[@]+"${_pol[@]}"})
 renice_autres() {
     [ -n "$RT_RENICE_AUTRES" ] || return 0
     local pids; pids="$(pgrep -f 'osmo-fft-snap|osmo-panel|osmo-topzone|osmo-ts-probe|conky' | tr '\n' ' ')"
@@ -286,7 +309,7 @@ charge() {
     done
     echo "most CPU-hungry processes:"
     ps -eo pid,pcpu,ni,cls,comm --sort=-pcpu | head -12 | sed 's/^/  /'
-    echo "load average $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) cores; chain priority: ${PRIO[*]:-none}"
+    echo "load average $(cut -d' ' -f1-3 /proc/loadavg) on $(nproc) cores; chain priority: ${PRIO[*]:-none}${RT_CPUS_DSP:+ (dsp on $RT_CPUS_DSP, qemu on $RT_CPUS_QEMU, bridge on $RT_CPUS_PONT)}"
 }
 L2_SOCK="${L2_SOCK:-/tmp/osmocom_l2}"
 MONITOR="${MONITOR:-/tmp/qemu-monitor-pont.sock}"
@@ -297,7 +320,7 @@ GDB_TELNET_PY="${GDB_TELNET_PY:-$QOSMO/tools/gdb-telnet.py}"
 # 120000 by default: the budget of the TRX's DSP (instance 1, booted at the first IDLE); a smaller
 # budget (16000) leaves the DSP of the Magnetite instance in "occupe boot" forever, and a TCH
 # frame needs up to 87000 insn/frame (see start-native.sh).
-INSNS="${INSNS:-120000}"
+INSNS="${INSNS:-130000}"
 # DSP/QEMU lockstep by default (LOCKSTEP=0 for wall-clock mode): the emulated C54x costs
 # ~6.7 ms per frame against 4.615 ms of real time, so on the wall clock QEMU skips 3 frames
 # out of 4 ("DSP en retard, tick saute"), the ROM only sees one frame in 4 to 6, its FB
@@ -351,7 +374,7 @@ etape1() {   # the DSP (dsp setup only)
     rm -f /dev/shm/calypso_tch_cfg
     # Wait (at most 40 ms) for a frame the BTS delivers late rather than
     # playing it as an erasure (calypso_bsp.c, bsp_attendre_trame).
-    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO[@]+"${PRIO[@]}"} "${C54X_BIN:-./c54x_exe}" --arm "$DSP_SOCK" --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
+    ( cd "$HERE" && bruit_env_dsp && CALYPSO_IQDUMP_FCCH=1 CALYPSO_BSP_ATTENTE_MS="${CALYPSO_BSP_ATTENTE_MS:-40}" exec ${PRIO_DSP[@]+"${PRIO_DSP[@]}"} "${C54X_BIN:-./c54x_exe}" --arm "$DSP_SOCK" --insns "$INSNS" --iq "$IQ" --amp "$AMP" $VERB ) > "$RUNDIR/dsp.log" 2>&1 &
     echo $! > "$RUNDIR/dsp.pid"
     attendre 5 test -S "$DSP_SOCK" || rater "c54x_exe did not open $DSP_SOCK (see $RUNDIR/dsp.log)"
     # shm at 0666: the umask lowers c54x_exe's 0666 request to 0644, which prevents a harvard.sh
@@ -460,7 +483,7 @@ etape2() {   # the ARM
         fi
         fw_opt=(-drive "if=pflash,file=$RUNDIR/flash.img,format=raw")
     fi
-    CALYPSO_DSP_EXTERN="$extern" ${PRIO[@]+"${PRIO[@]}"} "$QEMU" -M calypso -cpu "${QEMU_CPU:-arm946}" -display none -parallel none \
+    CALYPSO_DSP_EXTERN="$extern" ${PRIO_QEMU[@]+"${PRIO_QEMU[@]}"} "$QEMU" -M calypso -cpu "${QEMU_CPU:-arm946}" -display none -parallel none \
         -serial pty -serial pty -monitor "unix:$MONITOR,server,nowait" "${gdb_opt[@]}" \
         "${fw_opt[@]}" > "$RUNDIR/qemu.log" 2>&1 &
     echo $! > "$RUNDIR/qemu.pid"
@@ -580,7 +603,7 @@ etape4_trx() {   # OSMO_TRX=1: the host app transceiver, instead of the mobile
             bts_bin="${OSMO_BTS_TRX_BIN:-$(command -v osmo-bts-trx || echo /usr/local/bin/osmo-bts-trx)}"
             bts_log="$(ls -d /run/user/*/osmo-nitb/logs 2>/dev/null | head -1)"; bts_log="${bts_log:-$RUNDIR}/bts.log"
             if [ -x "$bts_bin" ] && [ -r "$bts_cfg" ]; then
-                setsid stdbuf -oL -eL $(chrt -r 1 true 2>/dev/null && echo "chrt -r 1") "$bts_bin" -c "$bts_cfg" >> "$bts_log" 2>&1 </dev/null &
+                setsid ${RT_CPUS_CN:+taskset -c "$RT_CPUS_CN"} stdbuf -oL -eL $(chrt -r 1 true 2>/dev/null && echo "chrt -r 1") "$bts_bin" -c "$bts_cfg" >> "$bts_log" 2>&1 </dev/null &
                 bts_pid=$!
                 for bts_piddir in /run/user/*/osmo-nitb; do [ -d "$bts_piddir" ] && echo "$bts_pid" > "$bts_piddir/bts.pid"; done
                 dire "4b. osmo-bts-trx restarted (BTS#0 was gone: it exits when the transceiver disappears)  pid $bts_pid  $bts_cfg  log $bts_log"
@@ -651,7 +674,7 @@ etape5_air() {   # AIR=1: the air between the two Calypsos (pont/air.py), instea
        && kill -0 "$(cat "/tmp/c54x-pont${OSMO_TRX_TS1_INSTANCE}/dsp.pid" 2>/dev/null)" 2>/dev/null; then
         args_c="--c-ring $HOTE_SHM/calypso${OSMO_TRX_TS1_INSTANCE}/calypso_tx_rom --c-port $((6702 + 10 * (OSMO_TRX_TS1_INSTANCE - 1) + (OSMO_TRX_TS1_INSTANCE >= 3 ? 30 : 0)))"
     fi
-    ${PRIO[@]+"${PRIO[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
+    ${PRIO_PONT[@]+"${PRIO_PONT[@]}"} python3 -u "$AIR_PY" --a-ring "$autre_shm/calypso_tx_rom" --a-port "$autre_port" \
         --b-ring /dev/shm/calypso_tx_rom --b-port "${CALYPSO_BSP_PORT:-6702}" $args_c --tch-cfg /dev/shm/calypso_tch_cfg > "$RUNDIR/air.log" 2>&1 &
     echo $! > "$RUNDIR/air.pid"
     attendre 5 grep -aq "air :" "$RUNDIR/air.log" || rater "air.py did not announce itself (see $RUNDIR/air.log)"
@@ -691,7 +714,7 @@ etape5() {   # the TRX bridge (PONT=1): BTS bursts to layer 1
     # approaches its 50-frame limit, see trx.py run_clock). PONT_HORLOGE_MAX
     # already set in the environment is honoured.
     if [ "${ASSEMBLY_LOGS:-0}" = 1 ]; then export PONT_HORLOGE_MAX="${PONT_HORLOGE_MAX:-16}"; fi
-    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && export PONT_UL_RAW="${UL_RAW:-1}" && exec ${PRIO[@]+"${PRIO[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
+    ( cd "$(dirname "$PONT_PY")/.." && bruit_env_pont && export PONT_UL_RAW="${UL_RAW:-1}" && exec ${PRIO_PONT[@]+"${PRIO_PONT[@]}"} python3 "$PONT_PY" $extra ) > "$RUNDIR/pont.log" 2>&1 &
     echo $! > "$RUNDIR/pont.pid"
     attendre 10 grep -aq "pont TRX : ports" "$RUNDIR/pont.log" || rater "pont.py did not announce itself (see $RUNDIR/pont.log)"
     dire "5. pont.py  pid $(pid_de pont)  TRXD 5700-5702 <- BTS; to $([ "$MODE" = dsp ] && echo "the DSP (udp 6702)" || echo "the gr-gsm L1 (udp 4730/4731)")"
