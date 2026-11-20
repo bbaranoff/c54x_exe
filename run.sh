@@ -60,8 +60,9 @@ if [ -r /run/c54x-isol.env ] && [ -z "${ISOL_FAIT:-}" ] && [ "$(id -u)" = 0 ] &&
         # Instance 1, RT_CPUS not forced: the DSP alone on one thread of the first reserved core, QEMU on
         # the second core, the rest of the chain on what is left. Measured 2026-11-20 (camped, idle): on
         # 12-15 as a whole the DSP and the QEMU vCPU sat on the two threads of the SAME core 45 % of the
-        # time; split, "DSP >4.62 ms" goes from ~23 to ~10 frames per 1000. The other instances share
-        # the whole reserved set.
+        # time; split, "DSP >4.62 ms" goes from ~23 to ~10 frames per 1000. The other instances run on
+        # ISOL_CPUS_INSTANCES: the cores beyond the DSP's and QEMU's when the machine has them, the
+        # whole reserved set otherwise.
         # The bridge (pont_dsp.py / pont.py / air.py) alone on its own reserved core, and the BTS that
         # step 4b restarts on the core network's cpus (isoler.sh CPUS_RESEAU), unless RT_CPUS is forced.
         [ -z "${RT_CPUS:-}" ] && export RT_CPUS_PONT="${RT_CPUS_PONT:-${ISOL_CPUS_PONT:-}}"
@@ -69,7 +70,7 @@ if [ -r /run/c54x-isol.env ] && [ -z "${ISOL_FAIT:-}" ] && [ "$(id -u)" = 0 ] &&
         if [ -z "${RT_CPUS:-}" ] && [ "${INSTANCE:-1}" = 1 ] && [ -n "${ISOL_CPUS_DSP:-}" ]; then
             export RT_CPUS_DSP="${RT_CPUS_DSP:-$ISOL_CPUS_DSP}" RT_CPUS_QEMU="${RT_CPUS_QEMU:-$ISOL_CPUS_QEMU}" RT_CPUS="$ISOL_CPUS_RESTE"
         fi
-        export ISOL_FAIT=1 RT_CPUS="${RT_CPUS:-$ISOL_CPUS}" RT_FIFO="${RT_FIFO-$ISOL_FIFO}"
+        export ISOL_FAIT=1 RT_CPUS="${RT_CPUS:-${ISOL_CPUS_INSTANCES:-$ISOL_CPUS}}" RT_FIFO="${RT_FIFO-$ISOL_FIFO}"
         exec systemd-run --scope --quiet --collect --slice=banc.slice -- taskset -c "$ISOL_AUTRES" bash "$0" "$@" ;;
     esac
 fi

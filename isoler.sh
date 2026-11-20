@@ -22,10 +22,13 @@
 #   ./isoler.sh status    what is in place, who runs on the reserved cpus
 #   ./isoler.sh grub      5. print (does NOT apply) the boot-time isolation: isolcpus / nohz_full / rcu_nocbs
 #
-#   CPUS=12-15         cpus of the chain (default: the last two physical cores, with their SMT siblings)
-#   CPUS_RESEAU=8-11   cpus of the bridge + core network (default: the two cores before the chain's when six
-#                      cores or more are left, one core when three to five are left; CPUS_RESEAU= empty: none,
-#                      bridge and core network stay where they were)
+#   BUREAU=4           logical cpus left to the desktop and the other services (default: 4 when the machine
+#                      still has four cores for the bench then, 2 otherwise); everything else is shared
+#                      between the chain and the bridge + core network, according to the number of cores of
+#                      the machine (table below, "THE LAYOUT FOLLOWS THE MACHINE")
+#   CPUS=8-15          cpus of the chain, to force them
+#   CPUS_RESEAU=2-7    cpus of the bridge + core network, to force them (CPUS_RESEAU= empty: none, bridge and
+#                      core network stay where they were)
 #   FIFO=20            SCHED_FIFO priority of the chain (stay below 50; FIFO= empty: keep run.sh's nice)
 #   RESEAU_UNITES="osmo-msc ..."   the units of the core network (default: the list above)
 #   RELANCER=1         ./isoler.sh on restarts the core units that are running, so that they move now
@@ -50,19 +53,47 @@ moins() { comm -23 <(etendre "$1" | tr ' ' '\n' | sort) <(etendre "$2" | tr ' ' 
 topo() { lscpu -p=CPU,CORE | grep -v '^#'; }                       # "cpu,core" lines
 # the "cpu,core" lines of the cpu list $1, sorted by core then cpu
 topo_de() { topo | awk -F, -v l=" $(etendre "$1") " 'index(l, " "$1" ")' | sort -t, -k2n -k1n; }
-# the last two physical cores, all their threads
-defaut_cpus() {
-    local c; c="$(lscpu -p=CORE | grep -v '^#' | sort -un | tail -2 | tr '\n' ' ')"
-    topo | awk -F, -v c=" $c" 'index(c, " "$2" ")' | cut -d, -f1 | sort -n | paste -sd,
+# THE LAYOUT FOLLOWS THE MACHINE. The desktop keeps BUREAU logical cpus, rounded up to whole physical cores:
+# 4 when that still leaves four cores to the bench, 2 otherwise. Every other core goes to the bench:
+#   cores for the bench   1    2    3    4    5    6    7    8   ...
+#   chain                 1    2    2    2    3    3    4    4   (half, rounded up; two as soon as possible)
+#   bridge + core network 0    0    1    2    2    3    3    4   (the rest)
+# e.g. 8 cores / 16 threads: desktop 0-3, bridge 4-5, core network 6-9, chain 10-15 (dsp 10, qemu 12-13,
+# rest 14-15); 4 cores / 8 threads: desktop 0-1, bridge 2, core network 3, chain 4-7. A single core: nothing
+# is reserved. The physical cores, the best for real time first: the fast ones (hybrid cpus: the P cores,
+# within 20 % of the fastest), then the highest numbered; core 0 (boot cpu, IRQs) goes to the desktop.
+BUREAU="${BUREAU:-auto}"
+coeurs_tries() {
+    topo | sort -t, -k2n -k1n | awk -F, '!v[$2]++ {
+            f = 0; if ((getline l < ("/sys/devices/system/cpu/cpu" $1 "/cpufreq/cpuinfo_max_freq")) > 0) f = l + 0
+            fr[$2] = f; if (f > max) max = f }
+        END { for (c in fr) print (fr[c] >= 0.8 * max), c }' | sort -k1,1nr -k2,2nr | cut -d' ' -f2
 }
-# among the cores the chain leaves: the last two (six or more left), the last one (three to five), none
+cpus_des_coeurs() { topo | awk -F, -v c=" $(echo $1) " 'index(c, " "$2" ")' | cut -d, -f1 | sort -n | paste -sd,; }
+# how many physical cores the desktop keeps
+coeurs_bureau() {
+    local n t; n="$(coeurs_tries | wc -l)"; t="$(topo | wc -l)"
+    t=$(( (t + n - 1) / n ))                                   # threads per core
+    if [ "$BUREAU" = auto ]; then
+        if [ $(( n - (4 + t - 1) / t )) -ge 4 ]; then n=$(( (4 + t - 1) / t )); else n=$(( (2 + t - 1) / t )); fi
+    else
+        n=$(( (BUREAU + t - 1) / t )); [ "$n" -ge 1 ] || n=1
+    fi
+    echo "$n"
+}
+defaut_cpus() {
+    local m k; m=$(( $(coeurs_tries | wc -l) - $(coeurs_bureau) ))
+    [ "$m" -ge 1 ] || return 0
+    k=$(( (m + 1) / 2 )); [ "$m" -ge 2 ] && [ "$k" -lt 2 ] && k=2
+    cpus_des_coeurs "$(coeurs_tries | head -"$k")"
+}
+# the cores the chain leaves, minus the desktop's
 defaut_reseau() {
-    local l n k c
-    l="$(topo | awk -F, -v l=" $(etendre "$CPUS") " '!index(l, " "$1" ") { print $2 }' | sort -un)"
-    n="$(echo "$l" | grep -c .)"
-    if [ "$n" -ge 6 ]; then k=2; elif [ "$n" -ge 3 ]; then k=1; else return 0; fi
-    c="$(echo "$l" | tail -"$k" | tr '\n' ' ')"
-    topo | awk -F, -v c=" $c" 'index(c, " "$2" ")' | cut -d, -f1 | sort -n | paste -sd,
+    local l k
+    l="$(coeurs_tries | grep -vxFf <(topo_de "$CPUS" | cut -d, -f2 | sort -u; echo x))"
+    k=$(( $(echo "$l" | grep -c .) - $(coeurs_bureau) ))
+    [ "$k" -ge 1 ] || return 0
+    cpus_des_coeurs "$(echo "$l" | head -"$k")"
 }
 env_lu() { [ -r "$ENVF" ] || return 1; ( . "$ENVF"; eval "echo \"\${$1-}\"" ); }
 CPUS="${CPUS:-$(env_lu ISOL_CPUS || defaut_cpus)}"
@@ -71,14 +102,19 @@ CPUS_RESEAU="${CPUS_RESEAU-$(env_lu ISOL_CPUS_RESEAU || defaut_reseau)}"
 TOUS="$(cat /sys/devices/system/cpu/online)"
 AUTRES="$(moins "$(moins "$TOUS" "$CPUS")" "$CPUS_RESEAU")"
 # split of the chain's cpus (needs two cores): DSP = first thread of the first core, QEMU = the whole
-# second core (its vCPU and its main loop), the rest of the chain = what is left
+# second core (its vCPU and its main loop), the rest of the chain = what is left: the DSP's SMT sibling
+# with two cores; the cores after the second with three or more, and the DSP's sibling then stays idle.
+# C_INSTANCES: where the other instances (INSTANCE=2, 3: mobile over the air, second TRX) run: the rest
+# with three cores or more (they leave the DSP and QEMU of instance 1 alone), the whole set otherwise.
 _l="$(topo_de "$CPUS")"
 _c1="$(echo "$_l" | head -1 | cut -d, -f2)"; _c2="$(echo "$_l" | cut -d, -f2 | grep -vx "$_c1" | head -1)"
-C_DSP=; C_QEMU=; C_RESTE=
+C_DSP=; C_QEMU=; C_RESTE=; C_INSTANCES="$CPUS"
 if [ -n "$_c2" ]; then
     C_DSP="$(echo "$_l" | head -1 | cut -d, -f1)"
     C_QEMU="$(echo "$_l" | awk -F, -v c="$_c2" '$2 == c { print $1 }' | paste -sd,)"
-    C_RESTE="$(echo "$_l" | awk -F, -v d="$C_DSP" -v c="$_c2" '$2 != c && $1 != d { print $1 }' | paste -sd,)"
+    C_RESTE="$(echo "$_l" | awk -F, -v a="$_c1" -v c="$_c2" '$2 != c && $2 != a { print $1 }' | paste -sd,)"
+    if [ -n "$C_RESTE" ]; then C_INSTANCES="$C_RESTE"
+    else C_RESTE="$(echo "$_l" | awk -F, -v d="$C_DSP" -v c="$_c2" '$2 != c && $1 != d { print $1 }' | paste -sd,)"; fi
     [ -n "$C_RESTE" ] || C_RESTE="$C_QEMU"      # no SMT: the rest shares QEMU's core
 fi
 # split of the network cpus: two cores or more = the bridge has the whole first core (its SMT sibling stays
@@ -242,15 +278,16 @@ intrus() {
 case "${1:-status}" in
 on)
     [ "$(id -u)" = 0 ] || rater "root needed"
+    [ -n "$CPUS" ] || rater "a single physical core: nothing to reserve"
     [ -n "$AUTRES" ] || rater "CPUS=$CPUS CPUS_RESEAU=$CPUS_RESEAU leave nothing for the rest of the system"
     [ -z "$CPUS_RESEAU" ] || [ "$(moins "$CPUS_RESEAU" "$CPUS")" = "$(moins "$CPUS_RESEAU" "")" ] || rater "CPUS_RESEAU=$CPUS_RESEAU overlaps CPUS=$CPUS"
     [ -z "$(moins "$CPUS,${CPUS_RESEAU:-$CPUS}" "$TOUS")" ] || rater "cpus not online ($TOUS): $(moins "$CPUS,${CPUS_RESEAU:-$CPUS}" "$TOUS")"
     dire "1. reserved cpus: chain $CPUS${CPUS_RESEAU:+, bridge + core network $CPUS_RESEAU}; desktop and services on $AUTRES"
     for t in "${TRANCHES[@]}"; do systemctl set-property --runtime "$t" AllowedCPUs="$AUTRES" || rater "AllowedCPUs on $t"; done
     irq_ecarter
-    printf 'ISOL_CPUS=%s\nISOL_AUTRES=%s\nISOL_FIFO=%s\nISOL_CPUS_DSP=%s\nISOL_CPUS_QEMU=%s\nISOL_CPUS_RESTE=%s\nISOL_CPUS_RESEAU=%s\nISOL_CPUS_PONT=%s\nISOL_CPUS_CN=%s\n' \
-        "$CPUS" "$AUTRES" "$FIFO" "$C_DSP" "$C_QEMU" "$C_RESTE" "$CPUS_RESEAU" "$C_PONT" "$C_CN" > "$ENVF"
-    dire "2. chain: ${FIFO:+chrt -f $FIFO, }$([ -n "$C_DSP" ] && echo "dsp on $C_DSP, qemu on $C_QEMU, rest on $C_RESTE" || echo "taskset -c $CPUS") (read by run.sh from $ENVF)"
+    printf 'ISOL_CPUS=%s\nISOL_AUTRES=%s\nISOL_FIFO=%s\nISOL_CPUS_DSP=%s\nISOL_CPUS_QEMU=%s\nISOL_CPUS_RESTE=%s\nISOL_CPUS_RESEAU=%s\nISOL_CPUS_PONT=%s\nISOL_CPUS_CN=%s\nISOL_CPUS_INSTANCES=%s\n' \
+        "$CPUS" "$AUTRES" "$FIFO" "$C_DSP" "$C_QEMU" "$C_RESTE" "$CPUS_RESEAU" "$C_PONT" "$C_CN" "$C_INSTANCES" > "$ENVF"
+    dire "2. chain: ${FIFO:+chrt -f $FIFO, }$([ -n "$C_DSP" ] && echo "dsp on $C_DSP, qemu on $C_QEMU, rest on $C_RESTE, other instances on $C_INSTANCES" || echo "taskset -c $CPUS") (read by run.sh from $ENVF)"
     if [ -n "$CPUS_RESEAU" ]; then reseau_poser; else reseau_oter; systemctl daemon-reload; dire "3. bridge and core network: not isolated (CPUS_RESEAU empty)"; adopter; fi
     [ -s "$ETAT.gouv" ] || frequence performance
     dire "4. governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd,)$(command -v powerprofilesctl >/dev/null && echo ", profile $(powerprofilesctl get)")"
@@ -272,7 +309,7 @@ off)
     dire "isolation removed: every cpu ($TOUS) back to the system, governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd,)" ;;
 status)
     if [ -r "$ENVF" ]; then dire "ON: chain $CPUS, bridge ${C_PONT:-not isolated}, core network ${C_CN:-not isolated}, rest $AUTRES, FIFO ${FIFO:-none}"
-    else dire "OFF (would reserve: chain $CPUS, bridge ${C_PONT:-none}, core network ${C_CN:-none})"; fi
+    else dire "OFF (would reserve: chain ${CPUS:-none}${C_DSP:+ [dsp $C_DSP, qemu $C_QEMU, rest $C_RESTE]}, bridge ${C_PONT:-none}, core network ${C_CN:-none}; desktop $AUTRES)"; fi
     for t in "${TRANCHES[@]}" "$TRANCHE_RESEAU"; do printf '  %-13s effective cpus %s\n' "$t" "$(cat "/sys/fs/cgroup/$t/cpuset.cpus.effective" 2>/dev/null || echo "$TOUS (no cpuset)")"; done
     printf '  governor      %s   boost %s   mains %s\n' "$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd,)" \
         "$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo '?')" "$(secteur && echo yes || echo NO)"
@@ -320,5 +357,5 @@ cpus${C_CN:+ ($C_CN)} are left out on purpose: isolcpus switches the load balanc
 to spread over their cpus. Undo: remove the three options, update-grub, reboot.
 EOF
     ;;
-*)  sed -n '2,33p' "$0" ;;
+*)  sed -n '2,37p' "$0" ;;
 esac
