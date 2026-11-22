@@ -16,11 +16,27 @@
 #                            - a qosmo (qemu-system-arm) launched outside run.sh (the fork's 40-qemu.sh, a
 #                              tmux pane) is moved to banc.slice and pinned on QEMU's core
 #                         4. frequency: performance profile + governor, warns when on battery
+#                         5. kernel housekeeping off the reserved cpus: unbound workqueues and the movable
+#                            kernel threads (jbd2, kswapd, rcu_preempt...) on the desktop's cpus
+#                         6. the real-time GUARD (c54x-garde, see below)
 #   ./isoler.sh adopter   only the "moved at once" part of step 3, for daemons started after "on"
 #                         (osmo-operator's start.sh calls it once the core and the BTS are up)
 #   ./isoler.sh off       undo everything
 #   ./isoler.sh status    what is in place, who runs on the reserved cpus
-#   ./isoler.sh grub      5. print (does NOT apply) the boot-time isolation: isolcpus / nohz_full / rcu_nocbs
+#   ./isoler.sh grub      print (does NOT apply) the boot-time isolation: isolcpus / nohz_full / rcu_nocbs
+#   ./isoler.sh garde     the guard loop itself (run by "on" as the transient unit c54x-garde)
+#
+# THE GUARD: REAL TIME WITHOUT FREEZING THE MACHINE. A SCHED_FIFO thread that never sleeps (QEMU's TCG
+# vCPU, a polling loop) leaves the kernel threads bound to its cpu (kworker, ksoftirqd) 5 % of the time
+# (sched_rt_runtime_us); this kernel has no RCU_BOOST either. Work queued there then crawls, and whatever
+# waits for it (file system, memory, GPU) with it: the whole desktop freezes. Such a thread gains nothing
+# from SCHED_FIFO on a cpu reserved for it. c54x-garde (FIFO 50, on the desktop's cpus) keeps SCHED_FIFO
+# for the threads that sleep and wake up (what real time is for) and:
+#   - a user real-time thread above GARDE_BUSY % (90) of a cpu for GARDE_DUREE s (5) in a row goes back to
+#     SCHED_OTHER nice GARDE_NICE (-10): still alone on its reserved cpu, but the kernel gets in again
+#   - a kernel stall (RCU stall, workqueue lockup, soft lockup, hung task) or Tctl above TEMP_MAX (95 °C):
+#     EVERY user real-time thread goes back to SCHED_OTHER at once
+# Each action is logged (journal: -t c54x-garde, and ./isoler.sh status). GARDE=0 ./isoler.sh on: no guard.
 #
 #   BUREAU=4           logical cpus left to the desktop and the other services (default: 4 when the machine
 #                      still has four cores for the bench then, 2 otherwise); everything else is shared
@@ -31,6 +47,7 @@
 #                      core network stay where they were)
 #   FIFO=20            SCHED_FIFO priority of the chain (stay below 50; FIFO= empty: keep run.sh's nice)
 #   RESEAU_UNITES="osmo-msc ..."   the units of the core network (default: the list above)
+#   GARDE=1            the guard (GARDE=0: none); GARDE_BUSY=90 GARDE_DUREE=5 GARDE_NICE=-10 TEMP_MAX=95
 #   RELANCER=1         ./isoler.sh on restarts the core units that are running, so that they move now
 #
 # run.sh picks this up by itself (launch only; RT_CPUS / RT_FIFO / RT_CPUS_PONT in the environment keep
@@ -149,6 +166,119 @@ irq_rendre() {
     [ -f "$ETAT.irq" ] || return 0
     local f v; while read -r f v; do echo "$v" > "$f" 2>/dev/null; done < "$ETAT.irq"; rm -f "$ETAT.irq"
 }
+# --- kernel housekeeping ----------------------------------------------------------------------------
+# hex mask in the sysfs format (32-bit groups separated by commas)
+masque_sysfs() {
+    local c i m=0 w=() s=""
+    for c in $(etendre "$1"); do w[c / 32]=$(( ${w[c / 32]:-0} | 1 << (c % 32) )); [ $(( c / 32 )) -gt "$m" ] && m=$(( c / 32 )); done
+    for (( i = m; i >= 0; i-- )); do if [ "$i" = "$m" ]; then s="$(printf '%x' "${w[i]:-0}")"; else s="$s,$(printf '%08x' "${w[i]:-0}")"; fi; done
+    echo "$s"
+}
+WQ=/sys/devices/virtual/workqueue/cpumask
+noyau_ecarter() {   # unbound workqueues and movable kernel threads on the desktop's cpus
+    local d n=0
+    if [ -w "$WQ" ]; then
+        [ -s "$ETAT.wq" ] || cat "$WQ" > "$ETAT.wq"
+        masque_sysfs "$AUTRES" > "$WQ" 2>/dev/null || alerte "workqueue cpumask refused"
+    fi
+    for d in /proc/[0-9]*; do
+        [ -z "$( { tr -d '\0' < "$d/cmdline" | head -c1; } 2>/dev/null)" ] || continue          # kernel threads only
+        [ "$(awk '/^Cpus_allowed_list:/ { print $2 }' "$d/status" 2>/dev/null)" = "$TOUS" ] || continue   # per-cpu: left alone
+        if taskset -pc "$AUTRES" "${d#/proc/}" >/dev/null 2>&1; then echo "${d#/proc/}" >> "$ETAT.kthr"; n=$((n + 1)); fi
+    done
+    dire "5. kernel housekeeping on $AUTRES: unbound workqueues, $n kernel threads (the per-cpu ones stay)"
+}
+noyau_rendre() {
+    local p
+    [ -s "$ETAT.wq" ] && [ -w "$WQ" ] && cat "$ETAT.wq" > "$WQ" 2>/dev/null
+    [ -f "$ETAT.kthr" ] && while read -r p; do taskset -pc "$TOUS" "$p" >/dev/null 2>&1; done < "$ETAT.kthr"
+    rm -f "$ETAT.wq" "$ETAT.kthr"
+}
+
+# --- the real-time guard (see the header) -----------------------------------------------------------
+GARDE_UNITE=c54x-garde
+GARDE_LOG=/run/c54x-isol.garde
+GARDE_BUSY="${GARDE_BUSY:-90}"
+GARDE_DUREE="${GARDE_DUREE:-5}"
+GARDE_NICE="${GARDE_NICE:--10}"
+TEMP_MAX="${TEMP_MAX:-95}"
+noter() { logger -t "$GARDE_UNITE" -- "$*" 2>/dev/null; printf '%s %s\n' "$(date +%T)" "$*" >> "$GARDE_LOG"; }
+# the real-time (FIFO/RR) threads of user processes: "tid tid ..."
+threads_rt() {
+    local tid cls
+    ps -eLo tid=,cls= 2>/dev/null | while read -r tid cls; do
+        case "$cls" in FF|RR) ;; *) continue ;; esac
+        [ -n "$( { tr -d '\0' < "/proc/$tid/cmdline" | head -c1; } 2>/dev/null)" ] && echo "$tid"
+    done | paste -sd' '
+}
+nom_thread() { printf '%s[%s/%s]' "$(cat "/proc/$1/comm" 2>/dev/null)" "$(awk '/^Tgid:/ { print $2 }' "/proc/$1/status" 2>/dev/null)" "$1"; }
+retrograder() {   # $1 = tid, $2 = why
+    local nom; nom="$(nom_thread "$1")"
+    chrt -o -p 0 "$1" 2>/dev/null || return 0
+    renice -n "$GARDE_NICE" -p "$1" >/dev/null 2>&1
+    noter "$nom: SCHED_FIFO -> SCHED_OTHER nice $GARDE_NICE ($2)"
+}
+retrograder_tout() {   # $1 = why
+    local t; noter "EMERGENCY: $1 -> every real-time thread back to SCHED_OTHER"
+    for t in $(threads_rt); do retrograder "$t" "emergency"; done
+}
+temperature() {   # Tctl / package in degrees, empty if unknown
+    local h; for h in /sys/class/hwmon/hwmon*; do
+        case "$(cat "$h/name" 2>/dev/null)" in k10temp|zenpower|coretemp) echo $(( $(cat "$h/temp1_input" 2>/dev/null || echo 0) / 1000 )); return ;; esac
+    done
+}
+garde() {
+    local tick t l s tid up0 up1 dt c
+    tick="$(getconf CLK_TCK)"
+    declare -A prec=() chaud=()
+    noter "guard active: a real-time thread above $GARDE_BUSY % for ${GARDE_DUREE} s goes back to SCHED_OTHER; kernel stall or Tctl > $TEMP_MAX °C: all of them"
+    # the kernel log, from now on: stalls -> emergency
+    ( dmesg -W 2>/dev/null || dmesg -w 2>/dev/null ) | while read -r l; do
+        case "$l" in
+            *"detected stall"*|*"rcu: INFO"*|*"workqueue lockup"*|*"soft lockup"*|*"hard LOCKUP"*|*"blocked for more than"*)
+                retrograder_tout "kernel: ${l:0:140}" ;;
+            *"RT throttling activated"*) noter "kernel: RT throttling activated (a real-time cpu is saturated)" ;;
+        esac
+    done &
+    read -r up0 _ < /proc/uptime; up0=${up0/./}
+    while :; do
+        sleep 1
+        read -r up1 _ < /proc/uptime; up1=${up1/./}; dt=$(( up1 - up0 )); up0=$up1; [ "$dt" -gt 0 ] || dt=1   # centiseconds
+        declare -A cur=()
+        for tid in $(threads_rt); do
+            read -r l < "/proc/$tid/stat" 2>/dev/null || continue
+            s=${l##*) }; set -- $s
+            cur[$tid]=$(( ${12} + ${13} ))
+        done
+        for tid in "${!cur[@]}"; do
+            # busy % = ticks * 100 / (tick * dt / 100)
+            if [ -n "${prec[$tid]:-}" ] && [ $(( (cur[$tid] - prec[$tid]) * 10000 )) -ge $(( GARDE_BUSY * tick * dt )) ]; then
+                chaud[$tid]=$(( ${chaud[$tid]:-0} + 1 ))
+            else
+                chaud[$tid]=0
+            fi
+            if [ "${chaud[$tid]}" -ge "$GARDE_DUREE" ]; then
+                retrograder "$tid" "busy above $GARDE_BUSY % of its cpu for ${GARDE_DUREE} s: it never sleeps"; chaud[$tid]=0
+            fi
+        done
+        prec=(); for tid in "${!cur[@]}"; do prec[$tid]=${cur[$tid]}; done
+        for tid in "${!chaud[@]}"; do [ -n "${cur[$tid]:-}" ] || unset "chaud[$tid]"; done
+        unset cur
+        c="$(temperature)"
+        if [ -n "$c" ] && [ "$c" -gt "$TEMP_MAX" ]; then retrograder_tout "Tctl $c °C > $TEMP_MAX °C"; sleep 30; fi
+    done
+}
+garde_lancer() {
+    systemctl stop "$GARDE_UNITE" 2>/dev/null; systemctl reset-failed "$GARDE_UNITE" 2>/dev/null
+    if [ "${GARDE:-1}" != 1 ]; then alerte "6. NO guard (GARDE=0): a SCHED_FIFO thread that never sleeps can freeze the machine"; return 0; fi
+    systemd-run --quiet --collect --unit="$GARDE_UNITE" --slice=system.slice \
+        -p CPUSchedulingPolicy=fifo -p CPUSchedulingPriority=50 -p CPUAffinity="${AUTRES//,/ }" \
+        --setenv=GARDE_BUSY="$GARDE_BUSY" --setenv=GARDE_DUREE="$GARDE_DUREE" --setenv=GARDE_NICE="$GARDE_NICE" \
+        --setenv=TEMP_MAX="$TEMP_MAX" /bin/bash "$(readlink -f "$0")" garde \
+        && dire "6. guard $GARDE_UNITE: spinning real-time threads (> $GARDE_BUSY % for ${GARDE_DUREE} s) back to SCHED_OTHER; kernel stall / Tctl > $TEMP_MAX °C: all" \
+        || alerte "6. the guard $GARDE_UNITE did not start: the chain runs SCHED_FIFO without a net"
+}
+
 frequence() {   # $1 = performance | restore
     local g
     if [ "$1" = performance ]; then
@@ -292,6 +422,8 @@ on)
     [ -s "$ETAT.gouv" ] || frequence performance
     dire "4. governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd,)$(command -v powerprofilesctl >/dev/null && echo ", profile $(powerprofilesctl get)")"
     secteur || alerte "on BATTERY: the laptop throttles, plug it in"
+    noyau_ecarter
+    garde_lancer
     dire "a chain (and its bridge) already running keeps its old placement: ./run.sh --stop then ./run.sh" ;;
 adopter)
     [ "$(id -u)" = 0 ] || rater "root needed"
@@ -305,7 +437,8 @@ off)
     done
     reseau_oter
     systemctl daemon-reload
-    irq_rendre; frequence restore; rm -f "$ENVF"
+    systemctl stop "$GARDE_UNITE" 2>/dev/null
+    irq_rendre; noyau_rendre; frequence restore; rm -f "$ENVF"
     dire "isolation removed: every cpu ($TOUS) back to the system, governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd,)" ;;
 status)
     if [ -r "$ENVF" ]; then dire "ON: chain $CPUS, bridge ${C_PONT:-not isolated}, core network ${C_CN:-not isolated}, rest $AUTRES, FIFO ${FIFO:-none}"
@@ -320,6 +453,9 @@ status)
         "$(( $(cat /proc/sys/kernel/sched_rt_runtime_us) / 1000 ))" "$_rt" \
         "$(for c in $(etendre "$_rt"); do grep -A12 "^rt_rq\[$c\]" /sys/kernel/debug/sched/debug 2>/dev/null | awk '/rt_throttled/ { printf "%d ", $3 }'; done)" \
         "$(dmesg 2>/dev/null | grep -c 'RT throttling activated')"
+    printf '  guard         %s (%s)\n' "$(systemctl is-active "$GARDE_UNITE" 2>/dev/null)" "$GARDE_UNITE; journalctl -t $GARDE_UNITE"
+    [ -s "$GARDE_LOG" ] && tail -5 "$GARDE_LOG" | sed 's/^/    /'
+    printf '  housekeeping  workqueues %s, temperature %s °C\n' "$(cat "$WQ" 2>/dev/null)" "$(temperature)"
     printf '  boot          isolcpus=%s nohz_full=%s\n' "$(cat /sys/devices/system/cpu/isolated)" "$(grep -v null /sys/devices/system/cpu/nohz_full 2>/dev/null)"
     echo "  bridge (pid cpus-allowed on-cpu policy rtprio command; none = not running):"
     for p in $(pgrep -f 'pont/(pont_dsp|pont|air)\.py' 2>/dev/null); do
@@ -343,6 +479,9 @@ status)
         echo "  processes outside $TRANCHE_RESEAU still ALLOWED on the core network's cpus (none = clean):"
         intrus "$C_CN" "^/$TRANCHE_RESEAU(/|\$)"
     fi ;;
+garde)
+    [ "$(id -u)" = 0 ] || rater "root needed"
+    garde ;;
 grub)
     cat <<EOF
 Step 5, only if 'on' is not enough (kernel threads and the timer tick still visit the reserved cpus).
@@ -357,5 +496,5 @@ cpus${C_CN:+ ($C_CN)} are left out on purpose: isolcpus switches the load balanc
 to spread over their cpus. Undo: remove the three options, update-grub, reboot.
 EOF
     ;;
-*)  sed -n '2,37p' "$0" ;;
+*)  sed -n '2,/^set -uo pipefail/p' "$0" | grep '^#' ;;
 esac
