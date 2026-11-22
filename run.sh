@@ -616,7 +616,41 @@ etape4_trx() {   # OSMO_TRX=1: the host app transceiver, instead of the mobile
     dire "4. transceiver  pid $(pid_de transceiver)  L1CTL $L2_SOCK  TRXD 5700-5702 <- osmo-bts-trx  timeslots RX $OSMO_TRX_TS_MASK TX ${OSMO_TRX_TX_MASK:-0xe3}  bsic ${OSMO_TRX_BSIC:-?}  ($OSMO_TRX_ARGS)${args_ts1:+  + phone 2 TS1: $args_ts1}"
 }
 
+# CALYPSO_L2_CLIENT (start.sh --ccch_scan | --bcch_scan | --cell_log, exported by
+# startup_scripts/06-banc-dsp-menu.sh): another osmocom-bb layer-2 client takes the
+# L1CTL socket INSTEAD of mobile (one client only: they would fight over the socket).
+# Same pid/log names as the mobile (mobile.pid, mobile.log), so --stop/--status hold.
+#   ccch_scan  listens to the CCCH, GSMTAP to 127.0.0.1  (osmocom-bb burst_ind)
+#   bcch_scan  reads the BCCH of the radio-plan ARFCN, VTY like the mobile
+#   cell_log   cell log in $RUNDIR/cell_log.txt (CELL_LOG_ARGS, default -n: no RACH)
+etape4_l2_client() {
+    local c="$1" bin args=() arfcn
+    bin="$(command -v "$c" || echo "/usr/local/bin/$c")"
+    [ -x "$bin" ] || rater "$c missing ($bin): osmocom-bb burst_ind (component burst_ind of the build)"
+    [ -S "$L2_SOCK" ] || rater "no L1CTL socket $L2_SOCK (step 3 first)"
+    arfcn="$( . /etc/osmocom/radio-plan.env 2>/dev/null; echo "${PLAN_ARFCN:-}")"
+    args=(-s "$L2_SOCK" -i 127.0.0.1)
+    case "$c" in
+        bcch_scan) [ -n "$arfcn" ] && args+=(-a "$arfcn"); args+=(-v $((4247 + 100 * (INSTANCE - 1)))) ;;
+        cell_log)  args+=(-l "$RUNDIR/cell_log.txt"); read -r -a _cl <<<"${CELL_LOG_ARGS:--n}"; args+=("${_cl[@]}") ;;
+    esac
+    vitrine mobile
+    ${PRIO[@]+"${PRIO[@]}"} stdbuf -oL "$bin" "${args[@]}" > "$RUNDIR/mobile.log" 2>&1 &
+    echo $! > "$RUNDIR/mobile.pid"
+    sleep 2
+    vivant mobile || rater "$c stopped: $(tail -3 "$RUNDIR/mobile.log" | tr '\n' ' ')"
+    dire "4. $c (instead of mobile)  pid $(pid_de mobile)  $bin ${args[*]}  log $RUNDIR/mobile.log"
+}
+
 etape4() {   # the mobile
+    case "${CALYPSO_L2_CLIENT:-mobile}" in
+        mobile) ;;
+        ccch_scan|bcch_scan|cell_log)
+            if [ -z "$FIRMWARE_FLASH" ] && [ -z "$FIRMWARE_APP" ] && [ "$OSMO_TRX" != 1 ]; then
+                etape4_l2_client "$CALYPSO_L2_CLIENT"; return
+            fi ;;
+        *) rater "CALYPSO_L2_CLIENT=$CALYPSO_L2_CLIENT unknown (mobile|ccch_scan|bcch_scan|cell_log)" ;;
+    esac
     [ -n "$FIRMWARE_FLASH" ] && { dire "4. (FIRMWARE_FLASH: L23 stack and UI inside the Magnetite firmware, no mobile; C139 screen: tools/osmo-c123-gtk.py --modele c139 --instance $INSTANCE)"; return; }
     [ -n "$FIRMWARE_APP" ] && { dire "4. (FIRMWARE_APP=$FIRMWARE_APP: no mobile; screen /dev/shm/calypso_lcd, keys /tmp/calypso_keys.sock, window: tools/osmo-c123-gtk.py)"; return; }
     [ "$OSMO_TRX" = 1 ] && { etape4_trx; return; }
