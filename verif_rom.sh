@@ -29,7 +29,6 @@ REF_SHA256=e35798f50fd0a29aa61cd53e417c010d7f172582c7bc055211daab8af1e05470
 MIRRORS=(
     # gist pinned to its revision: the content of this URL can no longer change
     https://gist.githubusercontent.com/bbaranoff/ba2746dd4fe6117475d95f791bf7df35/raw/16a4e486776315ecdf6c8972c58e877fa19785c5/calypso_dsp.txt
-    https://raw.githubusercontent.com/bbaranoff/fc-magnetite/main/freecalypso-env/dsp-rom-3606-dump.txt
 )
 LOCAUX=(); GARDER=""
 while [ $# -gt 0 ]; do
