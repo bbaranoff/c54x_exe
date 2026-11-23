@@ -40,7 +40,7 @@
 #   MODE=grgsm ./run.sh      gr-gsm setup           ./run.sh --logs      follow the logs
 #   PONT=1 ./run.sh          with the bridge        ./run.sh --stop      stop everything, clean up
 #   ./run.sh --step N        a single step (the previous ones must be running)
-# Variables: MODE, PONT, LOCKSTEP (1: QEMU waits for the DSP on every frame), INSNS (80000),
+# Variables: MODE, PONT, LOCKSTEP (1: QEMU waits for the DSP on every frame), INSNS (auto: freq/nproc),
 #   VERB (-v), IQ (none|fcch|cell|...), AMP (30000),
 #   QOSMO, FIRMWARE_ELF, FIRMWARE_BIN, OSMOCON, MOBILE, MOBILE_CFG, PONT_PY, RUNDIR, L2_SOCK.
 #   UL_RAW (1: the bridge sends the ROM's final bursts as they are; 0: host coding), MONTANT_EFFACE_TASK_RA.
@@ -321,7 +321,27 @@ GDB_TELNET_PY="${GDB_TELNET_PY:-$QOSMO/tools/gdb-telnet.py}"
 # 120000 by default: the budget of the TRX's DSP (instance 1, booted at the first IDLE); a smaller
 # budget (16000) leaves the DSP of the Magnetite instance in "occupe boot" forever, and a TCH
 # frame needs up to 87000 insn/frame (see start-native.sh).
-INSNS="${INSNS:-130000}"
+# INSNS=auto (default): the budget follows the machine. The maximum frequency of the DSP's cpu (the one
+# isoler.sh reserves for it, RT_CPUS_DSP; else the first of RT_CPUS; else cpu 0) divided by nproc --all
+# (every cpu, not the affinity mask run.sh is re-executed under), times one TDMA frame (4.615 ms):
+#     Ryzen 7 5800U: 4507 MHz / 16 = 282 MHz -> 1 300 000 insn/frame.
+# It is a CEILING, not a cost: c54x_run stops as soon as the DSP reaches IDLE (and fast-forwards its
+# idle loop), so a frame that needs 87000 still costs 87000 (rejouer, 2000 frames: 0.05 ms/frame with
+# 130000 or 1300000, same SB decoded). Never below 130000 (the measured need, see above). INSNS=N forces it.
+insns_auto() {
+    local cpu khz n
+    cpu="${RT_CPUS_DSP:-${RT_CPUS:-0}}"; cpu="${cpu%%[,-]*}"
+    khz="$(cat "/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq" 2>/dev/null)"
+    [ -n "$khz" ] || khz="$(awk -F: '/^cpu MHz/ { printf "%d", $2 * 1000; exit }' /proc/cpuinfo)"
+    n="$(nproc --all 2>/dev/null || echo 1)"
+    [ -n "$khz" ] && [ "$khz" -gt 0 ] || { echo 130000; return; }
+    awk -v k="$khz" -v n="$n" 'BEGIN { v = int(k * 1000 / n * 0.004615); print (v < 130000 ? 130000 : v) }'
+}
+INSNS_SOURCE=
+if [ -z "${INSNS:-}" ] || [ "$INSNS" = auto ]; then
+    INSNS="$(insns_auto)"
+    INSNS_SOURCE=" = max freq of cpu ${RT_CPUS_DSP:-${RT_CPUS:-0}} / $(nproc --all) cpus x 4.615 ms"
+fi
 # DSP/QEMU lockstep by default (LOCKSTEP=0 for wall-clock mode): the emulated C54x costs
 # ~6.7 ms per frame against 4.615 ms of real time, so on the wall clock QEMU skips 3 frames
 # out of 4 ("DSP en retard, tick saute"), the ROM only sees one frame in 4 to 6, its FB
@@ -381,7 +401,7 @@ etape1() {   # the DSP (dsp setup only)
     # shm at 0666: the umask lowers c54x_exe's 0666 request to 0644, which prevents a harvard.sh
     # run under the user account from writing the API RAM (d@!, sb/si3 demos). Forced here.
     attendre 3 test -e "$DSP_SHM" && chmod 0666 "$DSP_SHM" 2>/dev/null || true
-    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/frame, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
+    dire "1. c54x_exe --arm  pid $(pid_de dsp)  ($INSNS insn/frame$INSNS_SOURCE, iq=$IQ, $DSP_SHM, $DSP_SOCK)"; bruit_dire_dsp
 }
 
 etape2() {   # the ARM
